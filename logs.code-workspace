@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"cstdio": "c",
+			"queue.h": "c",
+			"stat.h": "c"
+		}
+	}
+}

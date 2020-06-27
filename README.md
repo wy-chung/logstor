@@ -1,1 +1,2 @@
-# logstor
+# lstl
+Log-Structured Translation Layer

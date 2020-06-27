@@ -1,0 +1,6 @@
+For user level logstor
+	The source code should be placed in sbin/ggate/ggatelog.
+
+For kernel level logstor
+	The source cdoe should be placed in sys/geom/logstor.
+
