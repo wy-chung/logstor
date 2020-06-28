@@ -36,7 +36,7 @@ void my_break(const char * fname, int line_num, bool bl_panic);
 #define PANIC()
 #endif
 
-#define	SECTOR_SIZE		0x1000		// 4K
+#define	SECTOR_SIZE	0x1000		// 4K
 
 extern uint32_t gdb_cond0;	// for debug
 extern uint32_t gdb_cond1;	// for debug

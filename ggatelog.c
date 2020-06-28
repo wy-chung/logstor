@@ -220,6 +220,7 @@ g_gatelog_rescue(void)
 	struct g_gate_ctl_cancel ggioc;
 
 	logstor_init(log_path);
+	logstor_open();
 
 	ggioc.gctl_version = G_GATE_VERSION;
 	ggioc.gctl_unit = log_unit;
