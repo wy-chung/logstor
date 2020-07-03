@@ -25,7 +25,8 @@ e-mail: wuyang.chung1@gmail.com
 #endif
 
 uint16_t *ba_write_count;	// write count for each block
-uint32_t *ba_expect;	// expected value for blocks
+uint32_t *ba2i;	// stored value for ba
+uint32_t *i2ba;	// ba for iteration i
 
 static uint64_t rdtsc(void);
 
@@ -45,10 +46,15 @@ test1(int n, unsigned max_block)
 	uint32_t buf[SECTOR_SIZE/4];
 
 	memset(ba_write_count, 0, max_block * sizeof(*ba_write_count));
-	memset(ba_expect, 0, max_block * sizeof(*ba_expect));
+	memset(ba2i, 0, max_block * sizeof(*ba2i));
+	memset(buf, 0, sizeof(buf));
 
 	// writing data to logstor
-	loop_count = max_block * 0.6;
+	loop_count = max_block * 1.5;
+	if (i2ba == NULL) {
+		i2ba = malloc(loop_count * sizeof(*i2ba));
+		ASSERT(i2ba != NULL);
+	}
 	overwrite_count = 0;
 	printf("writing...\n");
 	start_time = rdtsc();
@@ -62,6 +68,7 @@ test1(int n, unsigned max_block)
 #else
 		ba = i;
 #endif
+		i2ba[i] = ba;
 		if (ba_write_count[ba] != 0) {
 #if 1
 			++overwrite_count;
@@ -70,9 +77,11 @@ test1(int n, unsigned max_block)
 #endif
 		}
 		++ba_write_count[ba];
-		ba_expect[ba] = i;
+		ba2i[ba] = i;
 
-		buf[4] = i;
+		buf[4] = ba % 4;
+		buf[5] = i;
+		buf[6] = ba;
 		buf[ba % 4] = i;
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
 		logstor_write_test(ba, (char *)buf);
@@ -99,7 +108,7 @@ test1(int n, unsigned max_block)
 	printf("reading...\n");
 	start_time = rdtsc();
 	i_max = 0;
-	for (ba = 0 ; ba < max_block; ba += 0x40) {
+	for (ba = 0 ; ba < max_block; ba += 1) {
 		if ( (ba % 0x10000) == 0)
 			printf("r%d %7d/%7d\n", n, ba, max_block);
 		if (ba_write_count[ba] > 0) {
@@ -107,10 +116,10 @@ test1(int n, unsigned max_block)
 				i_max = ba_write_count[ba];
 			logstor_read_test(ba, (char *)buf);
 			++read_count;
-			act = buf[4];
-			if (ba_expect[ba] != act) {
-				printf("%s: ERROR miscompare: ba %u, exp %u, act %u\n",
-				    __func__, ba, ba_expect[ba], act);
+			act = buf[5];
+			if (ba2i[ba] != act) {
+				printf("%s: ERROR miscompare: ba %u, exp_i %u, get_i %u\n",
+				    __func__, ba, ba2i[ba], act);
 				PANIC();
 			} else {
 				ASSERT(buf[ba%4] == act);
@@ -136,8 +145,8 @@ main(int argc, char *argv[])
 	max_block = superblock_init();
 	ba_write_count = malloc(max_block * sizeof(*ba_write_count));
 	ASSERT(ba_write_count != NULL);
-	ba_expect = malloc(max_block * sizeof(*ba_expect));
-	ASSERT(ba_expect != NULL);
+	ba2i = malloc(max_block * sizeof(*ba2i));
+	ASSERT(ba2i != NULL);
 
 	for (i = 0; i<20; i++) {
 		printf("### test %d\n", i);
@@ -147,7 +156,7 @@ main(int argc, char *argv[])
 		if (break_for_loop)
 			break;
 	}
-	free(ba_expect);
+	free(ba2i);
 	free(ba_write_count);
 	logstor_fini();
 

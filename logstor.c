@@ -54,8 +54,10 @@ void my_break(const char * fname, int line_num, bool bl_panic)
 #define SEG_SUM_OFF	(SECTORS_PER_SEG - 1) // segment summary offset in segment
 #define	SEG_SIZE	0x400000		// 4M
 #define	SECTORS_PER_SEG	(SEG_SIZE/SECTOR_SIZE) // 1024
-#define SEC2SEG_SHIFT	10
+#define SA2SEGA_SHIFT	10
 #define BLOCKS_PER_SEG	(SEG_SIZE/SECTOR_SIZE - 1)
+#define GC_WINDOW	4
+#define GC_AGE_LIMIT	4
 
 #define	META_BASE	0x40000000u	// metadata block start address
 #define	META_INVALID	0		// invalid metadata address
@@ -89,6 +91,7 @@ struct _superblock {
 	   The segments are treated as circular buffer
 	 */
 	int32_t	seg_cnt;	// total number of segments
+	int32_t seg_free_cnt;	// number of free segments
 	int32_t	seg_alloc_p;	// allocate this segment
 	int32_t	seg_clean_p;	// clean this segment
 	/*
@@ -120,12 +123,14 @@ struct _seg_sum {
 	// reverse map SECTORS_PER_SEG - 1 is not used so we store something here
 	struct {
 		uint16_t ss_gen;  // sequence number. used for redo after system crash
-		uint16_t ss_alloc_p; // allocate sectore at this location
+		uint16_t ss_alloc_p; // allocate sector at this location
 	};
 
 	// below is not stored on disk
 	struct _ss_soft {
-		uint32_t seg_sa;	// the segment address of the segment containing this segment summary
+		TAILQ_ENTRY(_seg_sum) queue;
+		uint32_t seg_sa; // the sector sa of the segment containing this segment summary
+		unsigned live_count;		
 	} ss_soft;
 };
 
@@ -188,11 +193,12 @@ struct _fbuf { // file buffer
 	logstor soft control
 */
 struct g_logstor_softc {
-	int32_t seg_free_cnt;	// number of free segments
-	struct _seg_sum seg_sum_hot;// segment summary for the hot segment
 	struct _seg_sum seg_sum_cold;// segment summary for the cold segment
+	struct _seg_sum seg_sum_hot;// segment summary for the hot segment
 	uint8_t *seg_age;
-
+	
+	TAILQ_HEAD(, _seg_sum) gc_ss_head;
+	struct _seg_sum gc_ss[GC_WINDOW];
 	unsigned char gc_disabled;
 	uint32_t gc_low_water;
 	uint32_t gc_high_water;
@@ -237,8 +243,8 @@ static struct g_logstor_softc sc;
 
 static int _logstor_read(unsigned ba, char *data, int size);
 static int _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum);
-//static uint32_t logstor_ba2sa(uint32_t ba);
-//static uint32_t logstor_sa2ba(uint32_t sa);
+static uint32_t seg_alloc_get_sa(void);
+static uint32_t seg_to_clean_get_sa(void);
 static void file_mod_flush(void);
 static void file_mod_init(void);
 static void file_mod_fini(void);
@@ -250,6 +256,7 @@ static void seg_sum_write(struct _seg_sum *seg_sum);
 static int superblock_read(void);
 static void superblock_write(void);
 static void gc_check(void);
+static void gc_seg_clean(struct _seg_sum *seg_sum);
 
 static void disk_read (uint32_t sa, void *buf, unsigned size);
 static void disk_write(uint32_t sa, const void *buf, unsigned size);
@@ -286,7 +293,7 @@ g_gate_mediasize(int fd)
 #endif
 
 /*******************************
- *        logstor              *         
+ *        logstor              *
  *******************************/
 
 /*
@@ -321,22 +328,26 @@ superblock_init(void)
 #endif
 	sb->seg_cnt = sector_cnt / SECTORS_PER_SEG;
 	ASSERT(sizeof(struct _superblock) + sb->seg_cnt < SECTOR_SIZE);
-	sc.seg_free_cnt = sb->seg_cnt - SEG_DATA_START;
+	sb->seg_free_cnt = sb->seg_cnt - SEG_DATA_START;
 
 	// the physical disk must have at least the space for the metadata
-	ASSERT(sc.seg_free_cnt * BLOCKS_PER_SEG >
+	ASSERT(sb->seg_free_cnt * BLOCKS_PER_SEG >
 	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT);
 
 	sb->max_block_cnt =
-	    sc.seg_free_cnt * BLOCKS_PER_SEG -
+	    sb->seg_free_cnt * BLOCKS_PER_SEG -
 	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT;
 	sb->max_block_cnt *= 0.9;
 #if defined(MY_DEBUG)
 	printf("%s: sector_cnt %u max_block_cnt %u\n",
 	    __func__, sector_cnt, sb->max_block_cnt);
 #endif
+	/*
+	    Initially SEG_DATA_START is cold segment and SEG_DATA_START + 1 is hot segment
+	    The starting clean point should point to hot segment.
+	*/
 	sb->seg_alloc_p = SEG_DATA_START;	// the segment to allocate
-	sb->seg_clean_p = SEG_DATA_START;	// the segment to clean
+	sb->seg_clean_p = SEG_DATA_START + 1;	// the segment to clean
 
 	// the root sector address for the files
 	for (i = 0; i < FD_COUNT; i++) {
@@ -403,19 +414,11 @@ logstor_open(void)
 	if (superblock_read() != 0) {
 		superblock_init();
 	}
-	sc.seg_sum_hot.ss_soft.seg_sa = sc.superblock.seg_alloc_p * SECTORS_PER_SEG;
-	sc.seg_sum_hot.ss_alloc_p = 0;
-	if (++sc.superblock.seg_alloc_p == sc.superblock.seg_cnt)
-		sc.superblock.seg_alloc_p = SEG_DATA_START;
-
-	sc.seg_sum_cold.ss_soft.seg_sa = sc.superblock.seg_alloc_p * SECTORS_PER_SEG; 
+	sc.seg_sum_cold.ss_soft.seg_sa = seg_alloc_get_sa(); 
 	sc.seg_sum_cold.ss_alloc_p = 0;
-	if (++sc.superblock.seg_alloc_p == sc.superblock.seg_cnt)
-		sc.superblock.seg_alloc_p = SEG_DATA_START;
 
-	sc.seg_free_cnt = sc.superblock.seg_clean_p - sc.superblock.seg_alloc_p;
-	if (sc.seg_free_cnt < 0)
-		sc.seg_free_cnt += sc.superblock.seg_cnt;
+	sc.seg_sum_hot.ss_soft.seg_sa = seg_alloc_get_sa();
+	sc.seg_sum_hot.ss_alloc_p = 0;
 
 	sc.data_write_count = sc.other_write_count = 0;
 	sc.gc_low_water = 8;
@@ -433,10 +436,8 @@ logstor_close(void)
 
 	file_mod_fini();
 
-	if (sc.seg_sum_hot.ss_alloc_p != 0)
-		seg_sum_write(&sc.seg_sum_hot);
-	if (sc.seg_sum_cold.ss_alloc_p != 0)
-		seg_sum_write(&sc.seg_sum_cold);
+	seg_sum_write(&sc.seg_sum_cold);
+	seg_sum_write(&sc.seg_sum_hot);
 
 	superblock_write();
 }
@@ -644,6 +645,15 @@ logstor_get_fbuf_miss(void)
 	return sc.fbuf_miss;
 }
 
+static void
+seg_sum_read(struct _seg_sum *seg_sum)
+{
+	uint32_t sa;
+
+	sa = seg_sum->ss_soft.seg_sa + SEG_SUM_OFF;
+	sc.my_read(sa, seg_sum, 1);
+}
+
 /*
   write out the segment summary
 */
@@ -658,13 +668,12 @@ seg_sum_write(struct _seg_sum *seg_sum)
 	sc.my_write(sa, (void *)seg_sum, 1);
 	sc.other_write_count++;
 
-	sc.seg_free_cnt--;
-	ASSERT(sc.seg_free_cnt > 0 && sc.seg_free_cnt < sc.superblock.seg_cnt);
+	sc.superblock.seg_free_cnt--;
+	ASSERT(sc.superblock.seg_free_cnt > 0 &&
+	    sc.superblock.seg_free_cnt < sc.superblock.seg_cnt);
 
-	seg_sum->ss_soft.seg_sa = sc.superblock.seg_alloc_p * SECTORS_PER_SEG;
+	seg_sum->ss_soft.seg_sa = seg_alloc_get_sa();
 	seg_sum->ss_alloc_p = 0;
-	if (++sc.superblock.seg_alloc_p == sc.superblock.seg_cnt)
-		sc.superblock.seg_alloc_p = SEG_DATA_START;
 }
 
 static int
@@ -766,54 +775,201 @@ ram_write(uint32_t sa, const void *buf, unsigned size)
 	memcpy(sc.ram_disk + (off_t)sa * SECTOR_SIZE , buf, size * SECTOR_SIZE);
 }
 
+static uint32_t
+seg_alloc_get_sa(void)
+{
+	uint32_t sega;
+
+	do {
+		sega = sc.superblock.seg_alloc_p;
+		if (++sc.superblock.seg_alloc_p == sc.superblock.seg_cnt)
+			sc.superblock.seg_alloc_p = SEG_DATA_START;
+		ASSERT(sc.superblock.seg_alloc_p < sc.superblock.seg_cnt);
+	} while (sc.seg_age[sega] != 0);
+
+	return sega * SECTORS_PER_SEG;	
+}
+
+static uint32_t
+seg_to_clean_get_sa(void)
+{
+	uint32_t sega;
+	uint32_t sega_hot, sega_cold;
+	struct _seg_sum seg_sum;
+
+	sega_hot = sc.seg_sum_hot.ss_soft.seg_sa >> SA2SEGA_SHIFT;
+	sega_cold = sc.seg_sum_cold.ss_soft.seg_sa >> SA2SEGA_SHIFT;
+again:
+	sega = sc.superblock.seg_clean_p;
+	if (++sc.superblock.seg_clean_p == sc.superblock.seg_cnt)
+		sc.superblock.seg_clean_p = SEG_DATA_START;
+	ASSERT(sc.superblock.seg_clean_p < sc.superblock.seg_cnt);
+
+	if (sega == sega_hot)
+		goto again;
+	if (sega == sega_cold)
+		goto again;
+
+	if (sc.seg_age[sega] >= GC_AGE_LIMIT) {
+		seg_sum.ss_soft.seg_sa = sega * SECTORS_PER_SEG;
+		seg_sum_read(&seg_sum); 
+		gc_seg_clean(&seg_sum);
+		if (sc.superblock.seg_free_cnt > sc.gc_high_water)
+			return SECTOR_INVALID;
+		goto again;
+	}
+
+	return sega * SECTORS_PER_SEG;
+}
+
 /*********************
 * Garbage collection *
 **********************/
 
 static void
-garbage_collection(void)
+gc_seg_clean(struct _seg_sum *seg_sum)
 {
-	uint32_t	ba;
+	uint32_t	ba, sa;
 	uint32_t	seg_sa;		// the sector address of the cleaning segment
-	struct _seg_sum seg_sum;	// the segment summary of the cleaning segment
 	int	i;
+	struct _fbuf *fbuf;
+	uint32_t buf[SECTOR_SIZE];
 
-//printf("\n%s >>>\n", __func__);
-	do {
-		seg_sa = sc.superblock.seg_clean_p * SECTORS_PER_SEG;
-		if (++sc.superblock.seg_clean_p == sc.superblock.seg_cnt)
-			sc.superblock.seg_clean_p = SEG_DATA_START;
-		ASSERT(sc.superblock.seg_clean_p < sc.superblock.seg_cnt);
-		// read the segment summary for the segment to clean
-		sc.my_read(seg_sa + SEG_SUM_OFF, &seg_sum, 1);
-
-		for (i = 0; i < seg_sum.ss_alloc_p; i++) {
-			ba = seg_sum.ss_rm[i];	// get the block address from reverse map
-			ASSERT((ba & 0x80000000u) == 0);
-			if (IS_META_ADDR(ba)) {
-				if (fbuf_ma2sa((union meta_addr)ba) == seg_sa + i) { // live metadata
-					struct _fbuf *buf = fbuf_get((union meta_addr)ba);
-					if (!buf->modified) {
-						// Set it as modified and the buf
-						// will be flushed to disk eventually.
-						buf->modified = true;
-						sc.fbuf_modified_count++;
-						if (!buf->accessed)
-							fbuf_flush(buf, &sc.seg_sum_cold);
-					}
-				}
-			} else {
-				char	buf[SECTOR_SIZE];
-				if (file_read_4byte(FD_ACTIVE, ba) == seg_sa + i) { // live data
-					sc.my_read(seg_sa + i, buf, 1);
-					_logstor_write(ba, buf, 1, &sc.seg_sum_cold);
+	seg_sa = seg_sum->ss_soft.seg_sa;
+	for (i = 0; i < seg_sum->ss_alloc_p; i++) {
+		ba = seg_sum->ss_rm[i];	// get the block address from reverse map
+		ASSERT((ba & 0x80000000u) == 0);
+		if (IS_META_ADDR(ba)) {
+			sa = fbuf_ma2sa((union meta_addr)ba); 
+			if (sa == seg_sa + i) { // live metadata
+				fbuf = fbuf_get((union meta_addr)ba);
+				if (!fbuf->modified) {
+					// Set it as modified and the buf
+					// will be flushed to disk eventually.
+					fbuf->modified = true;
+					sc.fbuf_modified_count++;
+					if (!fbuf->accessed)
+						fbuf_flush(fbuf, &sc.seg_sum_cold);
 				}
 			}
+		} else {
+			sa = file_read_4byte(FD_ACTIVE, ba); 
+			if (sa == seg_sa + i) { // live data
+				sc.my_read(seg_sa + i, buf, 1);
+				_logstor_write(ba, buf, 1, &sc.seg_sum_cold);
+			}
 		}
-		sc.seg_free_cnt++;
-//printf("%u\n", ba);
-		//gc_trim(seg_sa);
-	} while (sc.seg_free_cnt < sc.gc_high_water);
+	}
+	sc.superblock.seg_free_cnt++;
+	sc.seg_age[seg_sa >> SA2SEGA_SHIFT] = 0; // It's cleaned
+	//gc_trim(seg_sa);
+}
+
+/*
+  Input:  seg_sum->ss_soft.seg_sa
+  Output: seg_sum->ss_soft.live_count
+*/
+static void
+seg_live_count(struct _seg_sum *seg_sum)
+{
+	int	i;
+	uint32_t ba;
+	uint32_t seg_sa;
+	unsigned live_count = 0;
+	struct _fbuf *buf;
+
+	seg_sum_read(seg_sum);
+	seg_sa = seg_sum->ss_soft.seg_sa;
+	for (i = 0; i < seg_sum->ss_alloc_p; i++)
+	{
+		ba = seg_sum->ss_rm[i];	// get the block address from reverse map
+		if (IS_META_ADDR(ba)) {
+			if (fbuf_ma2sa((union meta_addr)ba) == seg_sa + i) { // live metadata
+				buf = fbuf_get((union meta_addr)ba);
+				if (!buf->modified && !buf->accessed)
+					live_count++;
+			}
+		} else {
+			if (file_read_4byte(FD_ACTIVE, ba) == seg_sa + i) // live data
+				live_count++;
+		}
+	}
+	seg_sum->ss_soft.live_count = live_count;
+}
+
+static void
+garbage_collection(void)
+{
+	struct _seg_sum *seg;
+	struct _seg_sum *seg_hot, *seg_head;
+	unsigned min, live_count;
+	int sega;	// segment address
+	uint32_t seg_sa;
+	int	i;
+	int same_head;
+
+//printf("\n%s >>>\n", __func__);
+	TAILQ_INIT(&sc.gc_ss_head);
+	for (i = 0; i < GC_WINDOW; i++) {
+		seg_sa = seg_to_clean_get_sa();
+		if (seg_sa == SECTOR_INVALID)
+			goto exit;
+		seg = &sc.gc_ss[i];
+		seg->ss_soft.seg_sa = seg_sa;
+		seg_live_count(seg);
+		TAILQ_INSERT_TAIL(&sc.gc_ss_head, seg, ss_soft.queue);
+	}
+
+	seg_head = &sc.gc_ss[0];
+	same_head = 0;
+	for (;;) {
+		// find the hottest segment
+		min = -1; // the maximum unsigned integer
+		TAILQ_FOREACH(seg, &sc.gc_ss_head, ss_soft.queue) {
+			live_count = seg->ss_soft.live_count;
+			if (live_count < min) {
+				min = live_count;
+				seg_hot = seg;
+			}
+		}
+		// clean the hottest segment and load next segment to clean
+		TAILQ_REMOVE(&sc.gc_ss_head, seg_hot, ss_soft.queue);
+		gc_seg_clean(seg_hot);
+		if (sc.superblock.seg_free_cnt > sc.gc_high_water)
+			goto exit;
+		seg_sa = seg_to_clean_get_sa();
+		if (seg_sa == SECTOR_INVALID)
+			goto exit;
+		seg_hot->ss_soft.seg_sa = seg_sa;
+		seg_live_count(seg_hot);
+		TAILQ_INSERT_TAIL(&sc.gc_ss_head, seg_hot, ss_soft.queue);
+
+		// if the head has not been changed for some time, make it cold
+		seg = TAILQ_FIRST(&sc.gc_ss_head);
+		if (seg == seg_head)
+			same_head++;
+		if (same_head > GC_WINDOW/2) {
+			TAILQ_REMOVE(&sc.gc_ss_head, seg, ss_soft.queue);
+			sega = seg->ss_soft.seg_sa >> SA2SEGA_SHIFT;
+			sc.seg_age[sega]++;
+			// load the next segment summary
+			seg_sa = seg_to_clean_get_sa();
+			if (seg_sa == SECTOR_INVALID)
+				goto exit;
+			seg->ss_soft.seg_sa = seg_sa;
+			seg_live_count(seg);
+			TAILQ_INSERT_TAIL(&sc.gc_ss_head, seg, ss_soft.queue);
+
+			seg_head = TAILQ_FIRST(&sc.gc_ss_head);
+			same_head = 0;
+		}
+	}
+exit:
+	TAILQ_FOREACH(seg, &sc.gc_ss_head, ss_soft.queue) {
+		seg_sa = seg->ss_soft.seg_sa;
+		sega = seg_sa >> SA2SEGA_SHIFT;
+		sc.seg_age[sega]++;
+	}
 //printf("%s <<<\n", __func__);
 }
 
@@ -834,7 +990,7 @@ gc_disable(void)
 static void
 gc_check(void)
 {
-	if (sc.seg_free_cnt <= sc.gc_low_water && !sc.gc_disabled) {
+	if (sc.superblock.seg_free_cnt <= sc.gc_low_water && !sc.gc_disabled) {
 		gc_disable();	// disable gargabe collection
 		garbage_collection();
 		gc_enable(); // enable gargabe collection
@@ -856,7 +1012,8 @@ file_mod_init(void)
 
 	sc.fbuf_hit = sc.fbuf_miss = 0;
 	sc.fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4)
-	    * 0.93; // change the percentage with caution
+	//    * 0.93; // change the percentage with caution
+	    * 1.01; // change the percentage with caution
 	sc.fbuf_modified_count = 0;
 #if defined(MY_DEBUG)
 	sc.cir_queue_cnt = sc.fbuf_count;
