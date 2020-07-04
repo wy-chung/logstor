@@ -48,6 +48,11 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
   #endif
 }
 #endif
+/*
+  Even with @fbuf_ratio set to 1, there will still be some fbuf_flush called
+  during fbuf_alloc
+*/
+static double fbuf_ratio = 1; // the ration of allocated and needed fbufs
 
 uint32_t gdb_cond0;
 uint32_t gdb_cond1;
