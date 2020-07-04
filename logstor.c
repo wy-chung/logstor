@@ -45,6 +45,11 @@ void my_break(const char * fname, int line_num, bool bl_panic)
   #endif
 }
 #endif
+/*
+  Even with @fbuf_ratio set to 1, there will still be some fbuf_flush called
+  during fbuf_alloc
+*/
+static double fbuf_ratio = 1; // the ration of allocated and needed fbufs
 
 #define	SIG_LOGSTOR	0x4C4F4753	// "LOGS": Log-Structured Storage
 #define	VER_MAJOR	0
@@ -827,8 +832,7 @@ file_mod_init(void)
 	unsigned i;
 
 	sc.fbuf_hit = sc.fbuf_miss = 0;
-	sc.fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4)
-	    * 0.93; // change the percentage with caution
+	sc.fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4) * fbuf_ratio;
 	sc.fbuf_modified_count = 0;
 #if defined(MY_DEBUG)
 	sc.cir_queue_cnt = sc.fbuf_count;
@@ -1022,6 +1026,7 @@ ma_index_set(union meta_addr *ma, unsigned depth, unsigned index)
 	ma->uint32 |= index;
 }
 
+#if 0
 static uint32_t
 fbuf_ma2sa(union meta_addr ma)
 {
@@ -1056,6 +1061,32 @@ get_sa:
 	}
 	return sa;
 }
+#else
+static uint32_t
+fbuf_ma2sa(union meta_addr ma)
+{
+	struct _fbuf *buf, *pbuf;
+	int pindex;		//index in the parent indirect block
+	uint32_t sa;
+
+	switch (ma.depth)
+	{
+	case 0:
+		sa = sc.superblock.ftab[ma.fd];
+		break;
+	case 1:
+	case 2:
+		buf = fbuf_get(ma);
+		pbuf = buf->parent;
+		pindex = ma_index_get(ma, ma.depth - 1);
+		sa = pbuf->data[pindex];
+		break;
+	default:
+		PANIC();
+	}
+	return sa;
+}
+#endif
 
 static void
 fbuf_hash_insert(struct _fbuf *buf, unsigned key)

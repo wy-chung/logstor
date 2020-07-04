@@ -23,32 +23,33 @@ e-mail: wuyang.chung1@gmail.com
 #else
 	#define	RAND_SEED	3
 #endif
+double loop_ratio = 0.5; // loop_count / max_block;
 
 uint16_t *ba_write_count;	// write count for each block
-uint32_t *ba_expect;	// expected value for blocks
+uint32_t *ba2i;	// stored value for ba
+uint32_t *i2ba;	// ba for iteration i
 
 static uint64_t rdtsc(void);
 
-void
-test1(int n, unsigned max_block)
+static void
+test_write(int n, unsigned max_block)
 {
 	uint32_t ba;		// block address
-	uint32_t act;
 	int	overwrite_count;
-	int	read_count;
 	uint64_t start_time;
 	unsigned i;
 	unsigned loop_count;
-	uint32_t i_max;
 	unsigned data_write_count, other_write_count;
 	unsigned fbuf_hit, fbuf_miss;
 	uint32_t buf[SECTOR_SIZE/4];
 
-	memset(ba_write_count, 0, max_block * sizeof(*ba_write_count));
-	memset(ba_expect, 0, max_block * sizeof(*ba_expect));
-
 	// writing data to logstor
-	loop_count = max_block * 0.6;
+	loop_count = max_block * loop_ratio;
+	if (i2ba == NULL) {
+		i2ba = malloc(loop_count * sizeof(*i2ba));
+		memset(i2ba, 0, loop_count * sizeof(*i2ba));
+		ASSERT(i2ba != NULL);
+	}
 	overwrite_count = 0;
 	printf("writing...\n");
 	start_time = rdtsc();
@@ -62,6 +63,7 @@ test1(int n, unsigned max_block)
 #else
 		ba = i;
 #endif
+		i2ba[i] = ba;
 		if (ba_write_count[ba] != 0) {
 #if 1
 			++overwrite_count;
@@ -70,9 +72,11 @@ test1(int n, unsigned max_block)
 #endif
 		}
 		++ba_write_count[ba];
-		ba_expect[ba] = i;
+		ba2i[ba] = i;
 
-		buf[4] = i;
+		buf[4] = ba % 4;
+		buf[5] = i;
+		buf[6] = ba;
 		buf[ba % 4] = i;
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
 		logstor_write_test(ba, (char *)buf);
@@ -92,14 +96,25 @@ test1(int n, unsigned max_block)
 	    (double)(data_write_count + other_write_count) / data_write_count);
 	printf("\n");
 
-	//logstor_check();
+
+}
+
+static void 
+test_read(int n, unsigned max_block)
+{
+	uint64_t start_time;
+	int	read_count;
+	uint32_t i_max;
+	uint32_t ba;		// block address
+	uint32_t act;
+	uint32_t buf[SECTOR_SIZE/4];
 
 	// reading data from logstor
 	read_count = 0;
 	printf("reading...\n");
 	start_time = rdtsc();
 	i_max = 0;
-	for (ba = 0 ; ba < max_block; ba += 0x40) {
+	for (ba = 0 ; ba < max_block; ba += 1) {
 		if ( (ba % 0x10000) == 0)
 			printf("r%d %7d/%7d\n", n, ba, max_block);
 		if (ba_write_count[ba] > 0) {
@@ -107,10 +122,10 @@ test1(int n, unsigned max_block)
 				i_max = ba_write_count[ba];
 			logstor_read_test(ba, (char *)buf);
 			++read_count;
-			act = buf[4];
-			if (ba_expect[ba] != act) {
+			act = buf[5];
+			if (ba2i[ba] != act) {
 				printf("%s: ERROR miscompare: ba %u, exp %u, act %u\n",
-				    __func__, ba, ba_expect[ba], act);
+				    __func__, ba, ba2i[ba], act);
 				PANIC();
 			} else {
 				ASSERT(buf[ba%4] == act);
@@ -120,6 +135,18 @@ test1(int n, unsigned max_block)
 	}
 	printf("elapse time %lu ticks\n", rdtsc()-start_time);
 	printf("read_count %d i_max %u\n\n", read_count, i_max);
+}
+
+static void
+test(int n, unsigned max_block)
+{
+
+	memset(ba_write_count, 0, max_block * sizeof(*ba_write_count));
+	memset(ba2i, 0, max_block * sizeof(*ba2i));
+
+	test_write(n, max_block);
+	//logstor_check();
+	test_read(n, max_block);
 }
 
 int
@@ -134,21 +161,24 @@ main(int argc, char *argv[])
 
 	logstor_init(disk_file);
 	max_block = superblock_init();
+
 	ba_write_count = malloc(max_block * sizeof(*ba_write_count));
 	ASSERT(ba_write_count != NULL);
-	ba_expect = malloc(max_block * sizeof(*ba_expect));
-	ASSERT(ba_expect != NULL);
+
+	ba2i = malloc(max_block * sizeof(*ba2i));
+	ASSERT(ba2i != NULL);
 
 	for (i = 0; i<20; i++) {
 		printf("### test %d\n", i);
 		logstor_open();
-		test1(i, max_block);
+		test(i, max_block);
 		logstor_close();
 		if (break_for_loop)
 			break;
 	}
-	free(ba_expect);
+	free(ba2i);
 	free(ba_write_count);
+	free(i2ba);
 	logstor_fini();
 
 	return 0;
