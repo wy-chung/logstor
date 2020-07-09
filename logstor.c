@@ -55,7 +55,7 @@ static void my_break(void) {}
   Even with @fbuf_ratio set to 1, there will still be some fbuf_flush called
   during fbuf_alloc
 */
-static double fbuf_ratio = 1.01; // the ration of allocated and needed fbufs
+static double fbuf_ratio = 1.0; // the ration of allocated and needed fbufs
 
 #define	SIG_LOGSTOR	0x4C4F4753	// "LOGS": Log-Structured Storage
 #define	VER_MAJOR	0
@@ -67,7 +67,7 @@ static double fbuf_ratio = 1.01; // the ration of allocated and needed fbufs
 #define	SECTORS_PER_SEG	(SEG_SIZE/SECTOR_SIZE) // 1024
 #define SA2SEGA_SHIFT	10
 #define BLOCKS_PER_SEG	(SEG_SIZE/SECTOR_SIZE - 1)
-#define GC_WINDOW	4
+#define GC_WINDOW	6
 #define GC_AGE_LIMIT	4
 
 #define	META_BASE	0x40000000u	// metadata block start address
@@ -901,15 +901,8 @@ again:
 	if (++sc.superblock.seg_recycle_p == sc.superblock.seg_cnt)
 		sc.superblock.seg_recycle_p = SEG_DATA_START;
 	ASSERT(sc.superblock.seg_recycle_p < sc.superblock.seg_cnt);
-#if 0
-	if (sega == sega_hot)
-		goto again;
-	if (sega == sega_cold)
-		goto again;
-#else
 	ASSERT(sega != sega_hot);
 	ASSERT(sega != sega_cold);
-#endif
 
 	sc.seg_age[sega]++; // to prevent it from being allocated
 	seg_sum->ss_soft.sega = sega;
@@ -975,7 +968,7 @@ static void
 garbage_collection(void)
 {
 	struct _seg_sum *seg, *seg_to_clean, *seg_prev_head;
-	unsigned live_count, live_count_min;
+	unsigned live_count, live_count_min, live_count_avg;
 	int	i;
 	int32_t distance;
 
@@ -993,13 +986,16 @@ garbage_collection(void)
 	for (;;) {
 		// find the hottest segment
 		live_count_min = -1; // the maximum unsigned integer
+		live_count_avg = 0;
 		TAILQ_FOREACH(seg, &sc.gc_ss_head, ss_soft.queue) {
 			live_count = seg->ss_soft.live_count;
+			live_count_avg += live_count;
 			if (live_count < live_count_min) {
 				live_count_min = live_count;
 				seg_to_clean = seg;
 			}
 		}
+		live_count_avg = (live_count_avg - live_count_min) / (GC_WINDOW - 1);
 		seg = NULL; // the head has not been processed
 clean:
 		TAILQ_REMOVE(&sc.gc_ss_head, seg_to_clean, ss_soft.queue);
@@ -1009,7 +1005,7 @@ clean:
 		distance = gc_distance();
 		if (distance > sc.gc_high_water) // reached the gc_high_water
 			goto exit;
-
+recycle_init:
 		// init @seg_to_clean with the next segment to recycle
 		seg_recyle_init(seg_to_clean);
 		if (seg_to_clean->ss_soft.sega == 0)  // reached the gc_high_water
@@ -1023,11 +1019,20 @@ clean:
 		// gc_ss_head if it has not been selected previously
 		seg = TAILQ_FIRST(&sc.gc_ss_head);
 		if (seg == seg_prev_head) {
-			seg_to_clean = seg;
-			seg_prev_head = NULL;
-			goto clean;
-		}
-		seg_prev_head = seg;
+			seg_prev_head = TAILQ_NEXT(seg, ss_soft.queue);
+			live_count = seg->ss_soft.live_count;
+			if (live_count > live_count_avg/* && live_count > 1023 * 0.8*/) {
+				uint32_t sega = seg->ss_soft.sega;
+				sc.seg_age[sega]++;
+				seg_to_clean = seg;
+				TAILQ_REMOVE(&sc.gc_ss_head, seg_to_clean, ss_soft.queue);
+				goto recycle_init;
+			} else {
+				seg_to_clean = seg;
+				goto clean;
+			}
+		} else
+			seg_prev_head = seg;
 	}
 exit:;
 //printf("%s <<<\n", __func__);
