@@ -210,7 +210,6 @@ struct g_logstor_softc {
 	unsigned char gc_disabled;
 	uint32_t gc_low_water;
 	uint32_t gc_high_water;
-	//int32_t gc_distance; // the distance between seg_recycle_p and seg_alloc_p
 	
 	int fbuf_count;
 	int fbuf_modified_count;
@@ -451,8 +450,8 @@ logstor_open(void)
 	seg_alloc(&sc.seg_sum_cold);
 
 	sc.data_write_count = sc.other_write_count = 0;
-	sc.gc_low_water = 20;
-	sc.gc_high_water = sc.gc_low_water + 8;
+	sc.gc_low_water = GC_WINDOW * 2;
+	sc.gc_high_water = sc.gc_low_water + GC_WINDOW * 2;
 
 	file_mod_init();
 	gc_check();
@@ -833,18 +832,6 @@ seg_live_count(struct _seg_sum *seg_sum)
 	seg_sum->ss_soft.live_count = live_count;
 }
 
-static int32_t
-gc_distance(void)
-{
-	int32_t distance;
-
-	distance = sc.superblock.seg_recycle_p - sc.superblock.seg_alloc_p;
-	if (distance < 0)
-		distance += sc.superblock.seg_cnt;
-	gdb_cond0 = distance;
-	return distance;
-}
-
 /*
 Description:
   Allocate a segment for writing and store the segment address into
@@ -909,7 +896,7 @@ again:
 	seg_sum_read(seg_sum);
 	if (sc.seg_age[sega] >= GC_AGE_LIMIT) {
 		gc_seg_clean(seg_sum);
-		if (gc_distance() > sc.gc_high_water) {
+		if (sc.superblock.seg_free_cnt > sc.gc_high_water) {
 			seg_sum->ss_soft.sega = 0;
 			return;
 		}
@@ -970,7 +957,6 @@ garbage_collection(void)
 	struct _seg_sum *seg, *seg_to_clean, *seg_prev_head;
 	unsigned live_count, live_count_min, live_count_avg;
 	int	i;
-	int32_t distance;
 
 //printf("\n%s >>>\n", __func__);
 	TAILQ_INIT(&sc.gc_ss_head);
@@ -1002,8 +988,7 @@ clean:
 		// clean the segment with min live data blocks
 		// or the first segment in @gc_ss_head
 		gc_seg_clean(seg_to_clean);
-		distance = gc_distance();
-		if (distance > sc.gc_high_water) // reached the gc_high_water
+		if (sc.superblock.seg_free_cnt > sc.gc_high_water) // reached the gc_high_water
 			goto exit;
 recycle_init:
 		// init @seg_to_clean with the next segment to recycle
@@ -1021,7 +1006,7 @@ recycle_init:
 		if (seg == seg_prev_head) {
 			seg_prev_head = TAILQ_NEXT(seg, ss_soft.queue);
 			live_count = seg->ss_soft.live_count;
-			if (live_count > live_count_avg/* && live_count > 1023 * 0.8*/) {
+			if (live_count >= live_count_avg) {
 				uint32_t sega = seg->ss_soft.sega;
 				sc.seg_age[sega]++;
 				seg_to_clean = seg;
@@ -1055,10 +1040,7 @@ gc_disable(void)
 static void
 gc_check(void)
 {
-	int32_t distance;
-
-	distance = gc_distance();
-	if (distance <= sc.gc_low_water && !sc.gc_disabled) {
+	if (sc.superblock.seg_free_cnt <= sc.gc_low_water && !sc.gc_disabled) {
 		gc_disable();	// disable gargabe collection
 		garbage_collection();
 		gc_enable(); // enable gargabe collection
