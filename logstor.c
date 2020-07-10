@@ -369,13 +369,6 @@ superblock_init(void)
 	printf("%s: sector_cnt %u max_block_cnt %u\n",
 	    __func__, sector_cnt, sb->max_block_cnt);
 #endif
-	/*
-	    Initially SEG_DATA_START is cold segment and SEG_DATA_START + 1 is hot segment
-	    The starting clean point should point to hot segment.
-	*/
-	sb->seg_alloc_p = SEG_DATA_START;	// the segment to allocate
-	sb->seg_recycle_p = SEG_DATA_START;	// the segment to clean
-
 	// the root sector address for the files
 	for (i = 0; i < FD_COUNT; i++) {
 		sb->ftab[i] = SECTOR_INVALID;	// not allocated yet
@@ -387,6 +380,16 @@ superblock_init(void)
 	}
 #endif
 	memset(sc.seg_age, 0, sb->seg_cnt);
+	/*
+	    Initially SEG_DATA_START is cold segment and
+	    SEG_DATA_START + 1 is hot segment (see logstor_open)
+	    Since seg_recycle_p starts at SEG_DATA_START + 1,
+	    we must protect this first cold segment (i.e SEG_DATA_START)
+	    from being allocated by setting it's age to 1.
+	*/
+	sb->seg_alloc_p = SEG_DATA_START;	// start allocate from here
+	sb->seg_recycle_p = SEG_DATA_START;	// start recycle from here
+	//sc.seg_age[SEG_DATA_START] = 1; // protect this segment from being allocated before recycled
 
 	// write out super block
 	sb_out = (struct _superblock *)buf;
@@ -412,7 +415,7 @@ void logstor_init(const char *disk_file)
 		sc.my_write = ram_write;
 	} else {
 		sc.ram_disk = NULL;
-#if 0// __BSD_VISIBLE
+#if __BSD_VISIBLE
 		sc.disk_fd = open(disk_file, O_RDWR | O_DIRECT | O_FSYNC);
 #else
 		sc.disk_fd = open(disk_file, O_RDWR);
@@ -442,12 +445,29 @@ logstor_fini(void)
 int
 logstor_open(void)
 {
+	int32_t recycle_p;
 
 	if (superblock_read() != 0) {
 		superblock_init();
 	}
-	seg_alloc(&sc.seg_sum_hot);
+#if 0
+	recycle_p = sc.superblock.seg_recycle_p;
+again:
+	if (--recycle_p == 0)
+		recycle_p = sc.superblock.seg_cnt - 1;
+	if (sc.seg_age[recycle_p] != 0)
+		goto again;
+	ASSERT(recycle_p != sc.superblock.seg_alloc_p);
+	sc.seg_sum_cold.ss_soft.sega = recycle_p;
+	sc.seg_sum_cold.ss_alloc_p = 0;
+	sc.seg_age[recycle_p] = 1;
+	sc.superblock.seg_free_cnt--;
+	ASSERT(sc.superblock.seg_free_cnt > 0 &&
+	    sc.superblock.seg_free_cnt < sc.superblock.seg_cnt);
+#else
 	seg_alloc(&sc.seg_sum_cold);
+#endif
+	seg_alloc(&sc.seg_sum_hot);
 
 	sc.data_write_count = sc.other_write_count = 0;
 	sc.gc_low_water = GC_WINDOW * 2;
@@ -853,9 +873,14 @@ again:
 	if (++sc.superblock.seg_alloc_p == sc.superblock.seg_cnt)
 		sc.superblock.seg_alloc_p = SEG_DATA_START;
 	ASSERT(sc.superblock.seg_alloc_p < sc.superblock.seg_cnt);
-	ASSERT(sc.superblock.seg_alloc_p != sc.superblock.seg_recycle_p);
+	ASSERT(sc.superblock.seg_alloc_p + 1 != sc.superblock.seg_recycle_p);
 	ASSERT(sega != sega_hot);
+#if 0
 	ASSERT(sega != sega_cold);
+#else
+	if (sega == sega_cold)
+		goto again;
+#endif
 	if (sc.seg_age[sega] != 0)
 		goto again;
 
@@ -889,7 +914,12 @@ again:
 		sc.superblock.seg_recycle_p = SEG_DATA_START;
 	ASSERT(sc.superblock.seg_recycle_p < sc.superblock.seg_cnt);
 	ASSERT(sega != sega_hot);
+#if 0
 	ASSERT(sega != sega_cold);
+#else
+	if (sega == sega_cold)
+		goto again;
+#endif
 
 	sc.seg_age[sega]++; // to prevent it from being allocated
 	seg_sum->ss_soft.sega = sega;

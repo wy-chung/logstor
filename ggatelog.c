@@ -251,11 +251,11 @@ main(int argc, char *argv[])
 
 	log_flags = 0; // rw
 	log_sectorsize = SECTOR_SIZE;
-	g_gate_verbose = 0;
+	g_gate_verbose = 1;
 	for (;;) {
 		int ch;
 
-		ch = getopt(argc, argv, "ft:u:");
+		ch = getopt(argc, argv, "ft:u:v");
 		if (ch == -1)
 			break;
 		switch (ch) {
