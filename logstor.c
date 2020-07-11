@@ -255,7 +255,9 @@ uint32_t gdb_cond1;
 static struct g_logstor_softc sc;
 
 static int _logstor_read(unsigned ba, char *data, int size);
+static int _logstor_read_one(unsigned ba, char *data);
 static int _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum);
+static int _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum);
 static void seg_alloc(struct _seg_sum *seg_sum);
 static void seg_recyle_init(struct _seg_sum *seg_sum);
 static void file_mod_flush(void);
@@ -445,28 +447,11 @@ logstor_fini(void)
 int
 logstor_open(void)
 {
-	int32_t recycle_p;
 
 	if (superblock_read() != 0) {
 		superblock_init();
 	}
-#if 0
-	recycle_p = sc.superblock.seg_recycle_p;
-again:
-	if (--recycle_p == 0)
-		recycle_p = sc.superblock.seg_cnt - 1;
-	if (sc.seg_age[recycle_p] != 0)
-		goto again;
-	ASSERT(recycle_p != sc.superblock.seg_alloc_p);
-	sc.seg_sum_cold.ss_soft.sega = recycle_p;
-	sc.seg_sum_cold.ss_alloc_p = 0;
-	sc.seg_age[recycle_p] = 1;
-	sc.superblock.seg_free_cnt--;
-	ASSERT(sc.superblock.seg_free_cnt > 0 &&
-	    sc.superblock.seg_free_cnt < sc.superblock.seg_cnt);
-#else
 	seg_alloc(&sc.seg_sum_cold);
-#endif
 	seg_alloc(&sc.seg_sum_hot);
 
 	sc.data_write_count = sc.other_write_count = 0;
@@ -505,13 +490,19 @@ logstor_read(off_t offset, void *data, off_t length)
 {
 	unsigned size;
 	uint32_t ba;
+	int error;
 
 	ASSERT((offset & (SECTOR_SIZE - 1)) == 0);
 	ASSERT((length & (SECTOR_SIZE - 1)) == 0);
 	ba = offset / SECTOR_SIZE;
 	size = length / SECTOR_SIZE;
 
-	return _logstor_read(ba, data, size);
+	if (size == 1) {
+		error = _logstor_read_one(ba, data);
+	} else {
+		error = _logstor_read(ba, data, size);
+	}
+	return error;
 }
 
 /*
@@ -528,13 +519,19 @@ logstor_write(off_t offset, void *data, off_t length)
 {
 	uint32_t ba;	// block address
 	int size;	// number of remaining sectors to process
+	int error;
 
 	ASSERT((offset & (SECTOR_SIZE - 1)) == 0);
 	ASSERT((length & (SECTOR_SIZE - 1)) == 0);
 	ba = offset / SECTOR_SIZE;
 	size = length / SECTOR_SIZE;
 
-	return _logstor_write(ba, data, size, &sc.seg_sum_hot);
+	if (size == 1) {
+		error = _logstor_write_one(ba, data, &sc.seg_sum_hot);
+	} else {
+		error = _logstor_write(ba, data, size, &sc.seg_sum_hot);
+	}
+	return error;
 }
 
 int logstor_delete(off_t offset, void *data, off_t length)
@@ -549,8 +546,11 @@ int logstor_delete(off_t offset, void *data, off_t length)
 	size = length / SECTOR_SIZE;
 	ASSERT(ba < sc.superblock.max_block_cnt);
 
-	for (i = 0; i<size; i++) {
-		file_write_4byte(FD_ACTIVE, ba + i, SECTOR_INVALID);
+	if (size == 1) {
+		file_write_4byte(FD_ACTIVE, ba, SECTOR_INVALID);
+	} else {
+		for (i = 0; i<size; i++)
+			file_write_4byte(FD_ACTIVE, ba + i, SECTOR_INVALID);
 	}
 	return (0);
 }
@@ -583,7 +583,6 @@ _logstor_read(unsigned ba, char *data, int size)
 	uint32_t start_sa, pre_sa, sa;	// sector address
 
 	ASSERT(ba < sc.superblock.max_block_cnt);
-	ASSERT(size >= 1);
 
 	start_sa = pre_sa = file_read_4byte(FD_ACTIVE, ba);
 	count = 1;
@@ -607,6 +606,22 @@ _logstor_read(unsigned ba, char *data, int size)
 		memset(data, 0, SECTOR_SIZE);
 	else
 		sc.my_read(start_sa, data, count);
+
+	return 0;
+}
+
+static int
+_logstor_read_one(unsigned ba, char *data)
+{
+	uint32_t sa;	// sector address
+
+	ASSERT(ba < sc.superblock.max_block_cnt);
+
+	sa = file_read_4byte(FD_ACTIVE, ba);
+	if (sa == SECTOR_INVALID)
+		memset(data, 0, SECTOR_SIZE);
+	else
+		sc.my_read(sa, data, 1);
 
 	return 0;
 }
@@ -661,6 +676,37 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 
 		sec_remain -= count;
 	}
+
+	return 0;
+}
+
+static int
+_logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
+{
+	uint32_t sa;	// sector address
+
+	ASSERT(ba < sc.superblock.max_block_cnt);
+	ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFF);
+
+	sa = sega2sa(seg_sum->ss_soft.sega) + seg_sum->ss_alloc_p;
+	ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
+	sc.my_write(sa, data, 1);
+	if (sc.gc_disabled) // if doing garbage collection
+		sc.other_write_count++;
+	else
+		sc.data_write_count ++;
+
+	// record the reverse mapping immediately after the data have been written
+	seg_sum->ss_rm[seg_sum->ss_alloc_p++] = ba;
+
+	if (seg_sum->ss_alloc_p == SEG_SUM_OFF)
+	{	// current segment is full
+		seg_sum_write(seg_sum);
+		seg_alloc(seg_sum);
+		gc_check();
+	}
+	// record the forward mapping later after the segment summary block is flushed
+	file_write_4byte(FD_ACTIVE, ba, sa);
 
 	return 0;
 }
@@ -971,7 +1017,7 @@ gc_seg_clean(struct _seg_sum *seg_sum)
 			sa = file_read_4byte(FD_ACTIVE, ba); 
 			if (sa == seg_sa + i) { // live data
 				sc.my_read(seg_sa + i, buf, 1);
-				_logstor_write(ba, (char *)buf, 1, &sc.seg_sum_cold);
+				_logstor_write_one(ba, (char *)buf, &sc.seg_sum_cold);
 			}
 		}
 	}
