@@ -220,6 +220,7 @@ g_gatelog_rescue(void)
 	struct g_gate_ctl_cancel ggioc;
 
 	logstor_init(log_path);
+	logstor_open();
 
 	ggioc.gctl_version = G_GATE_VERSION;
 	ggioc.gctl_unit = log_unit;
@@ -254,7 +255,7 @@ main(int argc, char *argv[])
 	for (;;) {
 		int ch;
 
-		ch = getopt(argc, argv, "ft:u:");
+		ch = getopt(argc, argv, "ft:u:v");
 		if (ch == -1)
 			break;
 		switch (ch) {

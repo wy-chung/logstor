@@ -27,16 +27,16 @@ typedef long	int64_t;
 #endif
 
 #if defined(MY_DEBUG)
-void my_break(const char * fname, int line_num, bool bl_panic);
+void my_debug(const char * fname, int line_num, bool bl_panic);
 
-#define ASSERT(x)	do if (!(x)) my_break(__func__, __LINE__, true); while(0)
-#define PANIC()	my_break(__FILE__, __LINE__, true)
+#define ASSERT(x)	do if (!(x)) my_debug(__func__, __LINE__, true); while(0)
+#define PANIC()	my_debug(__FILE__, __LINE__, true)
 #else
 #define ASSERT(x)
 #define PANIC()
 #endif
 
-#define	SECTOR_SIZE		0x1000		// 4K
+#define	SECTOR_SIZE	0x1000		// 4K
 
 extern uint32_t gdb_cond0;	// for debug
 extern uint32_t gdb_cond1;	// for debug
@@ -57,8 +57,8 @@ unsigned logstor_get_fbuf_hit(void);
 unsigned logstor_get_fbuf_miss(void);
 
 // for logstor test
-int logstor_read_test(uint32_t ba, char *data);
-int logstor_write_test(uint32_t ba, char *data);
+int logstor_read_test(uint32_t ba, void *data);
+int logstor_write_test(uint32_t ba, void *data);
 
 #if defined(WYC)
 #define roundup2(x, y)	(((x)+((y)-1))&~((y)-1))
