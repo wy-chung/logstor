@@ -1331,6 +1331,7 @@ ma_index_set(union meta_addr *ma, unsigned depth, unsigned index)
 	ma->uint32 |= index;
 }
 
+#if 0
 static uint32_t
 fbuf_ma2sa(union meta_addr ma)
 {
@@ -1365,6 +1366,32 @@ get_sa:
 	}
 	return sa;
 }
+#else
+static uint32_t
+fbuf_ma2sa(union meta_addr ma)
+{
+	struct _fbuf *buf, *pbuf;
+	int pindex;		//index in the parent indirect block
+	uint32_t sa;
+
+	switch (ma.depth)
+	{
+	case 0:
+		sa = sc.superblock.ftab[ma.fd];
+		break;
+	case 1:
+	case 2:
+		buf = fbuf_get(ma);
+		pbuf = buf->parent;
+		pindex = ma_index_get(ma, ma.depth - 1);
+		sa = pbuf->data[pindex];
+		break;
+	default:
+		PANIC();
+	}
+	return sa;
+}
+#endif
 
 static void
 fbuf_hash_insert(struct _fbuf *buf, unsigned key)
