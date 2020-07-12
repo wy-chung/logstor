@@ -358,13 +358,12 @@ superblock_init(void)
 
 	// write out super block
 	memcpy(buf, &sc.superblock, sizeof(sc.superblock));
-	sc.my_write(0, buf, 1);
+	sc.sb_sa = 0;
+	sc.my_write(sc.sb_sa, buf, 1);
 
 	// write out the last block to the disk file
 	sc.my_write(sb->seg_cnt * SECTORS_PER_SEG - 1, buf, 1);
-
 	sc.sb_modified = false;
-	sc.sb_sa = 0;
 
 	return sb->max_block_cnt;
 }
