@@ -8,7 +8,7 @@ SRCS=	ggatelog.c ggate.c logstor.c
 
 CFLAGS+= -DLIBGEOM
 CFLAGS+= -I${.CURDIR:H}
-CFLAGS+= -O0
+#CFLAGS+= -O0
 
 LIBADD=	geom util
 
