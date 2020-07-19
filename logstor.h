@@ -28,6 +28,7 @@ typedef long	int64_t;
 
 #if defined(MY_DEBUG)
 void my_debug(const char * fname, int line_num, bool bl_panic);
+void my_break(void);
 
 #define ASSERT(x)	do if (!(x)) my_debug(__func__, __LINE__, true); while(0)
 #define PANIC()	my_debug(__FILE__, __LINE__, true)

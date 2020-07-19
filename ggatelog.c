@@ -125,6 +125,7 @@ once_again:
 			g_gate_close_device();
 			logstor_close();
 			logstor_fini();
+			my_break();
 			exit(EXIT_SUCCESS);
 		case ENOMEM:
 			/* Buffer too small. */
