@@ -248,7 +248,7 @@ struct g_logstor_softc {
 
 	// statistics
 	unsigned data_write_count;	// data block write to disk
-	unsigned other_write_count;	// other write to disk, such as metadata write and garbage collection
+	unsigned other_write_count;	// other write to disk, such as metadata write and segment cleaning
 	unsigned fbuf_hit, fbuf_miss;	// statistics
 
 	int disk_fd;
@@ -285,7 +285,8 @@ static void seg_sum_write(struct _seg_sum *seg_sum);
 static int superblock_read(void);
 static void superblock_write(void);
 static void clean_check(void);
-static void clean_seg(struct _seg_sum *seg_sum);
+static void seg_clean(struct _seg_sum *seg_sum);
+static void seg_live_count(struct _seg_sum *seg_sum);
 
 static void disk_read (uint32_t sa, void *buf, unsigned size);
 static void disk_write(uint32_t sa, const void *buf, unsigned size);
@@ -674,7 +675,7 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 		sc.my_write(sa, data, count);
 		rw.w_logstor_write++;
 		data += count * SECTOR_SIZE;
-		if (sc.cleaner_disabled) // if doing garbage collection
+		if (sc.cleaner_disabled) // if doing segment cleaning
 			sc.other_write_count += count;
 		else
 			sc.data_write_count += count;
@@ -711,7 +712,7 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
 	ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	sc.my_write(sa, data, 1);
 	rw.w_logstor_write_one++;
-	if (sc.cleaner_disabled) // if doing garbage collection
+	if (sc.cleaner_disabled) // if doing segment cleaning
 		sc.other_write_count++;
 	else
 		sc.data_write_count ++;
@@ -893,37 +894,6 @@ ram_write(uint32_t sa, const void *buf, unsigned size)
 }
 
 /*
-  Input:  seg_sum->ss_soft.seg_sa
-  Output: seg_sum->ss_soft.live_count
-*/
-static void
-seg_live_count(struct _seg_sum *seg_sum)
-{
-	int	i;
-	uint32_t ba;
-	uint32_t seg_sa;
-	unsigned live_count = 0;
-	struct _fbuf *buf;
-
-	seg_sa = sega2sa(seg_sum->ss_soft.sega);
-	for (i = 0; i < seg_sum->ss_alloc_p; i++)
-	{
-		ba = seg_sum->ss_rm[i];	// get the block address from reverse map
-		if (IS_META_ADDR(ba)) {
-			if (fbuf_ma2sa((union meta_addr)ba) == seg_sa + i) { // live metadata
-				buf = fbuf_get((union meta_addr)ba);
-				if (!buf->modified && !buf->accessed)
-					live_count++;
-			}
-		} else {
-			if (file_read_4byte(FD_ACTIVE, ba) == seg_sa + i) // live data
-				live_count++;
-		}
-	}
-	seg_sum->ss_soft.live_count = live_count;
-}
-
-/*
 Description:
   Allocate a segment for writing and store the segment address into
   @ss_soft.sega of @seg_sum and initialize @ss_alloc_p of @seg_sum to 0
@@ -996,7 +966,7 @@ again:
 	seg_sum->ss_soft.sega = sega;
 	seg_sum_read(seg_sum);
 	if (sc.seg_age[sega] >= CLEAN_AGE_LIMIT) {
-		clean_seg(seg_sum);
+		seg_clean(seg_sum);
 		if (sc.superblock.seg_free_cnt > sc.clean_high_water) {
 			seg_sum->ss_soft.sega = 0;
 			return;
@@ -1006,12 +976,43 @@ again:
 	seg_live_count(seg_sum);
 }
 
-/*********************
-* Garbage collection *
-**********************/
+/********************
+* segment cleaning  *
+*********************/
+
+/*
+  Input:  seg_sum->ss_soft.seg_sa
+  Output: seg_sum->ss_soft.live_count
+*/
+static void
+seg_live_count(struct _seg_sum *seg_sum)
+{
+	int	i;
+	uint32_t ba;
+	uint32_t seg_sa;
+	unsigned live_count = 0;
+	struct _fbuf *buf;
+
+	seg_sa = sega2sa(seg_sum->ss_soft.sega);
+	for (i = 0; i < seg_sum->ss_alloc_p; i++)
+	{
+		ba = seg_sum->ss_rm[i];	// get the block address from reverse map
+		if (IS_META_ADDR(ba)) {
+			if (fbuf_ma2sa((union meta_addr)ba) == seg_sa + i) { // live metadata
+				buf = fbuf_get((union meta_addr)ba);
+				if (!buf->modified && !buf->accessed)
+					live_count++;
+			}
+		} else {
+			if (file_read_4byte(FD_ACTIVE, ba) == seg_sa + i) // live data
+				live_count++;
+		}
+	}
+	seg_sum->ss_soft.live_count = live_count;
+}
 
 static void
-clean_seg(struct _seg_sum *seg_sum)
+seg_clean(struct _seg_sum *seg_sum)
 {
 	uint32_t ba, sa;
 	uint32_t seg_sa;	// the sector address of the cleaning segment
@@ -1089,7 +1090,7 @@ clean:
 		TAILQ_REMOVE(&sc.cc_head, seg_to_clean, ss_soft.queue);
 		// clean the segment with min live data blocks
 		// or the first segment in @cc_head
-		clean_seg(seg_to_clean);
+		seg_clean(seg_to_clean);
 		if (sc.superblock.seg_free_cnt > sc.clean_high_water) // reached the clean_high_water
 			goto exit;
 recycle_init:
@@ -1103,12 +1104,12 @@ recycle_init:
 			continue;
 
 		// keep the CLEAN_WINDOW moving by cleaning the head of
-		// cc_head if it has not been selected previously
+		// cc_head if it has not been selected for cleaning for certain times
 		seg = TAILQ_FIRST(&sc.cc_head);
 		if (seg == seg_prev_head) {
 			seg_prev_head = TAILQ_NEXT(seg, ss_soft.queue);
 			live_count = seg->ss_soft.live_count;
-			if (live_count >= live_count_avg) {
+			if (live_count >= live_count_avg) { // Don't clean it, age it.
 				uint32_t sega = seg->ss_soft.sega;
 				sc.seg_age[sega]++;
 				seg_to_clean = seg;
@@ -1123,8 +1124,9 @@ recycle_init:
 	}
 exit:;
 	TAILQ_FOREACH(seg, &sc.cc_head, ss_soft.queue) {
-		if (seg->ss_soft.live_count < BLOCKS_PER_SEG * 0.5)
-			clean_seg(seg);
+		live_count = seg->ss_soft.live_count;
+		if (live_count < BLOCKS_PER_SEG * 0.5)
+			seg_clean(seg);
 	}
 //printf("%s <<<\n", __func__);
 }
@@ -1688,7 +1690,7 @@ fbuf_write(struct _fbuf *buf, struct _seg_sum *seg_sum)
 	if (seg_sum->ss_alloc_p == SEG_SUM_OFF) { // current segment is full
 		seg_sum_write(seg_sum);
 		seg_alloc(seg_sum);
-		// Don't do garbage collection when writing out fbuf
+		// Don't do segment cleaning when writing out fbuf
 	}
 	return sa;
 }
@@ -1707,7 +1709,7 @@ fbuf_flush(struct _fbuf *buf, struct _seg_sum *seg_sum)
 	ASSERT(buf->modified);
 	ASSERT(IS_META_ADDR(buf->ma.uint32));
 	/*
-	  Must disable garbage collection until @sa is written out
+	  Must disable segment cleaner until @sa is written out
 	*/
 	//cleaner_disable();
 	sa = fbuf_write(buf, seg_sum);

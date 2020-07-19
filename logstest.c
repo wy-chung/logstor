@@ -18,7 +18,7 @@ e-mail: wuyang.chung1@outlook.com
 /**************************************
  *           Test function            *
  **************************************/
-#if 0
+#if 1
 	#define	RAND_SEED	time(NULL)
 #else
 	#define	RAND_SEED	0
@@ -148,8 +148,10 @@ main(int argc, char *argv[])
 	int	i;
 	unsigned max_block;
 	char *disk_file = DISK_FILE;
+	unsigned int seed;
 
-	srandom(RAND_SEED);
+	seed = RAND_SEED;
+	srandom(seed);
 
 	logstor_init(disk_file);
 	max_block = superblock_init();
