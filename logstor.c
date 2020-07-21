@@ -121,7 +121,7 @@ struct _superblock {
 	int32_t	seg_cnt;	// total number of segments
 	int32_t seg_free_cnt;	// number of free segments
 	int32_t	seg_alloc_p;	// allocate this segment
-	int32_t	seg_recycle_p;	// clean this segment
+	int32_t	seg_reclaim_p;	// clean this segment
 	/*
 	   The files for forward mapping file
 
@@ -273,7 +273,7 @@ static int _logstor_read_one(unsigned ba, char *data);
 static int _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum);
 static int _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum);
 static void seg_alloc(struct _seg_sum *seg_sum);
-static void seg_recyle_init(struct _seg_sum *seg_sum);
+static void seg_reclaim_init(struct _seg_sum *seg_sum);
 static void file_mod_flush(void);
 static void file_mod_init(void);
 static void file_mod_fini(void);
@@ -396,12 +396,12 @@ superblock_init(void)
 	/*
 	    Initially SEG_DATA_START is cold segment and
 	    SEG_DATA_START + 1 is hot segment (see logstor_open)
-	    Since seg_recycle_p starts at SEG_DATA_START + 1,
+	    Since seg_reclaim_p starts at SEG_DATA_START + 1,
 	    we must protect this first cold segment (i.e SEG_DATA_START)
 	    from being allocated by setting it's age to 1.
 	*/
 	sb->seg_alloc_p = SEG_DATA_START;	// start allocate from here
-	sb->seg_recycle_p = SEG_DATA_START;	// start recycle from here
+	sb->seg_reclaim_p = SEG_DATA_START;	// start reclaim from here
 	//sc.seg_age[SEG_DATA_START] = 1; // protect this segment from being allocated before recycled
 
 	// write out super block
@@ -804,7 +804,7 @@ superblock_read(void)
 	memcpy(&sc.superblock, buf[0], sizeof(sc.superblock));
 	if (sc.superblock.sig != SIG_LOGSTOR ||
 	    sc.superblock.seg_alloc_p >= sc.superblock.seg_cnt ||
-	    sc.superblock.seg_recycle_p >= sc.superblock.seg_cnt)
+	    sc.superblock.seg_reclaim_p >= sc.superblock.seg_cnt)
 		return EINVAL;
 
 	sb_gen = sc.superblock.sb_gen;
@@ -824,7 +824,7 @@ superblock_read(void)
 	sc.sb_modified = false;
 	if (sc.superblock.sig != SIG_LOGSTOR ||
 	    sc.superblock.seg_alloc_p >= sc.superblock.seg_cnt ||
-	    sc.superblock.seg_recycle_p >= sc.superblock.seg_cnt)
+	    sc.superblock.seg_reclaim_p >= sc.superblock.seg_cnt)
 		return EINVAL;
 #if defined(AGE_STATIC)
 	ASSERT(sizeof(sc.seg_age) >= sc.superblock.seg_cnt);
@@ -914,7 +914,7 @@ again:
 	if (++sc.superblock.seg_alloc_p == sc.superblock.seg_cnt)
 		sc.superblock.seg_alloc_p = SEG_DATA_START;
 	ASSERT(sc.superblock.seg_alloc_p < sc.superblock.seg_cnt);
-	ASSERT(sc.superblock.seg_alloc_p + 1 != sc.superblock.seg_recycle_p);
+	ASSERT(sc.superblock.seg_alloc_p + 1 != sc.superblock.seg_reclaim_p);
 	ASSERT(sega != sega_hot);
 #if 0
 	ASSERT(sega != sega_cold);
@@ -937,12 +937,12 @@ again:
 /*
 Description:
   This function does the following things:
-  1. Get the segment address of the segment to recycle
-  2. Read the contents of the segment summary of the recycled segment
+  1. Get the segment address of the segment to reclaim
+  2. Read the contents of the segment summary of the reclaimed segment
   3. Count the live blocks in this segment
 */
 static void
-seg_recyle_init(struct _seg_sum *seg_sum)
+seg_reclaim_init(struct _seg_sum *seg_sum)
 {
 	uint32_t sega;
 	uint32_t sega_cold, sega_hot;
@@ -950,10 +950,10 @@ seg_recyle_init(struct _seg_sum *seg_sum)
 	sega_cold = sc.seg_sum_cold.ss_soft.sega;
 	sega_hot = sc.seg_sum_hot.ss_soft.sega;
 again:
-	sega = sc.superblock.seg_recycle_p;
-	if (++sc.superblock.seg_recycle_p == sc.superblock.seg_cnt)
-		sc.superblock.seg_recycle_p = SEG_DATA_START;
-	ASSERT(sc.superblock.seg_recycle_p < sc.superblock.seg_cnt);
+	sega = sc.superblock.seg_reclaim_p;
+	if (++sc.superblock.seg_reclaim_p == sc.superblock.seg_cnt)
+		sc.superblock.seg_reclaim_p = SEG_DATA_START;
+	ASSERT(sc.superblock.seg_reclaim_p < sc.superblock.seg_cnt);
 	ASSERT(sega != sega_hot);
 #if 0
 	ASSERT(sega != sega_cold);
@@ -1065,7 +1065,7 @@ cleaner(void)
 	TAILQ_INIT(&sc.cc_head);
 	for (i = 0; i < CLEAN_WINDOW; i++) {
 		seg = &sc.clean_candidate[i];
-		seg_recyle_init(seg);
+		seg_reclaim_init(seg);
 		if (seg->ss_soft.sega == 0) // reached the clean_high_water
 			goto exit;
 		TAILQ_INSERT_TAIL(&sc.cc_head, seg, ss_soft.queue);
@@ -1093,9 +1093,9 @@ clean:
 		seg_clean(seg_to_clean);
 		if (sc.superblock.seg_free_cnt > sc.clean_high_water) // reached the clean_high_water
 			goto exit;
-recycle_init:
-		// init @seg_to_clean with the next segment to recycle
-		seg_recyle_init(seg_to_clean);
+reclaim_init:
+		// init @seg_to_clean with the next segment to reclaim
+		seg_reclaim_init(seg_to_clean);
 		if (seg_to_clean->ss_soft.sega == 0)  // reached the clean_high_water
 			goto exit;
 		TAILQ_INSERT_TAIL(&sc.cc_head, seg_to_clean, ss_soft.queue);
@@ -1114,7 +1114,7 @@ recycle_init:
 				sc.seg_age[sega]++;
 				seg_to_clean = seg;
 				TAILQ_REMOVE(&sc.cc_head, seg_to_clean, ss_soft.queue);
-				goto recycle_init;
+				goto reclaim_init;
 			} else {
 				seg_to_clean = seg;
 				goto clean;
