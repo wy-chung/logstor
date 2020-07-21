@@ -1,17 +1,8 @@
 # $FreeBSD$
 
-#.PATH: ${.CURDIR:H}/shared
+.PATH: ${SRCTOP}/sys/geom/nop
 
-PROG=	ggatelog
-MAN=
-SRCS=	ggatelog.c ggate.c logstor.c
+KMOD=	geom_nop
+SRCS=	g_nop.c
 
-CFLAGS+= -DLIBGEOM
-CFLAGS+= -I${.CURDIR:H}
-#CFLAGS+= -O0
-
-LIBADD=	geom util
-
-NO_WERROR= yes
-
-.include <bsd.prog.mk>
+.include <bsd.kmod.mk>
