@@ -38,43 +38,43 @@ __FBSDID("$FreeBSD$");
 #include <sys/sysctl.h>
 #include <sys/malloc.h>
 #include <geom/geom.h>
-#include <geom/nop/g_nop.h>
+#include <geom/logstor/g_logstor.h>
 
 
 SYSCTL_DECL(_kern_geom);
-static SYSCTL_NODE(_kern_geom, OID_AUTO, nop, CTLFLAG_RW, 0, "GEOM_NOP stuff");
-static u_int g_nop_debug = 0;
-SYSCTL_UINT(_kern_geom_nop, OID_AUTO, debug, CTLFLAG_RW, &g_nop_debug, 0,
+static SYSCTL_NODE(_kern_geom, OID_AUTO, logstor, CTLFLAG_RW, 0, "GEOM_LOGSTOR stuff");
+static u_int g_logstor_debug = 0;
+SYSCTL_UINT(_kern_geom_logstor, OID_AUTO, debug, CTLFLAG_RW, &g_logstor_debug, 0,
     "Debug level");
 
-static int g_nop_destroy(struct g_geom *gp, boolean_t force);
-static int g_nop_destroy_geom(struct gctl_req *req, struct g_class *mp,
+static int g_logstor_destroy(struct g_geom *gp, boolean_t force);
+static int g_logstor_destroy_geom(struct gctl_req *req, struct g_class *mp,
     struct g_geom *gp);
-static void g_nop_config(struct gctl_req *req, struct g_class *mp,
+static void g_logstor_config(struct gctl_req *req, struct g_class *mp,
     const char *verb);
-static void g_nop_dumpconf(struct sbuf *sb, const char *indent,
+static void g_logstor_dumpconf(struct sbuf *sb, const char *indent,
     struct g_geom *gp, struct g_consumer *cp, struct g_provider *pp);
 
-struct g_class g_nop_class = {
-	.name = G_NOP_CLASS_NAME,
+struct g_class g_logstor_class = {
+	.name = G_LOGSTOR_CLASS_NAME,
 	.version = G_VERSION,
-	.ctlreq = g_nop_config,
-	.destroy_geom = g_nop_destroy_geom
+	.ctlreq = g_logstor_config,
+	.destroy_geom = g_logstor_destroy_geom
 };
 
 
 static void
-g_nop_orphan(struct g_consumer *cp)
+g_logstor_orphan(struct g_consumer *cp)
 {
 
 	g_topology_assert();
-	g_nop_destroy(cp->geom, 1);
+	g_logstor_destroy(cp->geom, 1);
 }
 
 static void
-g_nop_resize(struct g_consumer *cp)
+g_logstor_resize(struct g_consumer *cp)
 {
-	struct g_nop_softc *sc;
+	struct g_logstor_softc *sc;
 	struct g_geom *gp;
 	struct g_provider *pp;
 	off_t size;
@@ -87,7 +87,7 @@ g_nop_resize(struct g_consumer *cp)
 	if (sc->sc_explicitsize != 0)
 		return;
 	if (cp->provider->mediasize < sc->sc_offset) {
-		g_nop_destroy(gp, 1);
+		g_logstor_destroy(gp, 1);
 		return;
 	}
 	size = cp->provider->mediasize - sc->sc_offset;
@@ -96,9 +96,9 @@ g_nop_resize(struct g_consumer *cp)
 }
 
 static void
-g_nop_start(struct bio *bp)
+g_logstor_start(struct bio *bp)
 {
-	struct g_nop_softc *sc;
+	struct g_logstor_softc *sc;
 	struct g_geom *gp;
 	struct g_provider *pp;
 	struct bio *cbp;
@@ -106,7 +106,7 @@ g_nop_start(struct bio *bp)
 
 	gp = bp->bio_to->geom;
 	sc = gp->softc;
-	G_NOP_LOGREQ(bp, "Request received.");
+	G_LOGSTOR_LOGREQ(bp, "Request received.");
 	mtx_lock(&sc->sc_lock);
 	switch (bp->bio_cmd) {
 	case BIO_READ:
@@ -149,7 +149,7 @@ g_nop_start(struct bio *bp)
 
 		rval = arc4random() % 100;
 		if (rval < failprob) {
-			G_NOP_LOGREQLVL(1, bp, "Returning error=%d.", sc->sc_error);
+			G_LOGSTOR_LOGREQLVL(1, bp, "Returning error=%d.", sc->sc_error);
 			g_io_deliver(bp, sc->sc_error);
 			return;
 		}
@@ -164,12 +164,12 @@ g_nop_start(struct bio *bp)
 	pp = LIST_FIRST(&gp->provider);
 	KASSERT(pp != NULL, ("NULL pp"));
 	cbp->bio_to = pp;
-	G_NOP_LOGREQ(cbp, "Sending request.");
+	G_LOGSTOR_LOGREQ(cbp, "Sending request.");
 	g_io_request(cbp, LIST_FIRST(&gp->consumer));
 }
 
 static int
-g_nop_access(struct g_provider *pp, int dr, int dw, int de)
+g_logstor_access(struct g_provider *pp, int dr, int dw, int de)
 {
 	struct g_geom *gp;
 	struct g_consumer *cp;
@@ -183,11 +183,11 @@ g_nop_access(struct g_provider *pp, int dr, int dw, int de)
 }
 
 static int
-g_nop_create(struct gctl_req *req, struct g_class *mp, struct g_provider *pp,
+g_logstor_create(struct gctl_req *req, struct g_class *mp, struct g_provider *pp,
     int ioerror, u_int rfailprob, u_int wfailprob, off_t offset, off_t size,
     u_int secsize, u_int stripesize, u_int stripeoffset, const char *physpath)
 {
-	struct g_nop_softc *sc;
+	struct g_logstor_softc *sc;
 	struct g_geom *gp;
 	struct g_provider *newpp;
 	struct g_consumer *cp;
@@ -243,7 +243,7 @@ g_nop_create(struct gctl_req *req, struct g_class *mp, struct g_provider *pp,
 		gctl_error(req, "stripeoffset is too big.");
 		return (EINVAL);
 	}
-	snprintf(name, sizeof(name), "%s%s", pp->name, G_NOP_SUFFIX);
+	snprintf(name, sizeof(name), "%s%s", pp->name, G_LOGSTOR_SUFFIX);
 	LIST_FOREACH(gp, &mp->geom, geom) {
 		if (strcmp(gp->name, name) == 0) {
 			gctl_error(req, "Provider %s already exists.", name);
@@ -256,7 +256,7 @@ g_nop_create(struct gctl_req *req, struct g_class *mp, struct g_provider *pp,
 	sc->sc_explicitsize = explicitsize;
 	sc->sc_stripesize = stripesize;
 	sc->sc_stripeoffset = stripeoffset;
-	if (physpath && strcmp(physpath, G_NOP_PHYSPATH_PASSTHROUGH)) {
+	if (physpath && strcmp(physpath, G_LOGSTOR_PHYSPATH_PASSTHROUGH)) {
 		sc->sc_physpath = strndup(physpath, MAXPATHLEN, M_GEOM);
 	} else
 		sc->sc_physpath = NULL;
@@ -273,13 +273,13 @@ g_nop_create(struct gctl_req *req, struct g_class *mp, struct g_provider *pp,
 	sc->sc_cmd2s = 0;
 	sc->sc_readbytes = 0;
 	sc->sc_wrotebytes = 0;
-	mtx_init(&sc->sc_lock, "gnop lock", NULL, MTX_DEF);
+	mtx_init(&sc->sc_lock, "glogstor lock", NULL, MTX_DEF);
 	gp->softc = sc;
-	gp->start = g_nop_start;
-	gp->orphan = g_nop_orphan;
-	gp->resize = g_nop_resize;
-	gp->access = g_nop_access;
-	gp->dumpconf = g_nop_dumpconf;
+	gp->start = g_logstor_start;
+	gp->orphan = g_logstor_orphan;
+	gp->resize = g_logstor_resize;
+	gp->access = g_logstor_access;
+	gp->dumpconf = g_logstor_dumpconf;
 
 	newpp = g_new_providerf(gp, "%s", gp->name);
 	newpp->flags |= G_PF_DIRECT_SEND | G_PF_DIRECT_RECEIVE;
@@ -298,7 +298,7 @@ g_nop_create(struct gctl_req *req, struct g_class *mp, struct g_provider *pp,
 
 	newpp->flags |= pp->flags & G_PF_ACCEPT_UNMAPPED;
 	g_error_provider(newpp, 0);
-	G_NOP_DEBUG(0, "Device %s created.", gp->name);
+	G_LOGSTOR_DEBUG(0, "Device %s created.", gp->name);
 	return (0);
 fail:
 	if (cp->provider != NULL)
@@ -313,9 +313,9 @@ fail:
 }
 
 static int
-g_nop_destroy(struct g_geom *gp, boolean_t force)
+g_logstor_destroy(struct g_geom *gp, boolean_t force)
 {
-	struct g_nop_softc *sc;
+	struct g_logstor_softc *sc;
 	struct g_provider *pp;
 
 	g_topology_assert();
@@ -326,15 +326,15 @@ g_nop_destroy(struct g_geom *gp, boolean_t force)
 	pp = LIST_FIRST(&gp->provider);
 	if (pp != NULL && (pp->acr != 0 || pp->acw != 0 || pp->ace != 0)) {
 		if (force) {
-			G_NOP_DEBUG(0, "Device %s is still open, so it "
+			G_LOGSTOR_DEBUG(0, "Device %s is still open, so it "
 			    "can't be definitely removed.", pp->name);
 		} else {
-			G_NOP_DEBUG(1, "Device %s is still open (r%dw%de%d).",
+			G_LOGSTOR_DEBUG(1, "Device %s is still open (r%dw%de%d).",
 			    pp->name, pp->acr, pp->acw, pp->ace);
 			return (EBUSY);
 		}
 	} else {
-		G_NOP_DEBUG(0, "Device %s removed.", gp->name);
+		G_LOGSTOR_DEBUG(0, "Device %s removed.", gp->name);
 	}
 	gp->softc = NULL;
 	mtx_destroy(&sc->sc_lock);
@@ -345,14 +345,14 @@ g_nop_destroy(struct g_geom *gp, boolean_t force)
 }
 
 static int
-g_nop_destroy_geom(struct gctl_req *req, struct g_class *mp, struct g_geom *gp)
+g_logstor_destroy_geom(struct gctl_req *req, struct g_class *mp, struct g_geom *gp)
 {
 
-	return (g_nop_destroy(gp, 0));
+	return (g_logstor_destroy(gp, 0));
 }
 
 static void
-g_nop_ctl_create(struct gctl_req *req, struct g_class *mp)
+g_logstor_ctl_create(struct gctl_req *req, struct g_class *mp)
 {
 	struct g_provider *pp;
 	intmax_t *error, *rfailprob, *wfailprob, *offset, *secsize, *size,
@@ -453,11 +453,11 @@ g_nop_ctl_create(struct gctl_req *req, struct g_class *mp)
 			name += strlen("/dev/");
 		pp = g_provider_by_name(name);
 		if (pp == NULL) {
-			G_NOP_DEBUG(1, "Provider %s is invalid.", name);
+			G_LOGSTOR_DEBUG(1, "Provider %s is invalid.", name);
 			gctl_error(req, "Provider %s is invalid.", name);
 			return;
 		}
-		if (g_nop_create(req, mp, pp,
+		if (g_logstor_create(req, mp, pp,
 		    *error == -1 ? EIO : (int)*error,
 		    *rfailprob == -1 ? 0 : (u_int)*rfailprob,
 		    *wfailprob == -1 ? 0 : (u_int)*wfailprob,
@@ -470,9 +470,9 @@ g_nop_ctl_create(struct gctl_req *req, struct g_class *mp)
 }
 
 static void
-g_nop_ctl_configure(struct gctl_req *req, struct g_class *mp)
+g_logstor_ctl_configure(struct gctl_req *req, struct g_class *mp)
 {
-	struct g_nop_softc *sc;
+	struct g_logstor_softc *sc;
 	struct g_provider *pp;
 	intmax_t *error, *rfailprob, *wfailprob;
 	const char *name;
@@ -525,7 +525,7 @@ g_nop_ctl_configure(struct gctl_req *req, struct g_class *mp)
 			name += strlen("/dev/");
 		pp = g_provider_by_name(name);
 		if (pp == NULL || pp->geom->class != mp) {
-			G_NOP_DEBUG(1, "Provider %s is invalid.", name);
+			G_LOGSTOR_DEBUG(1, "Provider %s is invalid.", name);
 			gctl_error(req, "Provider %s is invalid.", name);
 			return;
 		}
@@ -540,7 +540,7 @@ g_nop_ctl_configure(struct gctl_req *req, struct g_class *mp)
 }
 
 static struct g_geom *
-g_nop_find_geom(struct g_class *mp, const char *name)
+g_logstor_find_geom(struct g_class *mp, const char *name)
 {
 	struct g_geom *gp;
 
@@ -552,7 +552,7 @@ g_nop_find_geom(struct g_class *mp, const char *name)
 }
 
 static void
-g_nop_ctl_destroy(struct gctl_req *req, struct g_class *mp)
+g_logstor_ctl_destroy(struct gctl_req *req, struct g_class *mp)
 {
 	int *nargs, *force, error, i;
 	struct g_geom *gp;
@@ -585,13 +585,13 @@ g_nop_ctl_destroy(struct gctl_req *req, struct g_class *mp)
 		}
 		if (strncmp(name, "/dev/", strlen("/dev/")) == 0)
 			name += strlen("/dev/");
-		gp = g_nop_find_geom(mp, name);
+		gp = g_logstor_find_geom(mp, name);
 		if (gp == NULL) {
-			G_NOP_DEBUG(1, "Device %s is invalid.", name);
+			G_LOGSTOR_DEBUG(1, "Device %s is invalid.", name);
 			gctl_error(req, "Device %s is invalid.", name);
 			return;
 		}
-		error = g_nop_destroy(gp, *force);
+		error = g_logstor_destroy(gp, *force);
 		if (error != 0) {
 			gctl_error(req, "Cannot destroy device %s (error=%d).",
 			    gp->name, error);
@@ -601,9 +601,9 @@ g_nop_ctl_destroy(struct gctl_req *req, struct g_class *mp)
 }
 
 static void
-g_nop_ctl_reset(struct gctl_req *req, struct g_class *mp)
+g_logstor_ctl_reset(struct gctl_req *req, struct g_class *mp)
 {
-	struct g_nop_softc *sc;
+	struct g_logstor_softc *sc;
 	struct g_provider *pp;
 	const char *name;
 	char param[16];
@@ -632,7 +632,7 @@ g_nop_ctl_reset(struct gctl_req *req, struct g_class *mp)
 			name += strlen("/dev/");
 		pp = g_provider_by_name(name);
 		if (pp == NULL || pp->geom->class != mp) {
-			G_NOP_DEBUG(1, "Provider %s is invalid.", name);
+			G_LOGSTOR_DEBUG(1, "Provider %s is invalid.", name);
 			gctl_error(req, "Provider %s is invalid.", name);
 			return;
 		}
@@ -651,7 +651,7 @@ g_nop_ctl_reset(struct gctl_req *req, struct g_class *mp)
 }
 
 static void
-g_nop_config(struct gctl_req *req, struct g_class *mp, const char *verb)
+g_logstor_config(struct gctl_req *req, struct g_class *mp, const char *verb)
 {
 	uint32_t *version;
 
@@ -662,22 +662,22 @@ g_nop_config(struct gctl_req *req, struct g_class *mp, const char *verb)
 		gctl_error(req, "No '%s' argument.", "version");
 		return;
 	}
-	if (*version != G_NOP_VERSION) {
+	if (*version != G_LOGSTOR_VERSION) {
 		gctl_error(req, "Userland and kernel parts are out of sync.");
 		return;
 	}
 
 	if (strcmp(verb, "create") == 0) {
-		g_nop_ctl_create(req, mp);
+		g_logstor_ctl_create(req, mp);
 		return;
 	} else if (strcmp(verb, "configure") == 0) {
-		g_nop_ctl_configure(req, mp);
+		g_logstor_ctl_configure(req, mp);
 		return;
 	} else if (strcmp(verb, "destroy") == 0) {
-		g_nop_ctl_destroy(req, mp);
+		g_logstor_ctl_destroy(req, mp);
 		return;
 	} else if (strcmp(verb, "reset") == 0) {
-		g_nop_ctl_reset(req, mp);
+		g_logstor_ctl_reset(req, mp);
 		return;
 	}
 
@@ -685,10 +685,10 @@ g_nop_config(struct gctl_req *req, struct g_class *mp, const char *verb)
 }
 
 static void
-g_nop_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
+g_logstor_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
     struct g_consumer *cp, struct g_provider *pp)
 {
-	struct g_nop_softc *sc;
+	struct g_logstor_softc *sc;
 
 	if (pp != NULL || cp != NULL)
 		return;
@@ -714,5 +714,5 @@ g_nop_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 	    sc->sc_wrotebytes);
 }
 
-DECLARE_GEOM_CLASS(g_nop_class, g_nop);
-MODULE_VERSION(geom_nop, 0);
+DECLARE_GEOM_CLASS(g_logstor_class, g_logstor);
+MODULE_VERSION(geom_logstor, 0);

@@ -26,33 +26,33 @@
  * $FreeBSD$
  */
 
-#ifndef	_G_NOP_H_
-#define	_G_NOP_H_
+#ifndef	_G_LOGSTOR_H_
+#define	_G_LOGSTOR_H_
 
-#define	G_NOP_CLASS_NAME	"NOP"
-#define	G_NOP_VERSION		4
-#define	G_NOP_SUFFIX		".nop"
+#define	G_LOGSTOR_CLASS_NAME	"LOGSTOR"
+#define	G_LOGSTOR_VERSION	4
+#define	G_LOGSTOR_SUFFIX	".logstor"
 /*
- * Special flag to instruct gnop to passthrough the underlying provider's
+ * Special flag to instruct glogstor to passthrough the underlying provider's
  * physical path
  */
-#define G_NOP_PHYSPATH_PASSTHROUGH "\255"
+#define G_LOGSTOR_PHYSPATH_PASSTHROUGH "\255"
 
 #ifdef _KERNEL
-#define	G_NOP_DEBUG(lvl, ...)	do {					\
-	if (g_nop_debug >= (lvl)) {					\
-		printf("GEOM_NOP");					\
-		if (g_nop_debug > 0)					\
+#define	G_LOGSTOR_DEBUG(lvl, ...)	do {				\
+	if (g_logstor_debug >= (lvl)) {					\
+		printf("GEOM_LOGSTOR");					\
+		if (g_logstor_debug > 0)				\
 			printf("[%u]", lvl);				\
 		printf(": ");						\
 		printf(__VA_ARGS__);					\
 		printf("\n");						\
 	}								\
 } while (0)
-#define	G_NOP_LOGREQ(bp, ...)	G_NOP_LOGREQLVL(2, bp, __VA_ARGS__)
-#define G_NOP_LOGREQLVL(lvl, bp, ...) do {				\
-	if (g_nop_debug >= (lvl)) {					\
-		printf("GEOM_NOP[%d]: ", (lvl));			\
+#define	G_LOGSTOR_LOGREQ(bp, ...)	G_LOGSTOR_LOGREQLVL(2, bp, __VA_ARGS__)
+#define G_LOGSTOR_LOGREQLVL(lvl, bp, ...) do {				\
+	if (g_logstor_debug >= (lvl)) {					\
+		printf("GEOM_LOGSTOR[%d]: ", (lvl));			\
 		printf(__VA_ARGS__);					\
 		printf(" ");						\
 		g_print_bio(bp);					\
@@ -60,7 +60,7 @@
 	}								\
 } while (0)
 
-struct g_nop_softc {
+struct g_logstor_softc {
 	int		sc_error;
 	off_t		sc_offset;
 	off_t		sc_explicitsize;
@@ -83,4 +83,4 @@ struct g_nop_softc {
 };
 #endif	/* _KERNEL */
 
-#endif	/* _G_NOP_H_ */
+#endif	/* _G_LOGSTOR_H_ */
