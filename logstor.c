@@ -73,12 +73,6 @@ struct {
 	unsigned d_delete_count;
 } rw;
 
-/*
-  Even with @fbuf_ratio set to 1, there will still be some fbuf_flush called
-  during fbuf_alloc
-*/
-static double fbuf_ratio = 1.0; // the ration of allocated and needed fbufs
-
 #define	SIG_LOGSTOR	0x4C4F4753	// "LOGS": Log-Structured Storage
 #define	VER_MAJOR	0
 #define	VER_MINOR	1
