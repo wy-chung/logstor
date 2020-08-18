@@ -86,13 +86,13 @@ struct {
 #define CLEAN_WINDOW	6
 #define CLEAN_AGE_LIMIT	4
 
-#define	META_BASE	0x40000000u	// metadata block start address
+#define	META_BASE	0xC0000000u	// metadata block start address
 #define	META_INVALID	0		// invalid metadata address
 
 #define	SECTOR_NULL	0	// this sector address can not map to any block address
 #define SECTOR_DELETE	2	// delete marker for a block
 
-#define	IS_META_ADDR(x)	((x) & META_BASE)
+#define	IS_META_ADDR(x)	(((x) & META_BASE) == META_BASE)
 #define META_LEAF_DEPTH 2
 
 #define RAM_DISK_SIZE		0x70000000 // 1.75G the maximum size for i386 FreeBSD 12
@@ -179,8 +179,7 @@ union meta_addr { // metadata address for file data and its indirect blocks
 		uint32_t depth	:2;	// depth of the node
 		uint32_t fd	:2;	// file descriptor
 		uint32_t resv0	:6;	// reserved
-		uint32_t meta	:1;	// 1 for metadata address
-		uint32_t resv1	:1;	// reserved
+		uint32_t meta	:2;	// 1 for metadata address
 	};
 };
 
@@ -1024,7 +1023,6 @@ seg_clean(struct _seg_sum *seg_sum)
 	seg_sa = sega2sa(seg_sum->ss_soft.sega);
 	for (i = 0; i < seg_sum->ss_alloc_p; i++) {
 		ba = seg_sum->ss_rm[i];	// get the block address from reverse map
-		ASSERT((ba & 0x80000000u) == 0);
 		if (IS_META_ADDR(ba)) {
 			sa = fbuf_ma2sa((union meta_addr)ba); 
 			if (sa == seg_sa + i) { // live metadata

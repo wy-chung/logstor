@@ -50,7 +50,7 @@ SYSCTL_UINT(_kern_geom_logstor, OID_AUTO, debug, CTLFLAG_RW, &g_logstor_debug, 0
 static int g_logstor_destroy(struct g_geom *gp, boolean_t force);
 static int g_logstor_destroy_geom(struct gctl_req *req, struct g_class *mp,
     struct g_geom *gp);
-static void g_logstor_config(struct gctl_req *req, struct g_class *mp,
+static void g_logstor_ctlreq(struct gctl_req *req, struct g_class *mp,
     const char *verb);
 static void g_logstor_dumpconf(struct sbuf *sb, const char *indent,
     struct g_geom *gp, struct g_consumer *cp, struct g_provider *pp);
@@ -58,7 +58,7 @@ static void g_logstor_dumpconf(struct sbuf *sb, const char *indent,
 struct g_class g_logstor_class = {
 	.name = G_LOGSTOR_CLASS_NAME,
 	.version = G_VERSION,
-	.ctlreq = g_logstor_config,
+	.ctlreq = g_logstor_ctlreq,
 	.destroy_geom = g_logstor_destroy_geom
 };
 
@@ -243,7 +243,7 @@ g_logstor_create(struct gctl_req *req, struct g_class *mp, struct g_provider *pp
 		gctl_error(req, "stripeoffset is too big.");
 		return (EINVAL);
 	}
-	snprintf(name, sizeof(name), "%s%s", pp->name, G_LOGSTOR_SUFFIX);
+	snprintf(name, sizeof(name), "logstor/%s", pp->name);//, G_LOGSTOR_SUFFIX);
 	LIST_FOREACH(gp, &mp->geom, geom) {
 		if (strcmp(gp->name, name) == 0) {
 			gctl_error(req, "Provider %s already exists.", name);
@@ -557,7 +557,7 @@ g_logstor_ctl_destroy(struct gctl_req *req, struct g_class *mp)
 	int *nargs, *force, error, i;
 	struct g_geom *gp;
 	const char *name;
-	char param[16];
+	char param[32];
 
 	g_topology_assert();
 
@@ -585,7 +585,8 @@ g_logstor_ctl_destroy(struct gctl_req *req, struct g_class *mp)
 		}
 		if (strncmp(name, "/dev/", strlen("/dev/")) == 0)
 			name += strlen("/dev/");
-		gp = g_logstor_find_geom(mp, name);
+		snprintf(param, sizeof(param), "logstor/%s", name);
+		gp = g_logstor_find_geom(mp, param);
 		if (gp == NULL) {
 			G_LOGSTOR_DEBUG(1, "Device %s is invalid.", name);
 			gctl_error(req, "Device %s is invalid.", name);
@@ -651,7 +652,7 @@ g_logstor_ctl_reset(struct gctl_req *req, struct g_class *mp)
 }
 
 static void
-g_logstor_config(struct gctl_req *req, struct g_class *mp, const char *verb)
+g_logstor_ctlreq(struct gctl_req *req, struct g_class *mp, const char *verb)
 {
 	uint32_t *version;
 
