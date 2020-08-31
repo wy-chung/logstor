@@ -31,7 +31,7 @@
 
 #define	G_LOGSTOR_CLASS_NAME	"LOGSTOR"
 #define	G_LOGSTOR_VERSION	4
-#define	G_LOGSTOR_SUFFIX	".logstor"
+#define	G_LOGSTOR_PREFIX	"logstor/"
 /*
  * Special flag to instruct glogstor to passthrough the underlying provider's
  * physical path
@@ -60,27 +60,38 @@
 	}								\
 } while (0)
 
-struct g_logstor_softc {
-	int		sc_error;
-	off_t		sc_offset;
-	off_t		sc_explicitsize;
-	off_t		sc_stripesize;
-	off_t		sc_stripeoffset;
-	u_int		sc_rfailprob;
-	u_int		sc_wfailprob;
-	uintmax_t	sc_reads;
-	uintmax_t	sc_writes;
-	uintmax_t	sc_deletes;
-	uintmax_t	sc_getattrs;
-	uintmax_t	sc_flushes;
-	uintmax_t	sc_cmd0s;
-	uintmax_t	sc_cmd1s;
-	uintmax_t	sc_cmd2s;
-	uintmax_t	sc_readbytes;
-	uintmax_t	sc_wrotebytes;
-	char*		sc_physpath;
-	struct mtx	sc_lock;
-};
+#define	MY_DEBUG
+
+#if defined(MY_DEBUG)
+void my_debug(const char * fname, int line_num);
+void my_break(void);
+
+#define MY_ASSERT(x)	do if (!(x)) my_debug(__func__, __LINE__); while(0)
+#define MY_PANIC()	my_debug(__FILE__, __LINE__)
+#else
+#define MY_ASSERT(x)
+#define MY_PANIC()
+#endif
+
+#define	SECTOR_SIZE	0x1000		// 4K
+
+struct g_logstor_softc;
+
+uint32_t superblock_init(struct g_logstor_softc *sc, off_t media_size);
+void logstor_init(void);
+void logstor_fini(struct g_logstor_softc *sc);
+int  logstor_open(struct g_logstor_softc *sc, struct g_consumer *cp);
+void logstor_close(struct g_logstor_softc *sc);
+int logstor_read  (struct g_logstor_softc *sc, struct bio *bp);
+int logstor_write (struct g_logstor_softc *sc, struct bio *bp);
+int logstor_delete(struct g_logstor_softc *sc, struct bio *bp);
+uint32_t logstor_get_block_cnt(struct g_logstor_softc *sc);
+//void logstor_check(void);
+unsigned logstor_get_data_write_count(struct g_logstor_softc *sc);
+unsigned logstor_get_other_write_count(struct g_logstor_softc *sc);
+unsigned logstor_get_fbuf_hit(struct g_logstor_softc *sc);
+unsigned logstor_get_fbuf_miss(struct g_logstor_softc *sc);
+
 #endif	/* _KERNEL */
 
 #endif	/* _G_LOGSTOR_H_ */
