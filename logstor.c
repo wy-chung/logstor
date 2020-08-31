@@ -216,7 +216,7 @@ struct _fbuf { // file buffer
 /*
 	logstor soft control
 */
-struct g_logstor_softc {
+struct logstor_softc {
 	struct _seg_sum seg_sum_cold;// segment summary for the cold segment
 	struct _seg_sum seg_sum_hot;// segment summary for the hot segment
 	
@@ -264,7 +264,7 @@ struct g_logstor_softc {
 #endif
 };
 
-static struct g_logstor_softc sc;
+static struct logstor_softc sc;
 
 static int _logstor_read(unsigned ba, char *data, int size);
 static int _logstor_read_one(unsigned ba, char *data);
@@ -307,14 +307,14 @@ g_gate_mediasize(int fd)
 	int rc;
 
 	rc = fstat(fd, &sb);
-	ASSERT(rc != -1);
+	MY_ASSERT(rc != -1);
 
 	if (S_ISCHR(sb.st_mode))
-		ASSERT(ioctl(fd, BLKGETSIZE64, &mediasize) != -1);
+		MY_ASSERT(ioctl(fd, BLKGETSIZE64, &mediasize) != -1);
 	else if (S_ISREG(sb.st_mode))
 		mediasize = sb.st_size;
 	else
-		PANIC(); // Unsupported file system object
+		MY_PANIC(); // Unsupported file system object
 
 	return (mediasize);
 }
@@ -365,11 +365,11 @@ superblock_init(void)
 	sb->sb_gen = random();
 #endif
 	sb->seg_cnt = sector_cnt / SECTORS_PER_SEG;
-	ASSERT(sizeof(struct _superblock) + sb->seg_cnt < SECTOR_SIZE);
+	MY_ASSERT(sizeof(struct _superblock) + sb->seg_cnt < SECTOR_SIZE);
 	sb->seg_free_cnt = sb->seg_cnt - SEG_DATA_START;
 
 	// the physical disk must have at least the space for the metadata
-	ASSERT(sb->seg_free_cnt * BLOCKS_PER_SEG >
+	MY_ASSERT(sb->seg_free_cnt * BLOCKS_PER_SEG >
 	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT);
 
 	sb->max_block_cnt =
@@ -387,7 +387,7 @@ superblock_init(void)
 #if !defined(AGE_STATIC)
 	if (sc.seg_age == NULL) {
 		sc.seg_age = malloc(sc.superblock.seg_cnt);
-		ASSERT(sc.seg_age != NULL);
+		MY_ASSERT(sc.seg_age != NULL);
 	}
 #endif
 	memset(sc.seg_age, 0, sb->seg_cnt);
@@ -421,7 +421,7 @@ void logstor_init(const char *disk_file)
 
 	if (*disk_file == '\0') {
 		sc.ram_disk = malloc(RAM_DISK_SIZE);
-		ASSERT(sc.ram_disk != NULL);
+		MY_ASSERT(sc.ram_disk != NULL);
 		sc.disk_fd = -1;
 		sc.my_read = ram_read;
 		sc.my_write = ram_write;
@@ -432,7 +432,7 @@ void logstor_init(const char *disk_file)
 #else
 		sc.disk_fd = open(disk_file, O_RDWR);
 #endif
-		ASSERT(sc.disk_fd > 0);
+		MY_ASSERT(sc.disk_fd > 0);
 		sc.my_read = disk_read;
 		sc.my_write = disk_write;
 	}
@@ -502,8 +502,8 @@ logstor_read(off_t offset, void *data, off_t length)
 	uint32_t ba;
 	int error;
 
-	ASSERT((offset & (SECTOR_SIZE - 1)) == 0);
-	ASSERT((length & (SECTOR_SIZE - 1)) == 0);
+	MY_ASSERT((offset & (SECTOR_SIZE - 1)) == 0);
+	MY_ASSERT((length & (SECTOR_SIZE - 1)) == 0);
 	ba = offset / SECTOR_SIZE;
 	size = length / SECTOR_SIZE;
 
@@ -531,8 +531,8 @@ logstor_write(off_t offset, void *data, off_t length)
 	int size;	// number of remaining sectors to process
 	int error;
 
-	ASSERT((offset & (SECTOR_SIZE - 1)) == 0);
-	ASSERT((length & (SECTOR_SIZE - 1)) == 0);
+	MY_ASSERT((offset & (SECTOR_SIZE - 1)) == 0);
+	MY_ASSERT((length & (SECTOR_SIZE - 1)) == 0);
 	ba = offset / SECTOR_SIZE;
 	size = length / SECTOR_SIZE;
 
@@ -551,11 +551,11 @@ int logstor_delete(off_t offset, void *data, off_t length)
 	int i;
 
 	rw.d_delete_count++;
-	ASSERT((offset & (SECTOR_SIZE - 1)) == 0);
-	ASSERT((length & (SECTOR_SIZE - 1)) == 0);
+	MY_ASSERT((offset & (SECTOR_SIZE - 1)) == 0);
+	MY_ASSERT((length & (SECTOR_SIZE - 1)) == 0);
 	ba = offset / SECTOR_SIZE;
 	size = length / SECTOR_SIZE;
-	ASSERT(ba < sc.superblock.max_block_cnt);
+	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	if (size == 1) {
 		file_write_4byte(FD_ACTIVE, ba, SECTOR_DELETE);
@@ -593,7 +593,7 @@ _logstor_read(unsigned ba, char *data, int size)
 	unsigned i, count;
 	uint32_t start_sa, pre_sa, sa;	// sector address
 
-	ASSERT(ba < sc.superblock.max_block_cnt);
+	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	start_sa = pre_sa = file_read_4byte(FD_ACTIVE, ba);
 	count = 1;
@@ -630,7 +630,7 @@ _logstor_read_one(unsigned ba, char *data)
 {
 	uint32_t start_sa;	// sector address
 
-	ASSERT(ba < sc.superblock.max_block_cnt);
+	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	start_sa = file_read_4byte(FD_ACTIVE, ba);
 	if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
@@ -661,15 +661,15 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 	int sec_free;	// number of free sectors in current segment
 	int i, count;
 
-	ASSERT(ba < sc.superblock.max_block_cnt);
-	ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFF);
+	MY_ASSERT(ba < sc.superblock.max_block_cnt);
+	MY_ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFF);
 
 	sec_remain = size;
 	while (sec_remain > 0) {
 		sec_free = SEG_SUM_OFF - seg_sum->ss_alloc_p;
 		count = sec_remain <= sec_free? sec_remain: sec_free; // min(sec_remain, sec_free)
 		sa = sega2sa(seg_sum->ss_soft.sega) + seg_sum->ss_alloc_p;
-		ASSERT(sa + count < sc.superblock.seg_cnt * SECTORS_PER_SEG);
+		MY_ASSERT(sa + count < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 		sc.my_write(sa, data, count);
 		rw.w_logstor_write++;
 		data += count * SECTOR_SIZE;
@@ -703,11 +703,11 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
 {
 	uint32_t sa;	// sector address
 
-	ASSERT(ba < sc.superblock.max_block_cnt);
-	ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFF);
+	MY_ASSERT(ba < sc.superblock.max_block_cnt);
+	MY_ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFF);
 
 	sa = sega2sa(seg_sum->ss_soft.sega) + seg_sum->ss_alloc_p;
-	ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
+	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	sc.my_write(sa, data, 1);
 	rw.w_logstor_write_one++;
 	if (sc.cleaner_disabled) // if doing segment cleaning
@@ -825,11 +825,11 @@ superblock_read(void)
 	    sc.superblock.seg_reclaim_p >= sc.superblock.seg_cnt)
 		return EINVAL;
 #if defined(AGE_STATIC)
-	ASSERT(sizeof(sc.seg_age) >= sc.superblock.seg_cnt);
+	MY_ASSERT(sizeof(sc.seg_age) >= sc.superblock.seg_cnt);
 #else
 	if (sc.seg_age == NULL) {
 		sc.seg_age = malloc(sc.superblock.seg_cnt);
-		ASSERT(sc.seg_age != NULL);
+		MY_ASSERT(sc.seg_age != NULL);
 	}
 #endif
 	memcpy(sc.seg_age, sb_in->seg_age, sb_in->seg_cnt);
@@ -860,10 +860,10 @@ disk_read(uint32_t sa, void *buf, unsigned size)
 {
 	ssize_t bc; // byte count
 
-	ASSERT((sa < sc.superblock.seg_cnt * SECTORS_PER_SEG) ||
+	MY_ASSERT((sa < sc.superblock.seg_cnt * SECTORS_PER_SEG) ||
 	    (sc.superblock.seg_cnt == 0 && sa < SECTORS_PER_SEG));	// reading the superblock
 	bc = pread(sc.disk_fd, buf, size * SECTOR_SIZE, (off_t)sa * SECTOR_SIZE);
-	ASSERT(bc == size * SECTOR_SIZE);
+	MY_ASSERT(bc == size * SECTOR_SIZE);
 }
 
 static void
@@ -871,15 +871,15 @@ disk_write(uint32_t sa, const void *buf, unsigned size)
 {
 	ssize_t bc; // byte count
 
-	ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
+	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	bc = pwrite(sc.disk_fd, buf, size * SECTOR_SIZE, (off_t)sa * SECTOR_SIZE);
-	ASSERT(bc == size * SECTOR_SIZE);
+	MY_ASSERT(bc == size * SECTOR_SIZE);
 }
 
 static void
 ram_read(uint32_t sa, void *buf, unsigned size)
 {
-	ASSERT((sa < sc.superblock.seg_cnt * SECTORS_PER_SEG) || 1);
+	MY_ASSERT((sa < sc.superblock.seg_cnt * SECTORS_PER_SEG) || 1);
 	    //(sc.superblock.seg_cnt == 0 && sa < SECTORS_PER_SEG));	// reading the superblock
 	memcpy(buf, sc.ram_disk + (off_t)sa * SECTOR_SIZE, size * SECTOR_SIZE);
 }
@@ -887,7 +887,7 @@ ram_read(uint32_t sa, void *buf, unsigned size)
 static void
 ram_write(uint32_t sa, const void *buf, unsigned size)
 {
-	ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
+	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(sc.ram_disk + (off_t)sa * SECTOR_SIZE , buf, size * SECTOR_SIZE);
 }
 
@@ -911,11 +911,11 @@ again:
 	sega = sc.superblock.seg_alloc_p;
 	if (++sc.superblock.seg_alloc_p == sc.superblock.seg_cnt)
 		sc.superblock.seg_alloc_p = SEG_DATA_START;
-	ASSERT(sc.superblock.seg_alloc_p < sc.superblock.seg_cnt);
-	ASSERT(sc.superblock.seg_alloc_p + 1 != sc.superblock.seg_reclaim_p);
-	ASSERT(sega != sega_hot);
+	MY_ASSERT(sc.superblock.seg_alloc_p < sc.superblock.seg_cnt);
+	MY_ASSERT(sc.superblock.seg_alloc_p + 1 != sc.superblock.seg_reclaim_p);
+	MY_ASSERT(sega != sega_hot);
 #if 0
-	ASSERT(sega != sega_cold);
+	MY_ASSERT(sega != sega_cold);
 #else
 	if (sega == sega_cold)
 		goto again;
@@ -927,7 +927,7 @@ again:
 	seg_sum->ss_alloc_p = 0;
 
 	sc.superblock.seg_free_cnt--;
-	ASSERT(sc.superblock.seg_free_cnt > 0 &&
+	MY_ASSERT(sc.superblock.seg_free_cnt > 0 &&
 	    sc.superblock.seg_free_cnt < sc.superblock.seg_cnt);
 	
 }
@@ -951,10 +951,10 @@ again:
 	sega = sc.superblock.seg_reclaim_p;
 	if (++sc.superblock.seg_reclaim_p == sc.superblock.seg_cnt)
 		sc.superblock.seg_reclaim_p = SEG_DATA_START;
-	ASSERT(sc.superblock.seg_reclaim_p < sc.superblock.seg_cnt);
-	ASSERT(sega != sega_hot);
+	MY_ASSERT(sc.superblock.seg_reclaim_p < sc.superblock.seg_cnt);
+	MY_ASSERT(sega != sega_hot);
 #if 0
-	ASSERT(sega != sega_cold);
+	MY_ASSERT(sega != sega_cold);
 #else
 	if (sega == sega_cold)
 		goto again;
@@ -1131,14 +1131,14 @@ exit:;
 static inline void
 cleaner_enable(void)
 {
-	ASSERT(sc.cleaner_disabled != 0);
+	MY_ASSERT(sc.cleaner_disabled != 0);
 	sc.cleaner_disabled--;
 }
 
 static inline void
 cleaner_disable(void)
 {
-	ASSERT(sc.cleaner_disabled <= 2);
+	MY_ASSERT(sc.cleaner_disabled <= 2);
 	sc.cleaner_disabled++;
 }
 
@@ -1176,14 +1176,14 @@ file_mod_init(void)
 		LIST_INIT(&sc.fbuf_bucket[i]);
 
 	sc.fbuf = malloc(sizeof(*sc.fbuf) * sc.fbuf_count);
-	ASSERT(sc.fbuf != NULL);
+	MY_ASSERT(sc.fbuf != NULL);
 #if 0
 	sc.fbuf_accessed = malloc(sc.fbuf_count/8);
-	ASSERT(sc.fbuf_accessed != NULL);
+	MY_ASSERT(sc.fbuf_accessed != NULL);
 	sc.fbuf_modified = malloc(sc.fbuf_count/8);
-	ASSERT(sc.fbuf_modified != NULL);
+	MY_ASSERT(sc.fbuf_modified != NULL);
 	sc.fbuf_on_cir_queue = malloc(sc.fbuf_count/8);
-	ASSERT(sc.fbuf_on_cir_queue != NULL);
+	MY_ASSERT(sc.fbuf_on_cir_queue != NULL);
 #endif
 	for (i = 0; i < sc.fbuf_count; i++) {
 		sc.fbuf[i].cir_queue.prev = &sc.fbuf[i-1];
@@ -1216,7 +1216,7 @@ file_mod_flush(void)
 //printf("%s: modified count before %d\n", __func__, sc.fbuf_modified_count);
 	buf = sc.cir_buffer_head;
 	do {
-		ASSERT(buf->on_cir_queue);
+		MY_ASSERT(buf->on_cir_queue);
 		if (buf->modified) {
 			fbuf_flush(buf, &sc.seg_sum_hot);
 			count++;
@@ -1227,7 +1227,7 @@ file_mod_flush(void)
 	// process active indirect blocks
 	for (i = META_LEAF_DEPTH - 1; i >= 0; i--)
 		LIST_FOREACH(buf, &sc.indirect_head[i], indir_queue) {
-			ASSERT(buf->on_cir_queue == false);
+			MY_ASSERT(buf->on_cir_queue == false);
 			if (buf->modified) {
 				fbuf_flush(buf, &sc.seg_sum_hot);
 				count++;
@@ -1260,7 +1260,7 @@ file_read_4byte(uint8_t fd, uint32_t ba)
 	uint8_t	*fbd;	// point to file buffer data
 	uint32_t	offset;	// the offset within the file buffer data
 
-	ASSERT((ba & 0xc0000000u) == 0);
+	MY_ASSERT((ba & 0xc0000000u) == 0);
 	fbd = file_access(fd, ba << 2, &offset, false);
 	return *((uint32_t *)(fbd + offset));
 }
@@ -1280,7 +1280,7 @@ file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
 	uint8_t	*fbd;	// point to file buffer data
 	uint32_t	offset;	// the offset within the file buffer data
 
-	ASSERT((ba & 0xc0000000u) == 0);
+	MY_ASSERT((ba & 0xc0000000u) == 0);
 	fbd = file_access(fd, ba << 2, &offset, true);
 	*((uint32_t *)(fbd + offset)) = sa;
 }
@@ -1334,7 +1334,7 @@ ma_index_get(union meta_addr ma, unsigned depth)
 	case 1:
 		break;
 	default:
-		PANIC();
+		MY_PANIC();
 	}
 	return (index & 0x3ffu);
 }
@@ -1343,8 +1343,8 @@ static void
 ma_index_set(union meta_addr *ma, unsigned depth, unsigned index)
 {
 
-	ASSERT(depth < META_LEAF_DEPTH);
-	ASSERT(index < 1024);
+	MY_ASSERT(depth < META_LEAF_DEPTH);
+	MY_ASSERT(index < 1024);
 
 	switch (depth) {
 	case 0:
@@ -1355,7 +1355,7 @@ ma_index_set(union meta_addr *ma, unsigned depth, unsigned index)
 		ma->uint32 &= 0xfffffc00u;
 		break;
 	default:
-		PANIC();
+		MY_PANIC();
 	}
 	ma->uint32 |= index;
 }
@@ -1391,7 +1391,7 @@ get_sa:
 		sa = pbuf->data[pindex];
 		break;
 	default:
-		PANIC();
+		MY_PANIC();
 	}
 	return sa;
 }
@@ -1416,7 +1416,7 @@ fbuf_ma2sa(union meta_addr ma)
 		sa = pbuf->data[pindex];
 		break;
 	default:
-		PANIC();
+		MY_PANIC();
 	}
 	return sa;
 }
@@ -1442,12 +1442,12 @@ fbuf_queue_check(void)
 	unsigned total, indir_cnt[META_LEAF_DEPTH];
 
 	buf = sc.cir_buffer_head;
-	ASSERT(buf != NULL);
+	MY_ASSERT(buf != NULL);
 	total = 0;
 	do  {
 		++total;
-		ASSERT(total <= sc.fbuf_count);
-		ASSERT(buf->on_cir_queue);
+		MY_ASSERT(total <= sc.fbuf_count);
+		MY_ASSERT(buf->on_cir_queue);
 		buf = buf->cir_queue.next;
 	} while (buf != sc.cir_buffer_head);
 
@@ -1458,9 +1458,9 @@ fbuf_queue_check(void)
 		buf = LIST_FIRST(&sc.indirect_head[i]);
 		while (buf != NULL) {
 			++indir_cnt[0];
-			ASSERT(indir_cnt[0] <= sc.fbuf_count);
-			ASSERT(buf->on_cir_queue == false);
-			ASSERT(buf->ma.depth == i);
+			MY_ASSERT(indir_cnt[0] <= sc.fbuf_count);
+			MY_ASSERT(buf->on_cir_queue == false);
+			MY_ASSERT(buf->ma.depth == i);
 			buf = LIST_NEXT(buf, indir_queue);
 		}
 	}
@@ -1468,7 +1468,7 @@ fbuf_queue_check(void)
 	for (i = 0; i < META_LEAF_DEPTH; i++)
 		total += indir_cnt[i];
 	
-	ASSERT(total == sc.fbuf_count);
+	MY_ASSERT(total == sc.fbuf_count);
 }
 #endif
 
@@ -1501,9 +1501,9 @@ fbuf_cir_queue_remove(struct _fbuf *buf)
 	struct _fbuf *prev;
 	struct _fbuf *next;
 
-	ASSERT(buf->on_cir_queue);
-	ASSERT(sc.cir_buffer_head->cir_queue.next != sc.cir_buffer_head);
-	ASSERT(sc.cir_buffer_head->cir_queue.prev != sc.cir_buffer_head);
+	MY_ASSERT(buf->on_cir_queue);
+	MY_ASSERT(sc.cir_buffer_head->cir_queue.next != sc.cir_buffer_head);
+	MY_ASSERT(sc.cir_buffer_head->cir_queue.prev != sc.cir_buffer_head);
 	if (buf == sc.cir_buffer_head)
 		sc.cir_buffer_head = sc.cir_buffer_head->cir_queue.next;
 	prev = buf->cir_queue.prev;
@@ -1530,14 +1530,14 @@ fbuf_get(union meta_addr ma)
 	unsigned i;
 	unsigned index;
 
-	ASSERT(IS_META_ADDR(ma.uint32));
+	MY_ASSERT(IS_META_ADDR(ma.uint32));
 	buf = fbuf_search(ma);
 	if (buf != NULL) // cache hit
 		return buf;
 
 	// cache miss
 	// get the root sector address of the file @ma.fd
-	ASSERT(ma.fd < FD_COUNT);
+	MY_ASSERT(ma.fd < FD_COUNT);
 	sa = sc.superblock.ftab[ma.fd];
 	pbuf = NULL;	// parent for root is NULL
 	tma.uint32 = META_BASE; // also set .index, .depth and .fd to 0
@@ -1557,10 +1557,10 @@ fbuf_get(union meta_addr ma)
 			  prevent it from being reclaimed by fbuf_read_and_hash.
 			*/
 		} else {
-			ASSERT(buf->parent == pbuf);
-			ASSERT(buf->sa == sa);
+			MY_ASSERT(buf->parent == pbuf);
+			MY_ASSERT(buf->sa == sa);
 			if (pbuf) {
-				ASSERT(pbuf->ref_cnt != 1);
+				MY_ASSERT(pbuf->ref_cnt != 1);
 				/*
 				  The reference count of the parent is always
 				  incremented in the previous loop. In this case
@@ -1608,7 +1608,7 @@ fbuf_alloc(void)
 
 	buf = sc.cir_buffer_head;
 	do {
-		ASSERT(buf->on_cir_queue);
+		MY_ASSERT(buf->on_cir_queue);
 		if (!buf->accessed)
 			break;
 		buf->accessed = false;	// give this buffer a second chance
@@ -1621,7 +1621,7 @@ fbuf_alloc(void)
 	// set buf's parent to NULL
 	pbuf = buf->parent;
 	if (pbuf != NULL) {
-		ASSERT(pbuf->on_cir_queue == false);
+		MY_ASSERT(pbuf->on_cir_queue == false);
 		buf->parent = NULL;
 		pbuf->ref_cnt--;
 		if (pbuf->ref_cnt == 0) {
@@ -1671,9 +1671,9 @@ fbuf_write(struct _fbuf *buf, struct _seg_sum *seg_sum)
 	uint32_t	sa;	// sector address
 
 	// get the sector address where the block will be written
-	ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFF);
+	MY_ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFF);
 	sa = sega2sa(seg_sum->ss_soft.sega) + seg_sum->ss_alloc_p;
-	ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG - 1);
+	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG - 1);
 
 	sc.my_write(sa, buf->data, 1);
 	rw.w_fbuf_write++;
@@ -1703,8 +1703,8 @@ fbuf_flush(struct _fbuf *buf, struct _seg_sum *seg_sum)
 	unsigned pindex; // the index in parent indirect block
 	uint32_t sa;	// sector address
 
-	ASSERT(buf->modified);
-	ASSERT(IS_META_ADDR(buf->ma.uint32));
+	MY_ASSERT(buf->modified);
+	MY_ASSERT(IS_META_ADDR(buf->ma.uint32));
 	/*
 	  Must disable segment cleaner until @sa is written out
 	*/
@@ -1715,8 +1715,8 @@ fbuf_flush(struct _fbuf *buf, struct _seg_sum *seg_sum)
 #endif
 	pbuf = buf->parent;
 	if (pbuf) {
-		ASSERT(buf->ma.depth != 0);
-		ASSERT(pbuf->ma.depth == buf->ma.depth - 1);
+		MY_ASSERT(buf->ma.depth != 0);
+		MY_ASSERT(pbuf->ma.depth == buf->ma.depth - 1);
 		pindex = ma_index_get(buf->ma, buf->ma.depth - 1);
 		pbuf->data[pindex] = sa;
 		if (!pbuf->modified) {
@@ -1724,8 +1724,8 @@ fbuf_flush(struct _fbuf *buf, struct _seg_sum *seg_sum)
 			sc.fbuf_modified_count++;
 		}
 	} else {
-		ASSERT(buf->ma.depth == 0);
-		ASSERT(buf->ma.fd < FD_COUNT);
+		MY_ASSERT(buf->ma.depth == 0);
+		MY_ASSERT(buf->ma.fd < FD_COUNT);
 		// store the root sector address to the corresponding file table in super block
 		sc.superblock.ftab[buf->ma.fd] = sa;
 		sc.sb_modified = true;
@@ -1769,7 +1769,7 @@ logstor_sa2ba(uint32_t sa)
 
 	seg_sa = sa & ~(SECTORS_PER_SEG - 1);
 	seg_off = sa & (SECTORS_PER_SEG - 1);
-	ASSERT(seg_off != SEG_SUM_OFF);
+	MY_ASSERT(seg_off != SEG_SUM_OFF);
 	if (seg_sa != sc.seg_sum_cache.ss_soft.ss_cached_sa) {
 		sc.my_read(seg_sa + SEG_SUM_OFF, &sc.seg_sum_cache, 1);
 		sc.seg_sum_cache.ss_soft.ss_cached_sa = seg_sa;
@@ -1822,7 +1822,7 @@ logstor_check(void)
 					sa_min = sa;
 				printf("ERROR %s: ba %u sa %u ba_exp %u\n",
 				    __func__, ba, sa, ba_exp);
-				PANIC();
+				MY_PANIC();
 			}
 		}
 	}
@@ -1880,7 +1880,7 @@ merge_sort(struct cache_entry *src, struct cache_entry *dst, unsigned n)
 
 		/* make sure that it is sorted */
 		for (i = 1; i < n ; ++i)
-			ASSERT(dst[i].ba > dst[i-1].ba);
+			MY_ASSERT(dst[i].ba > dst[i-1].ba);
 	}
 #endif
 }
