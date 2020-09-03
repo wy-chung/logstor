@@ -109,7 +109,7 @@ test_read(int n, unsigned max_block)
 	printf("reading...\n");
 	start_time = rdtsc();
 	i_max = 0;
-	for (ba = 0 ; ba < max_block; ba += 1) {
+	for (ba = 0 ; ba < max_block; ba += 0x1) {
 		if ( (ba % 0x10000) == 0)
 			printf("r%d %7d/%7d\n", n, ba, max_block);
 		if (ba_write_count[ba] > 0) {
@@ -121,10 +121,10 @@ test_read(int n, unsigned max_block)
 			if (ba2i[ba] != act) {
 				printf("%s: ERROR miscompare: ba %u, exp_i %u, get_i %u\n",
 				    __func__, ba, ba2i[ba], act);
-				PANIC();
+				MY_PANIC();
 			} else {
-				ASSERT(buf[ba%4] == act);
-				ASSERT(buf[SECTOR_SIZE/4-4+(ba%4)] == act);
+				MY_ASSERT(buf[ba%4] == act);
+				MY_ASSERT(buf[SECTOR_SIZE/4-4+(ba%4)] == act);
 			}
 		}
 	}
@@ -157,19 +157,19 @@ main(int argc, char *argv[])
 	max_block = superblock_init();
 
 	ba_write_count = malloc(max_block * sizeof(*ba_write_count));
-	ASSERT(ba_write_count != NULL);
+	MY_ASSERT(ba_write_count != NULL);
 	memset(ba_write_count, 0, max_block * sizeof(*ba_write_count));
 
 	ba2i = malloc(max_block * sizeof(*ba2i));
-	ASSERT(ba2i != NULL);
+	MY_ASSERT(ba2i != NULL);
 	memset(ba2i, 0, max_block * sizeof(*ba2i));
 
 	i2ba = malloc(max_block * loop_ratio * sizeof(*i2ba));
-	ASSERT(i2ba != NULL);
+	MY_ASSERT(i2ba != NULL);
 	memset(i2ba, 0, max_block * loop_ratio * sizeof(*i2ba));
 
 	for (i = 0; i<20; i++) {
-	//	gdb_cond0 = i;
+		gdb_cond0 = i;
 		printf("### test %d\n", i);
 		logstor_open();
 		test(i, max_block);

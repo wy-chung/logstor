@@ -30,11 +30,11 @@ typedef long	int64_t;
 void my_debug(const char * fname, int line_num, bool bl_panic);
 void my_break(void);
 
-#define ASSERT(x)	do if (!(x)) my_debug(__func__, __LINE__, true); while(0)
-#define PANIC()	my_debug(__FILE__, __LINE__, true)
+#define MY_ASSERT(x)	do if (!(x)) my_debug(__func__, __LINE__, true); while(0)
+#define MY_PANIC()	my_debug(__FILE__, __LINE__, true)
 #else
-#define ASSERT(x)
-#define PANIC()
+#define MY_ASSERT(x)
+#define MY_PANIC()
 #endif
 
 #define	SECTOR_SIZE	0x1000		// 4K
