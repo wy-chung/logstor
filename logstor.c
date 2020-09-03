@@ -120,19 +120,19 @@ struct _superblock {
 	/*
 	   The files for forward mapping file
 
-	   Mapping is always updated in @fm_cur. When snapshot command is issued
-	   @fm_cur is copied to @fm_delta and then cleaned.
-	   Backup program then backs up the delta by reading @fm_delta.
-	   After backup is finished, @fm_delta is merged into @fm_base and then cleaned.
+	   Mapping is always updated in @FD_ACTIVE. When snapshot command is issued
+	   @FD_ACTIVE is copied to @FD_DELTA and then cleaned.
+	   Backup program then backs up the delta by reading @FD_DELTA.
+	   After backup is finished, @FD_DELTA is merged into @FD_BASE and then cleaned.
 
-	   If reduced to reboot restore usage, only @fm_cur and @fm_base are needed.
-	   Each time a PC is rebooted @fm_cur is cleaned so all data are restored.
+	   If reduced to reboot restore usage, only @FD_ACTIVE and @FD_BASE are needed.
+	   Each time a PC is rebooted @FD_ACTIVE is cleaned so all data are restored.
 
-	   So the actual mapping is @fm_cur || @fm_delta || @fm_base.
+	   So the actual mapping is @FD_ACTIVE || @FD_DELTA || @FD_BASE.
 	   The first mapping that is not empty is used.
 	*/
 	uint32_t ftab[FD_COUNT]; 	// the file table
-	uint8_t seg_age[];
+	uint8_t sb_seg_age;	// the starting address to store seg_age in superblock
 };
 
 #if !defined(WYC)
@@ -255,12 +255,12 @@ struct g_logstor_softc {
 
 	bool sb_modified;	// the super block is dirty
 	uint32_t sb_sa; 	// superblock's sector address
+	struct _superblock superblock;
 #if defined(AGE_STATIC)
 	uint8_t seg_age[448];
 #else
 	uint8_t *seg_age;
 #endif
-	struct _superblock superblock;
 };
 
 static struct g_logstor_softc sc;
@@ -285,10 +285,10 @@ static void clean_check(void);
 static void seg_clean(struct _seg *seg);
 static void seg_live_count(struct _seg *seg);
 
-static void disk_readc(uint32_t sa, void *buf, unsigned size);
+static void disk_readb(uint32_t sa, void *buf, unsigned size);
 static void disk_read (uint32_t sa, void *buf, unsigned size);
 static void disk_write(uint32_t sa, const void *buf, unsigned size);
-static void ram_readc(uint32_t sa, void *buf, unsigned size);
+static void ram_readb(uint32_t sa, void *buf, unsigned size);
 static void ram_read (uint32_t sa, void *buf, unsigned size);
 static void ram_write(uint32_t sa, const void *buf, unsigned size);
 
@@ -385,7 +385,9 @@ superblock_init(void)
 	for (i = 0; i < FD_COUNT; i++) {
 		sb->ftab[i] = SECTOR_NULL;	// not allocated yet
 	}
-#if !defined(AGE_STATIC)
+#if defined(AGE_STATIC)
+	MY_ASSERT(sizeof(sc.seg_age >= sc.superblock.seg_cnt));
+#else
 	if (sc.seg_age == NULL) {
 		sc.seg_age = malloc(sc.superblock.seg_cnt);
 		MY_ASSERT(sc.seg_age != NULL);
@@ -406,7 +408,7 @@ superblock_init(void)
 	// write out super block
 	sb_out = (struct _superblock *)buf;
 	memcpy(sb_out, &sc.superblock, sizeof(sc.superblock));
-	memcpy(sb_out->seg_age, sc.seg_age, sb->seg_cnt);
+	memcpy(&sb_out->sb_seg_age, sc.seg_age, sb->seg_cnt);
 	sc.sb_sa = 0;
 	sc.my_write(sc.sb_sa, sb_out, 1);
 	rw.w_superblock_init++;
@@ -424,7 +426,7 @@ void logstor_init(const char *disk_file)
 		sc.ram_disk = malloc(RAM_DISK_SIZE);
 		MY_ASSERT(sc.ram_disk != NULL);
 		sc.disk_fd = -1;
-		sc.my_readb = ram_readc;
+		sc.my_readb = ram_readb;
 		sc.my_read  = ram_read;
 		sc.my_write = ram_write;
 	} else {
@@ -435,7 +437,7 @@ void logstor_init(const char *disk_file)
 		sc.disk_fd = open(disk_file, O_RDWR);
 #endif
 		MY_ASSERT(sc.disk_fd > 0);
-		sc.my_readb = disk_readc;
+		sc.my_readb = disk_readb;
 		sc.my_read  = disk_read;
 		sc.my_write = disk_write;
 	}
@@ -838,7 +840,7 @@ superblock_read(void)
 		MY_ASSERT(sc.seg_age != NULL);
 	}
 #endif
-	memcpy(sc.seg_age, sb_in->seg_age, sb_in->seg_cnt);
+	memcpy(sc.seg_age, &sb_in->sb_seg_age, sb_in->seg_cnt);
 
 	return 0;
 }
@@ -854,7 +856,7 @@ superblock_write(void)
 		sc.sb_sa = 0;
 	sb_out = (struct _superblock *)buf;
 	memcpy(sb_out, &sc.superblock, sizeof(sc.superblock));
-	memcpy(sb_out->seg_age, sc.seg_age, sb_out->seg_cnt);
+	memcpy(&sb_out->sb_seg_age, sc.seg_age, sb_out->seg_cnt);
 	
 	sc.my_write(sc.sb_sa, sb_out, 1);
 	rw.w_superblock_write++;
@@ -873,39 +875,49 @@ disk_read(uint32_t sa, void *buf, unsigned size)
 }
 
 static void
-disk_readc(uint32_t sa, void *buf, unsigned size)
+disk_readb(uint32_t sa, void *buf, unsigned size)
 {
-#if 1
-	ssize_t bc; // byte count
-
-	MY_ASSERT((sa < sc.superblock.seg_cnt * SECTORS_PER_SEG) ||
-	    (sc.superblock.seg_cnt == 0 && sa < SECTORS_PER_SEG));	// reading the superblock
-	bc = pread(sc.disk_fd, buf, size * SECTOR_SIZE, (off_t)sa * SECTOR_SIZE);
-	MY_ASSERT(bc == size * SECTOR_SIZE);
-#else
 	ssize_t bc; // byte count
 	struct _seg *seg;
 	int i;
 	uint32_t seg_sa;
+	bool fast;
 
 	MY_ASSERT((sa < sc.superblock.seg_cnt * SECTORS_PER_SEG) || 1);
 
+	fast = true;
 	for (i = sa; i < sa + size; i++) {
 		seg = &sc.seg_hot;
 		seg_sa = sega2sa(seg->sega);
 		if (i >= seg_sa && i < seg_sa + seg->sum.alloc_p) {
-			memcpy(buf, seg->seg_data[i - seg_sa], SECTOR_SIZE);
+			fast = false; // use slow path
 		} else {
 			seg = &sc.seg_cold;
 			seg_sa = sega2sa(seg->sega);
 			if (i >= seg_sa && i < seg_sa + seg->sum.alloc_p)
-				memcpy(buf, seg->seg_data[i - seg_sa], SECTOR_SIZE);
-			else
-				memcpy(buf, sc.ram_disk + (off_t)i * SECTOR_SIZE, SECTOR_SIZE);
+				fast = false; // use slow path
 		}
-		buf = (char *)buf + SECTOR_SIZE;
 	}
-#endif
+	if (fast) {
+		bc = pread(sc.disk_fd, buf, size * SECTOR_SIZE, (off_t)sa * SECTOR_SIZE);
+		MY_ASSERT(bc == size * SECTOR_SIZE);
+	} else {
+		for (i = sa; i < sa + size; i++) {
+			seg = &sc.seg_hot;
+			seg_sa = sega2sa(seg->sega);
+			if (i >= seg_sa && i < seg_sa + seg->sum.alloc_p) {
+				memcpy(buf, seg->seg_data[i - seg_sa], SECTOR_SIZE);
+			} else {
+				seg = &sc.seg_cold;
+				seg_sa = sega2sa(seg->sega);
+				if (i >= seg_sa && i < seg_sa + seg->sum.alloc_p)
+					memcpy(buf, seg->seg_data[i - seg_sa], SECTOR_SIZE);
+				else
+					pread(sc.disk_fd, buf, SECTOR_SIZE, (off_t)i * SECTOR_SIZE);
+			}
+			buf = (char *)buf + SECTOR_SIZE;
+		}
+	}
 }
 
 static void
@@ -926,7 +938,7 @@ ram_read(uint32_t sa, void *buf, unsigned size)
 }
 
 static void
-ram_readc(uint32_t sa, void *buf, unsigned size)
+ram_readb(uint32_t sa, void *buf, unsigned size)
 {
 	struct _seg *seg;
 	int i;
