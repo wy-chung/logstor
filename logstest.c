@@ -168,7 +168,7 @@ main(int argc, char *argv[])
 	MY_ASSERT(i2ba != NULL);
 	memset(i2ba, 0, max_block * loop_ratio * sizeof(*i2ba));
 
-	for (i = 0; i<20; i++) {
+	for (i = 0; i<10; i++) {
 		gdb_cond0 = i;
 		printf("### test %d\n", i);
 		logstor_open();

@@ -17,8 +17,7 @@ typedef long	int64_t;
 #define	MY_DEBUG
 
 #if __linux
-#define DISK_FILE	""	// use RAM disk
-//#define DISK_FILE	"/home/wyc/mnt/Downloads/logstor.del" // the file size should be RAM_DISK_SIZE
+#define DISK_FILE	"/home/wyc/mnt/Downloads/logstor.del" // the file size should be RAM_DISK_SIZE
 #elif __BSD_VISIBLE
 #define DISK_FILE	"/dev/ada2"
 #else

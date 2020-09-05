@@ -10,7 +10,7 @@
             "args": [
                 "-g",
                 "-O0",
-                "-DAGE_STATIC",
+                "-DRAM_DISK",
                 "${workspaceFolder}/logstor.c",
                 "${workspaceFolder}/logstest.c"
                 "-o",
