@@ -9,4 +9,4 @@ Currently there is still some bug not fixed in garbage collection.
 Currently it is implemented by using the user-level GEOM, i.e. ggate. To build the program, first download the program to src/sys/geom/logstor and run 'make'. The make program will then generate the executable file 'ggatelog'.
 
 ## Run the program
-First you have to run 'init.bat' to initialize the device and then run 'create.bat' to create the gate device (i.e. /dev/ggate0). After that the log-structured device is mounted under '/mnt'.
+First you have to run 'init.bat' to initialize the underlying device and then run 'create.bat' to create the gate device (i.e. /dev/ggate0). After that the log-structured device is mounted under '/mnt'.
