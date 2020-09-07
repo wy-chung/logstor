@@ -1,6 +1,6 @@
 /*
 Author: Wuyang Chung
-e-mail: wuyang.chung1@outlook.com
+e-mail: wuyang.chung1@gmail.com
 */
 #if __linux
 typedef unsigned char	uint8_t;
@@ -17,8 +17,7 @@ typedef long	int64_t;
 #define	MY_DEBUG
 
 #if __linux
-#define DISK_FILE	""	// use RAM disk
-//#define DISK_FILE	"/home/wyc/mnt/Downloads/logstor.del"
+#define DISK_FILE	"/home/wyc/mnt/Downloads/logstor.del"
 //#define DISK_FILE	"/media/wyc/500G/logstor.storage"
 #elif __BSD_VISIBLE
 #define DISK_FILE	"/dev/ada2"
@@ -30,11 +29,11 @@ typedef long	int64_t;
 void my_debug(const char * fname, int line_num, bool bl_panic);
 void my_break(void);
 
-#define ASSERT(x)	do if (!(x)) my_debug(__func__, __LINE__, true); while(0)
-#define PANIC()	my_debug(__FILE__, __LINE__, true)
+#define MY_ASSERT(x)	do if (!(x)) my_debug(__func__, __LINE__, true); while(0)
+#define MY_PANIC()	my_debug(__FILE__, __LINE__, true)
 #else
-#define ASSERT(x)
-#define PANIC()
+#define MY_ASSERT(x)
+#define MY_PANIC()
 #endif
 
 #define	SECTOR_SIZE	0x1000		// 4K

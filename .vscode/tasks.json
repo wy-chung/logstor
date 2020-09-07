@@ -9,7 +9,7 @@
             "command": "/usr/bin/gcc-5",
             "args": [
                 "-g",
-                "-DAGE_STATIC",
+                "-DRAM_DISK",
                 "${workspaceFolder}/logstor.c",
                 "${workspaceFolder}/logstest.c"
                 "-o",

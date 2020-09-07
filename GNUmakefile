@@ -4,7 +4,7 @@ logstest.out: logstest.o logstor.o
 	cc -g -o logstest.out logstest.o logstor.o
 
 logstor.o: logstor.c logstor.h GNUmakefile
-	cc -g -c -DNO_GDB_DEBUG -Wall logstor.c
+	cc -g -c -DEXIT_ON_PANIC -Wall logstor.c
 
 logstest.o: logstest.c logstor.h GNUmakefile
 	cc -g -c -Wall logstest.c
