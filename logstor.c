@@ -798,6 +798,7 @@ superblock_read(void)
 	_Static_assert(sizeof(sb_gen) == sizeof(sc.superblock.sb_gen), "sb_gen");
 
 	// get the superblock
+	sc.superblock.seg_cnt = 1; // to silence MY_ASSERT in my_read
 	my_read(0, buf[0], 1);
 	rw.r_superblock_read++;
 	memcpy(&sc.superblock, buf[0], sizeof(sc.superblock));
@@ -1001,7 +1002,7 @@ seg_live_count(struct _seg_sum *seg_sum)
 		if (IS_META_ADDR(ba)) {
 			if (fbuf_ma2sa((union meta_addr)ba) == seg_sa + i) { // live metadata
 				buf = fbuf_get((union meta_addr)ba);
-				if (!buf->modified && !buf->accessed)
+				if (!buf->modified/* && !buf->accessed*/)
 					live_count++;
 			}
 		} else {
@@ -1035,8 +1036,8 @@ seg_clean(struct _seg_sum *seg_sum)
 					// will be flushed to disk eventually.
 					buf->modified = true;
 					sc.fbuf_modified_count++;
-					if (!buf->accessed)
-						fbuf_flush(buf, &sc.seg_sum_cold);
+					//if (!buf->accessed)
+					//	fbuf_flush(buf, &sc.seg_sum_cold);
 				}
 			}
 		} else {
@@ -1762,6 +1763,7 @@ fbuf_search(union meta_addr ma)
 	return NULL;	// cache miss
 }
 
+//===================================================
 #if 0
 static uint32_t
 logstor_sa2ba(uint32_t sa)

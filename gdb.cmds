@@ -1,4 +1,4 @@
 #set style enabled off
 break my_break
-run create /dev/ada1
+run create /dev/da4s2
 
