@@ -1,4 +1,4 @@
-default: logstest.out
+default: logstest.out logsinit.out
 
 logstest.out: logstest.o logstor.o
 	cc -g -o logstest.out logstest.o logstor.o

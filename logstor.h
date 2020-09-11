@@ -41,7 +41,7 @@ void my_break(void);
 extern uint32_t gdb_cond0;	// for debug
 extern uint32_t gdb_cond1;	// for debug
 
-uint32_t superblock_init(void);
+uint32_t superblock_init_write(int fd);
 void logstor_init(void);
 void logstor_fini(void);
 int  logstor_open(const char *disk_file);

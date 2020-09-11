@@ -11,7 +11,7 @@
                 "-g",
                 "-DRAM_DISK",
                 "${workspaceFolder}/logstor.c",
-                "${workspaceFolder}/logstest.c"
+                "${workspaceFolder}/logstest.c",
                 "-o",
                 "${workspaceFolder}/a.out"
             ],

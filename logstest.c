@@ -154,11 +154,8 @@ main(int argc, char *argv[])
 	bool break_for_loop = false;
 	int	i;
 	unsigned max_block;
-	unsigned int seed;
 
-	seed = RAND_SEED;
-	srandom(seed);
-
+	srandom(RAND_SEED);
 	logstor_init();
 
 	for (i = 0; i < 3 / loop_ratio; i++) {
