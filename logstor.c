@@ -11,7 +11,7 @@ e-mail: wuyang.chung1@gmail.com
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <assert.h>
+//#include <assert.h>
 #include <time.h>
 #include <sys/queue.h>
 #include <sys/param.h>

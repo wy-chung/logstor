@@ -9,8 +9,9 @@ e-mail: wuyang.chung1@gmail.com
 #include <stdbool.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <assert.h>
+//#include <assert.h>
 #include <time.h>
+#include <math.h>
 #include <sys/queue.h>
 
 #include "logstor.h"
@@ -23,7 +24,7 @@ e-mail: wuyang.chung1@gmail.com
 #else
 	#define	RAND_SEED	0
 #endif
-double loop_ratio = 0.5; // loop_count / max_block;
+double loop_ratio = 1.4; // loop_count / max_block;
 
 typedef void (arrays_alloc_f)(unsigned max_block);
 
@@ -151,14 +152,15 @@ test(int n, unsigned max_block)
 int
 main(int argc, char *argv[])
 {
-	bool break_for_loop = false;
 	int	i;
+	int	loop_count;
 	unsigned max_block;
 
 	srandom(RAND_SEED);
 	logstor_init();
 
-	for (i = 0; i < 3 / loop_ratio; i++) {
+	loop_count = ceil(3/loop_ratio);
+	for (i = 0; i < loop_count; i++) {
 	//	gdb_cond0 = i;
 		printf("### test %d\n", i);
 		logstor_open(DISK_FILE);
@@ -166,8 +168,6 @@ main(int argc, char *argv[])
 		arrays_alloc_once(max_block);
 		test(i, max_block);
 		logstor_close();
-		if (break_for_loop)
-			break;
 	}
 	arrays_free();
 	logstor_fini();

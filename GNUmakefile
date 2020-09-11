@@ -1,7 +1,7 @@
 default: logstest.out logsinit.out
 
 logstest.out: logstest.o logstor.o
-	cc -g -o logstest.out logstest.o logstor.o
+	cc -g -o logstest.out logstest.o logstor.o -lm
 
 logstor.o: logstor.c logstor.h GNUmakefile
 	cc -g -c -DEXIT_ON_PANIC -Wall logstor.c
