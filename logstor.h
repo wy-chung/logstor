@@ -42,9 +42,9 @@ extern uint32_t gdb_cond0;	// for debug
 extern uint32_t gdb_cond1;	// for debug
 
 uint32_t superblock_init(void);
-void logstor_init(const char *disk_file);
+void logstor_init(void);
 void logstor_fini(void);
-int  logstor_open(void);
+int  logstor_open(const char *disk_file);
 void logstor_close(void);
 int logstor_read  (off_t offset, void *data, off_t length);
 int logstor_write (off_t offset, void *data, off_t length);

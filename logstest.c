@@ -18,13 +18,20 @@ e-mail: wuyang.chung1@gmail.com
 /**************************************
  *           Test function            *
  **************************************/
-#if 1
+#if 0
 	#define	RAND_SEED	time(NULL)
 #else
 	#define	RAND_SEED	0
 #endif
 double loop_ratio = 0.5; // loop_count / max_block;
 
+typedef void (arrays_alloc_f)(unsigned max_block);
+
+static arrays_alloc_f arrays_nop;
+static arrays_alloc_f arrays_alloc;
+static void arrays_free(void);
+
+static arrays_alloc_f *arrays_alloc_once = arrays_alloc;
 uint16_t *ba_write_count;	// write count for each block
 uint32_t *ba2i;	// stored value for ba
 uint32_t *i2ba;	// ba for iteration i
@@ -147,39 +154,25 @@ main(int argc, char *argv[])
 	bool break_for_loop = false;
 	int	i;
 	unsigned max_block;
-	char *disk_file = DISK_FILE;
 	unsigned int seed;
 
 	seed = RAND_SEED;
 	srandom(seed);
 
-	logstor_init(disk_file);
-	max_block = superblock_init();
+	logstor_init();
 
-	ba_write_count = malloc(max_block * sizeof(*ba_write_count));
-	MY_ASSERT(ba_write_count != NULL);
-	memset(ba_write_count, 0, max_block * sizeof(*ba_write_count));
-
-	ba2i = malloc(max_block * sizeof(*ba2i));
-	MY_ASSERT(ba2i != NULL);
-	memset(ba2i, 0, max_block * sizeof(*ba2i));
-
-	i2ba = malloc(max_block * loop_ratio * sizeof(*i2ba));
-	MY_ASSERT(i2ba != NULL);
-	memset(i2ba, 0, max_block * loop_ratio * sizeof(*i2ba));
-
-	for (i = 0; i<10; i++) {
+	for (i = 0; i < 3 / loop_ratio; i++) {
 	//	gdb_cond0 = i;
 		printf("### test %d\n", i);
-		logstor_open();
+		logstor_open(DISK_FILE);
+		max_block = logstor_get_block_cnt();
+		arrays_alloc_once(max_block);
 		test(i, max_block);
 		logstor_close();
 		if (break_for_loop)
 			break;
 	}
-	free(ba2i);
-	free(ba_write_count);
-	free(i2ba);
+	arrays_free();
 	logstor_fini();
 
 	return 0;
@@ -194,5 +187,36 @@ static uint64_t rdtsc(void)
          "rdtsc":"=a"(lo),"=d"(hi)
         );
         return (uint64_t)hi<<32|lo;
+}
+
+static void
+arrays_nop(unsigned max_block)
+{
+}
+
+static void
+arrays_alloc(unsigned max_block)
+{
+
+	ba_write_count = malloc(max_block * sizeof(*ba_write_count));
+	MY_ASSERT(ba_write_count != NULL);
+	memset(ba_write_count, 0, max_block * sizeof(*ba_write_count));
+
+	ba2i = malloc(max_block * sizeof(*ba2i));
+	MY_ASSERT(ba2i != NULL);
+	memset(ba2i, 0, max_block * sizeof(*ba2i));
+
+	i2ba = malloc(max_block * loop_ratio * sizeof(*i2ba));
+	MY_ASSERT(i2ba != NULL);
+	memset(i2ba, 0, max_block * loop_ratio * sizeof(*i2ba));
+
+	arrays_alloc_once = arrays_nop;	// don't do array alloc any more
+}
+
+static void arrays_free(void)
+{
+	free(ba2i);
+	free(ba_write_count);
+	free(i2ba);
 }
 

@@ -51,11 +51,6 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
   #endif
 }
 #endif
-/*
-  Even with @fbuf_ratio set to 1, there will still be some fbuf_flush called
-  during fbuf_alloc
-*/
-static double fbuf_ratio = 1.0; // the ration of allocated and needed fbufs
 
 uint32_t gdb_cond0;
 uint32_t gdb_cond1;
@@ -229,7 +224,7 @@ struct g_logstor_softc {
 	uint32_t clean_high_water;
 	
 	int fbuf_count;
-	int fbuf_modified_count;
+	int fbuf_modified_count;	// This field is for debug use.
 	struct _fbuf *fbuf;
 #if 0
 	uint32_t *fbuf_accessed;
@@ -249,21 +244,26 @@ struct g_logstor_softc {
 	// statistics
 	unsigned data_write_count;	// data block write to disk
 	unsigned other_write_count;	// other write to disk, such as metadata write and segment cleaning
-	unsigned fbuf_hit, fbuf_miss;	// statistics
-
-	int disk_fd;
-	char *ram_disk;
+	unsigned fbuf_hit;
+	unsigned fbuf_miss;
 
 	bool sb_modified;	// the super block is dirty
 	uint32_t sb_sa; 	// superblock's sector address
 	struct _superblock superblock;
+	/*
+	  The macro RAM_DISK is used for debug.
+	  By using RAM as the storage device, the test can run way much faster.
+	*/
 #if defined(RAM_DISK)
+	char *ram_disk;
 	uint8_t seg_age[448];
 #else
+	int disk_fd;
 	uint8_t *seg_age;
 #endif
 };
 
+static char *ram_disk;
 static struct g_logstor_softc sc;
 
 static int _logstor_read(unsigned ba, char *data, int size);
@@ -280,7 +280,7 @@ static void file_write_4byte(uint8_t fh, uint32_t ba, uint32_t sa);
 
 static uint32_t fbuf_ma2sa(union meta_addr ma);
 static void seg_sum_write(struct _seg_sum *seg_sum);
-static int superblock_read(void);
+static int superblock_init_read(void);
 static void superblock_write(void);
 static void clean_check(void);
 static void seg_clean(struct _seg_sum *seg_sum);
@@ -346,10 +346,11 @@ superblock_init(void)
 	char buf[SECTOR_SIZE] __attribute__ ((aligned));
 
 	rw.w_superblock_init++;
-	if (sc.disk_fd > 0)
-		media_size = g_gate_mediasize(sc.disk_fd);
-	else
-		media_size = RAM_DISK_SIZE;
+#if defined(RAM_DISK)
+	media_size = RAM_DISK_SIZE;
+#else
+	media_size = g_gate_mediasize(sc.disk_fd);
+#endif
 		
 	sector_cnt = media_size / SECTOR_SIZE;
 
@@ -387,27 +388,17 @@ superblock_init(void)
 #endif
 	// the root sector address for the files
 	for (i = 0; i < FD_COUNT; i++) {
-		sb->ftab[i] = SECTOR_NULL;	// not allocated yet
+		sb->ftab[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
 	}
 #if defined(RAM_DISK)
 	MY_ASSERT(sizeof(sc.seg_age) >= sc.superblock.seg_cnt);
 #else
-	if (sc.seg_age == NULL) {
-		sc.seg_age = malloc(sc.superblock.seg_cnt);
-		MY_ASSERT(sc.seg_age != NULL);
-	}
+	sc.seg_age = malloc(sc.superblock.seg_cnt);
+	MY_ASSERT(sc.seg_age != NULL);
 #endif
 	memset(sc.seg_age, 0, sb->seg_cnt);
-	/*
-	    Initially SEG_DATA_START is cold segment and
-	    SEG_DATA_START + 1 is hot segment (see logstor_open)
-	    Since seg_reclaim_p starts at SEG_DATA_START + 1,
-	    we must protect this first cold segment (i.e SEG_DATA_START)
-	    from being allocated by setting it's age to 1.
-	*/
 	sb->seg_alloc_p = SEG_DATA_START;	// start allocate from here
 	sb->seg_reclaim_p = SEG_DATA_START;	// start reclaim from here
-	//sc.seg_age[SEG_DATA_START] = 1; // protect this segment from being allocated before recycled
 
 	// write out super block
 	sb_out = (struct _superblock *)buf;
@@ -420,47 +411,40 @@ superblock_init(void)
 	return sb->max_block_cnt;
 }
 
-void logstor_init(const char *disk_file)
+void logstor_init(void)
 {
-
-	memset(&sc, 0, sizeof(sc));
-
 #if defined(RAM_DISK)
-		sc.ram_disk = malloc(RAM_DISK_SIZE);
-		MY_ASSERT(sc.ram_disk != NULL);
-		sc.disk_fd = -1;
-#else
-		sc.ram_disk = NULL;
-  #if __BSD_VISIBLE
-		sc.disk_fd = open(disk_file, O_RDWR | O_DIRECT | O_FSYNC);
-  #else
-		sc.disk_fd = open(disk_file, O_RDWR);
-  #endif
-		MY_ASSERT(sc.disk_fd > 0);
+	ram_disk = malloc(RAM_DISK_SIZE);
+	MY_ASSERT(ram_disk != NULL);
 #endif
 }
 
 void
 logstor_fini(void)
 {
-#if !defined(RAM_DISK)
-	free(sc.seg_age);
+#if defined(RAM_DISK)
+	free(ram_disk);
 #endif
-	free(sc.ram_disk);
-
-	if (sc.disk_fd != -1) {
-		close(sc.disk_fd);
-#if defined(MY_DEBUG)
-		sc.disk_fd = -1;
-#endif
-	}
 }
 
 int
-logstor_open(void)
+logstor_open(const char *disk_file)
 {
+	int error;
 
-	if (superblock_read() != 0) {
+	memset(&sc, 0, sizeof(sc));
+#if defined(RAM_DISK)
+	sc.ram_disk = ram_disk;
+#else
+  #if __BSD_VISIBLE
+	sc.disk_fd = open(disk_file, O_RDWR | O_DIRECT | O_FSYNC);
+  #else
+	sc.disk_fd = open(disk_file, O_RDWR);
+  #endif
+	MY_ASSERT(sc.disk_fd > 0);
+#endif
+	error = superblock_init_read();
+	if (error != 0) {
 		superblock_init();
 	}
 	seg_alloc(&sc.seg_sum_cold);
@@ -471,7 +455,7 @@ logstor_open(void)
 	sc.clean_high_water = sc.clean_low_water + CLEAN_WINDOW * 2;
 
 	file_mod_init();
-	clean_check();
+	//clean_check();
 
 	return 0;
 }
@@ -486,6 +470,10 @@ logstor_close(void)
 	seg_sum_write(&sc.seg_sum_hot);
 
 	superblock_write();
+#if !defined(RAM_DISK)
+	free(sc.seg_age);
+	close(sc.disk_fd);
+#endif
 }
 
 /*
@@ -787,8 +775,14 @@ seg_sum_write(struct _seg_sum *seg_sum)
 	sc.other_write_count++; // the write for the segment summary
 }
 
+/*
+  Segment 0 is used to store superblock so there are SECTORS_PER_SEG sectors
+  for storing superblock. Each time the superblock is synced, it is stored
+  in the next sector. When it reachs the end of segment 0, it wraps around
+  to sector 0.
+*/
 static int
-superblock_read(void)
+superblock_init_read(void)
 {
 	int	i;
 	uint16_t sb_gen;
@@ -798,7 +792,9 @@ superblock_read(void)
 	_Static_assert(sizeof(sb_gen) == sizeof(sc.superblock.sb_gen), "sb_gen");
 
 	// get the superblock
+#if defined(MY_DEBUG)
 	sc.superblock.seg_cnt = 1; // to silence MY_ASSERT in my_read
+#endif
 	my_read(0, buf[0], 1);
 	rw.r_superblock_read++;
 	memcpy(&sc.superblock, buf[0], sizeof(sc.superblock));
@@ -822,17 +818,14 @@ superblock_read(void)
 	sb_in = (struct _superblock *)buf[(i-1)%2];
 	memcpy(&sc.superblock, sb_in, sizeof(sc.superblock));
 	sc.sb_modified = false;
-	if (sc.superblock.sig != SIG_LOGSTOR ||
-	    sc.superblock.seg_alloc_p >= sc.superblock.seg_cnt ||
+	if (sc.superblock.seg_alloc_p >= sc.superblock.seg_cnt ||
 	    sc.superblock.seg_reclaim_p >= sc.superblock.seg_cnt)
 		return EINVAL;
 #if defined(RAM_DISK)
 	MY_ASSERT(sizeof(sc.seg_age) >= sc.superblock.seg_cnt);
 #else
-	if (sc.seg_age == NULL) {
-		sc.seg_age = malloc(sc.superblock.seg_cnt);
-		MY_ASSERT(sc.seg_age != NULL);
-	}
+	sc.seg_age = malloc(sc.superblock.seg_cnt);
+	MY_ASSERT(sc.seg_age != NULL);
 #endif
 	memcpy(sc.seg_age, sb_in->sb_seg_age, sb_in->seg_cnt);
 
@@ -1169,19 +1162,18 @@ file_mod_init(void)
 	unsigned i;
 
 	sc.fbuf_hit = sc.fbuf_miss = 0;
-	sc.fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4) * fbuf_ratio;
-	if (sc.fbuf_count > 4096)
-		sc.fbuf_count = 4096;
 	sc.fbuf_modified_count = 0;
 #if defined(MY_DEBUG)
 	sc.cir_queue_cnt = sc.fbuf_count;
 #endif
+	sc.fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4);
+	if (sc.fbuf_count > 4096)
+		sc.fbuf_count = 4096;
+	sc.fbuf = malloc(sizeof(*sc.fbuf) * sc.fbuf_count);
+	MY_ASSERT(sc.fbuf != NULL);
 
 	for (i = 0; i < FILE_BUCKET_COUNT; i++)
 		LIST_INIT(&sc.fbuf_bucket[i]);
-
-	sc.fbuf = malloc(sizeof(*sc.fbuf) * sc.fbuf_count);
-	MY_ASSERT(sc.fbuf != NULL);
 #if 0
 	sc.fbuf_accessed = malloc(sc.fbuf_count/8);
 	MY_ASSERT(sc.fbuf_accessed != NULL);
@@ -1209,6 +1201,15 @@ file_mod_init(void)
 
 	for (i = 0; i < META_LEAF_DEPTH; i++)
 		LIST_INIT(&sc.indirect_head[i]); // point to active indirect blocks with depth i
+}
+
+static void
+file_mod_fini(void)
+{
+	file_mod_flush();
+#if !defined(RAM_DISK)
+	free(sc.fbuf);
+#endif
 }
 
 static void
@@ -1240,12 +1241,6 @@ file_mod_flush(void)
 		}
 //printf("%s: modified count after %d\n", __func__, sc.fbuf_modified_count);
 //printf("%s: flushed count %u\n", __func__, count);
-}
-
-static void
-file_mod_fini(void)
-{
-	file_mod_flush();
 }
 
 /*
