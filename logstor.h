@@ -15,6 +15,8 @@ typedef long	int64_t;
 #endif
 
 #define	MY_DEBUG
+//#define MAX_FBUF_COUNT  4096
+#define MAX_FBUF_COUNT  500 //wyctest
 
 #if __linux
 #define DISK_FILE	"/home/wyc/mnt/Downloads/logstor.del"
@@ -38,6 +40,7 @@ void my_break(void);
 
 #define	SECTOR_SIZE	0x1000		// 4K
 
+extern uint32_t sa_rw; // the sector address for _logstor_read_one/_logstor_write_one
 extern uint32_t gdb_cond0;	// for debug
 extern uint32_t gdb_cond1;	// for debug
 

@@ -35,7 +35,7 @@ _Static_assert(sizeof(uint64_t) == 8, "sizeof(uint64_t) != 8");
 
 #if defined(MY_DEBUG)
 void my_break(void) {}
-static void fbuf_dump(void);
+static void fbuf_mod_dump(void);
 
 void my_debug(const char * fname, int line_num, bool bl_panic)
 {
@@ -43,7 +43,7 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 
 	printf("*** %s *** %s %d\n", type[bl_panic], fname, line_num);
 	perror("");
-	fbuf_dump();
+	fbuf_mod_dump();
 	my_break();
   	if (bl_panic)
   #if defined(EXIT_ON_PANIC)
@@ -54,6 +54,7 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 }
 #endif
 
+uint32_t sa_rw; // the sector address for _logstor_read_one/_logstor_write_one
 uint32_t gdb_cond0;
 uint32_t gdb_cond1;
 
@@ -86,7 +87,7 @@ struct {
 #define CLEAN_WINDOW	6
 #define CLEAN_AGE_LIMIT	4
 
-#define	META_BASE	0xC0000000u	// metadata block start address
+#define	META_BASE	0xF0000000u	// metadata block start address
 #define	META_INVALID	0		// invalid metadata address
 
 #define	SECTOR_NULL	0	// this sector address can not map to any block address
@@ -177,8 +178,7 @@ union meta_addr { // metadata address for file data and its indirect blocks
 		uint32_t index  :20;	// index for indirect block
 		uint32_t depth	:2;	// depth of the node
 		uint32_t fd	:2;	// file descriptor
-		uint32_t resv0	:6;	// reserved
-		uint32_t meta	:2;	// 1 for metadata address
+		uint32_t meta	:8;	// 0xFF for metadata address
 	};
 };
 
@@ -626,7 +626,7 @@ _logstor_read_one(unsigned ba, char *data)
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	start_sa = file_read_4byte(FD_ACTIVE, ba);
-	gdb_cond0 = start_sa; //wyctest
+	sa_rw = start_sa; //wyctest
 	if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
 		memset(data, 0, SECTOR_SIZE);
 	else {
@@ -719,7 +719,7 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
 	}
 	// record the forward mapping later after the segment summary block is flushed
 	file_write_4byte(FD_ACTIVE, ba, sa);
-	gdb_cond0 = sa; //wyctest
+	sa_rw = sa; //wyctest
 	return 0;
 }
 
@@ -1254,8 +1254,8 @@ fbuf_mod_init(void)
 	sc.cir_queue_cnt = sc.fbuf_count;
 #endif
 	sc.fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4);
-	if (sc.fbuf_count > 4096)
-		sc.fbuf_count = 4096;
+	if (sc.fbuf_count > MAX_FBUF_COUNT)
+		sc.fbuf_count = MAX_FBUF_COUNT;
 	sc.fbuf = malloc(sizeof(*sc.fbuf) * sc.fbuf_count);
 	MY_ASSERT(sc.fbuf != NULL);
 
@@ -1768,9 +1768,42 @@ fbuf_search(union meta_addr ma)
 }
 
 static void
-fbuf_dump(void)
+fbuf_dump(struct _fbuf *buf, FILE *fh)
 {
-	
+	int i;
+
+	fprintf(fh, "addr %08u depth %d\n", buf->sa, buf->ma.depth);
+	fprintf(fh, "parent %08u\n", buf->parent ? buf->parent->sa: 0);
+	for (i = 0; i < SECTOR_SIZE/4;  i++)
+		fprintf(fh, "[%04d] %08u\n", i, buf->data[i]);
+	fprintf(fh, "======================\n");
+}
+
+static void
+fbuf_mod_dump(void)
+{
+	FILE *fh;
+	struct _fbuf *buf;
+	int i;
+
+	fh = fopen("fbuf.txt", "w");
+	MY_ASSERT(fh != NULL);
+
+	fbuf_mod_flush();
+	for (i = 0; i < META_LEAF_DEPTH; i++) {
+		fprintf(fh, "indir queue %d\n", i);
+		LIST_FOREACH(buf, &sc.indirect_head[i], indir_queue) {
+			MY_ASSERT(buf->on_cir_queue == false);
+			fbuf_dump(buf, fh);
+		}
+	}
+	buf = sc.cir_buffer_head;
+	do {
+		fbuf_dump(buf, fh);
+		buf = buf->cir_queue.next;
+	} while (buf != sc.cir_buffer_head);
+
+	fclose(fh);
 }
 //===================================================
 #if 0

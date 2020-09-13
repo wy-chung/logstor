@@ -78,13 +78,13 @@ test_write(int n, unsigned max_block)
 		i2ba[i] = ba;
 
 		buf[ba % 4] = i;
-		//buf[4] = n;
+		buf[4] = ba % 4;
 		buf[5] = i;
-		buf[6] = ba % 4;
-		buf[7] = ba;
+		buf[6] = ba;
+		//buf[7] = n;
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
 		logstor_write_test(ba, buf);
-		buf[4] = gdb_cond0; //wyctest
+		buf[7] = sa_rw; //wyctest
 	}
 	printf("elapse time %lu ticks\n", rdtsc() - start_time);
 	printf("overwrite %d/%d\n", overwrite_count, loop_count);
