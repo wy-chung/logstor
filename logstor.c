@@ -35,6 +35,7 @@ _Static_assert(sizeof(uint64_t) == 8, "sizeof(uint64_t) != 8");
 
 #if defined(MY_DEBUG)
 void my_break(void) {}
+static void fbuf_dump(void);
 
 void my_debug(const char * fname, int line_num, bool bl_panic)
 {
@@ -42,6 +43,7 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 
 	printf("*** %s *** %s %d\n", type[bl_panic], fname, line_num);
 	perror("");
+	fbuf_dump();
 	my_break();
   	if (bl_panic)
   #if defined(EXIT_ON_PANIC)
@@ -273,9 +275,9 @@ static int _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *se
 static int _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum);
 static void seg_alloc(struct _seg_sum *seg_sum);
 static void seg_reclaim_init(struct _seg_sum *seg_sum);
-static void file_mod_flush(void);
-static void file_mod_init(void);
-static void file_mod_fini(void);
+static void fbuf_mod_flush(void);
+static void fbuf_mod_init(void);
+static void fbuf_mod_fini(void);
 static uint32_t file_read_4byte(uint8_t fh, uint32_t ba);
 static void file_write_4byte(uint8_t fh, uint32_t ba, uint32_t sa);
 
@@ -453,7 +455,7 @@ logstor_open(const char *disk_file)
 	sc.clean_low_water = CLEAN_WINDOW * 2;
 	sc.clean_high_water = sc.clean_low_water + CLEAN_WINDOW * 2;
 
-	file_mod_init();
+	fbuf_mod_init();
 	//clean_check();
 
 	return 0;
@@ -463,7 +465,7 @@ void
 logstor_close(void)
 {
 
-	file_mod_fini();
+	fbuf_mod_fini();
 
 	seg_sum_write(&sc.seg_sum_cold);
 	seg_sum_write(&sc.seg_sum_hot);
@@ -558,13 +560,15 @@ int logstor_delete(off_t offset, void *data, off_t length)
 int
 logstor_read_test(uint32_t ba, void *data)
 {
-	return _logstor_read(ba, data, 1);
+	//wyctest return _logstor_read(ba, data, 1);
+	return _logstor_read_one(ba, data);
 }
 
 int
 logstor_write_test(uint32_t ba, void *data)
 {
-	return _logstor_write(ba, data, 1, &sc.seg_sum_hot);
+	//wyctest return _logstor_write(ba, data, 1, &sc.seg_sum_hot);
+	return _logstor_write_one(ba, data, &sc.seg_sum_hot);
 }
 
 /*
@@ -622,6 +626,7 @@ _logstor_read_one(unsigned ba, char *data)
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	start_sa = file_read_4byte(FD_ACTIVE, ba);
+	gdb_cond0 = start_sa; //wyctest
 	if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
 		memset(data, 0, SECTOR_SIZE);
 	else {
@@ -714,7 +719,7 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
 	}
 	// record the forward mapping later after the segment summary block is flushed
 	file_write_4byte(FD_ACTIVE, ba, sa);
-
+	gdb_cond0 = sa; //wyctest
 	return 0;
 }
 
@@ -1158,96 +1163,6 @@ clean_check(void)
  *********************************************************/
 
 /*
-  Initialize metadata file buffer
-*/
-static void
-file_mod_init(void)
-{
-	unsigned i;
-
-	sc.fbuf_hit = sc.fbuf_miss = 0;
-	sc.fbuf_modified_count = 0;
-#if defined(MY_DEBUG)
-	sc.cir_queue_cnt = sc.fbuf_count;
-#endif
-	sc.fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4);
-	if (sc.fbuf_count > 4096)
-		sc.fbuf_count = 4096;
-	sc.fbuf = malloc(sizeof(*sc.fbuf) * sc.fbuf_count);
-	MY_ASSERT(sc.fbuf != NULL);
-
-	for (i = 0; i < FILE_BUCKET_COUNT; i++)
-		LIST_INIT(&sc.fbuf_bucket[i]);
-#if 0
-	sc.fbuf_accessed = malloc(sc.fbuf_count/8);
-	MY_ASSERT(sc.fbuf_accessed != NULL);
-	sc.fbuf_modified = malloc(sc.fbuf_count/8);
-	MY_ASSERT(sc.fbuf_modified != NULL);
-	sc.fbuf_on_cir_queue = malloc(sc.fbuf_count/8);
-	MY_ASSERT(sc.fbuf_on_cir_queue != NULL);
-#endif
-	for (i = 0; i < sc.fbuf_count; i++) {
-		sc.fbuf[i].cir_queue.prev = &sc.fbuf[i-1];
-		sc.fbuf[i].cir_queue.next = &sc.fbuf[i+1];
-		sc.fbuf[i].parent = NULL;
-		sc.fbuf[i].on_cir_queue = true;
-		sc.fbuf[i].accessed = false;
-		sc.fbuf[i].modified = false;
-		// to distribute the file buffer to buckets evenly 
-		// use @i as the key when the tag is META_INVALID
-		sc.fbuf[i].ma.uint32 = META_INVALID;
-		fbuf_hash_insert(&sc.fbuf[i], i);
-	}
-	// fix the circular queue for the first and last buffer
-	sc.fbuf[0].cir_queue.prev = &sc.fbuf[sc.fbuf_count-1];
-	sc.fbuf[sc.fbuf_count-1].cir_queue.next = &sc.fbuf[0];
-	sc.cir_buffer_head = &sc.fbuf[0]; // point to the circular queue
-
-	for (i = 0; i < META_LEAF_DEPTH; i++)
-		LIST_INIT(&sc.indirect_head[i]); // point to active indirect blocks with depth i
-}
-
-static void
-file_mod_fini(void)
-{
-	file_mod_flush();
-#if !defined(RAM_DISK)
-	free(sc.fbuf);
-#endif
-}
-
-static void
-file_mod_flush(void)
-{
-	struct _fbuf	*buf;
-	int	i;
-	unsigned count = 0;
-
-//printf("%s: modified count before %d\n", __func__, sc.fbuf_modified_count);
-	buf = sc.cir_buffer_head;
-	do {
-		MY_ASSERT(buf->on_cir_queue);
-		if (buf->modified) {
-			fbuf_flush(buf, &sc.seg_sum_hot);
-			count++;
-		}
-		buf = buf->cir_queue.next;
-	} while (buf != sc.cir_buffer_head);
-	
-	// process active indirect blocks
-	for (i = META_LEAF_DEPTH - 1; i >= 0; i--)
-		LIST_FOREACH(buf, &sc.indirect_head[i], indir_queue) {
-			MY_ASSERT(buf->on_cir_queue == false);
-			if (buf->modified) {
-				fbuf_flush(buf, &sc.seg_sum_hot);
-				count++;
-			}
-		}
-//printf("%s: modified count after %d\n", __func__, sc.fbuf_modified_count);
-//printf("%s: flushed count %u\n", __func__, count);
-}
-
-/*
 Description:
  	Get the sector address of the corresponding @ba in @file
 
@@ -1323,6 +1238,96 @@ file_access(uint8_t fd, uint32_t offset, uint32_t *buf_off, bool bl_write)
 	}
 
 	return (uint8_t *)buf->data;
+}
+
+/*
+  Initialize metadata file buffer
+*/
+static void
+fbuf_mod_init(void)
+{
+	unsigned i;
+
+	sc.fbuf_hit = sc.fbuf_miss = 0;
+	sc.fbuf_modified_count = 0;
+#if defined(MY_DEBUG)
+	sc.cir_queue_cnt = sc.fbuf_count;
+#endif
+	sc.fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4);
+	if (sc.fbuf_count > 4096)
+		sc.fbuf_count = 4096;
+	sc.fbuf = malloc(sizeof(*sc.fbuf) * sc.fbuf_count);
+	MY_ASSERT(sc.fbuf != NULL);
+
+	for (i = 0; i < FILE_BUCKET_COUNT; i++)
+		LIST_INIT(&sc.fbuf_bucket[i]);
+#if 0
+	sc.fbuf_accessed = malloc(sc.fbuf_count/8);
+	MY_ASSERT(sc.fbuf_accessed != NULL);
+	sc.fbuf_modified = malloc(sc.fbuf_count/8);
+	MY_ASSERT(sc.fbuf_modified != NULL);
+	sc.fbuf_on_cir_queue = malloc(sc.fbuf_count/8);
+	MY_ASSERT(sc.fbuf_on_cir_queue != NULL);
+#endif
+	for (i = 0; i < sc.fbuf_count; i++) {
+		sc.fbuf[i].cir_queue.prev = &sc.fbuf[i-1];
+		sc.fbuf[i].cir_queue.next = &sc.fbuf[i+1];
+		sc.fbuf[i].parent = NULL;
+		sc.fbuf[i].on_cir_queue = true;
+		sc.fbuf[i].accessed = false;
+		sc.fbuf[i].modified = false;
+		// to distribute the file buffer to buckets evenly 
+		// use @i as the key when the tag is META_INVALID
+		sc.fbuf[i].ma.uint32 = META_INVALID;
+		fbuf_hash_insert(&sc.fbuf[i], i);
+	}
+	// fix the circular queue for the first and last buffer
+	sc.fbuf[0].cir_queue.prev = &sc.fbuf[sc.fbuf_count-1];
+	sc.fbuf[sc.fbuf_count-1].cir_queue.next = &sc.fbuf[0];
+	sc.cir_buffer_head = &sc.fbuf[0]; // point to the circular queue
+
+	for (i = 0; i < META_LEAF_DEPTH; i++)
+		LIST_INIT(&sc.indirect_head[i]); // point to active indirect blocks with depth i
+}
+
+static void
+fbuf_mod_fini(void)
+{
+	fbuf_mod_flush();
+#if !defined(RAM_DISK)
+	free(sc.fbuf);
+#endif
+}
+
+static void
+fbuf_mod_flush(void)
+{
+	struct _fbuf	*buf;
+	int	i;
+	unsigned count = 0;
+
+//printf("%s: modified count before %d\n", __func__, sc.fbuf_modified_count);
+	buf = sc.cir_buffer_head;
+	do {
+		MY_ASSERT(buf->on_cir_queue);
+		if (buf->modified) {
+			fbuf_flush(buf, &sc.seg_sum_hot);
+			count++;
+		}
+		buf = buf->cir_queue.next;
+	} while (buf != sc.cir_buffer_head);
+	
+	// process active indirect blocks
+	for (i = META_LEAF_DEPTH - 1; i >= 0; i--)
+		LIST_FOREACH(buf, &sc.indirect_head[i], indir_queue) {
+			MY_ASSERT(buf->on_cir_queue == false);
+			if (buf->modified) {
+				fbuf_flush(buf, &sc.seg_sum_hot);
+				count++;
+			}
+		}
+//printf("%s: modified count after %d\n", __func__, sc.fbuf_modified_count);
+//printf("%s: flushed count %u\n", __func__, count);
 }
 
 static unsigned
@@ -1762,6 +1767,11 @@ fbuf_search(union meta_addr ma)
 	return NULL;	// cache miss
 }
 
+static void
+fbuf_dump(void)
+{
+	
+}
 //===================================================
 #if 0
 static uint32_t
@@ -1811,7 +1821,7 @@ logstor_check(void)
 	uint32_t sa_min;
 
 	printf("%s ...\n", __func__);
-	file_mod_flush();
+	fbuf_mod_flush();
 	if (sc.seg_sum_hot.ss_alloc_p != 0)
 		seg_sum_write(&sc.seg_sum_hot);
 	sa_min = -1;
