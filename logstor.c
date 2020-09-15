@@ -54,7 +54,9 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 }
 #endif
 
+#if defined(MY_DEBUG)
 uint32_t sa_rw; // the sector address for _logstor_read_one/_logstor_write_one
+#endif
 uint32_t gdb_cond0;
 uint32_t gdb_cond1;
 
@@ -87,7 +89,7 @@ struct {
 #define CLEAN_WINDOW	6
 #define CLEAN_AGE_LIMIT	4
 
-#define	META_BASE	0xF0000000u	// metadata block start address
+#define	META_BASE	0xFF000000u	// metadata block start address
 #define	META_INVALID	0		// invalid metadata address
 
 #define	SECTOR_NULL	0	// this sector address can not map to any block address
@@ -196,6 +198,9 @@ struct _fbuf { // file buffer
 			struct _fbuf *prev;
 		} cir_queue; // list entry for the circular queue
 	};
+#if defined(MY_DEBUG)
+	uint16_t index;
+#endif
 	uint16_t ref_cnt;	// only used by active indirect block queue
 	bool	on_cir_queue;	// on circular queue
 	bool	accessed;	// only used by cache entries on circular queue
@@ -236,8 +241,8 @@ struct g_logstor_softc {
 	// buffer hash queue
 	LIST_HEAD(_fbuf_bucket, _fbuf)	fbuf_bucket[FILE_BUCKET_COUNT];
 	
-	struct _fbuf *cir_buffer_head;	// head of the circular queue
-	LIST_HEAD(, _fbuf) indirect_head[META_LEAF_DEPTH]; // indirect queue
+	struct _fbuf *fbuf_cir_head;	// head of the circular queue
+	LIST_HEAD(, _fbuf) fbuf_ind_head[META_LEAF_DEPTH]; // indirect queue
 	
 #if defined(MY_DEBUG)
 	int cir_queue_cnt;
@@ -626,7 +631,9 @@ _logstor_read_one(unsigned ba, char *data)
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	start_sa = file_read_4byte(FD_ACTIVE, ba);
+#if defined(MY_DEBUG)
 	sa_rw = start_sa; //wyctest
+#endif
 	if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
 		memset(data, 0, SECTOR_SIZE);
 	else {
@@ -701,6 +708,9 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
 	MY_ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFF);
 
 	sa = sega2sa(seg_sum->sega) + seg_sum->ss_alloc_p;
+#if defined(MY_DEBUG)
+	sa_rw = sa; //wyctest
+#endif
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	my_write(sa, data, 1);
 	if (sc.cleaner_disabled) // if doing segment cleaning
@@ -719,7 +729,6 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
 	}
 	// record the forward mapping later after the segment summary block is flushed
 	file_write_4byte(FD_ACTIVE, ba, sa);
-	sa_rw = sa; //wyctest
 	return 0;
 }
 
@@ -1270,6 +1279,9 @@ fbuf_mod_init(void)
 	MY_ASSERT(sc.fbuf_on_cir_queue != NULL);
 #endif
 	for (i = 0; i < sc.fbuf_count; i++) {
+#if defined(MY_DEBUG)
+		sc.fbuf[i].index = i;
+#endif
 		sc.fbuf[i].cir_queue.prev = &sc.fbuf[i-1];
 		sc.fbuf[i].cir_queue.next = &sc.fbuf[i+1];
 		sc.fbuf[i].parent = NULL;
@@ -1284,10 +1296,10 @@ fbuf_mod_init(void)
 	// fix the circular queue for the first and last buffer
 	sc.fbuf[0].cir_queue.prev = &sc.fbuf[sc.fbuf_count-1];
 	sc.fbuf[sc.fbuf_count-1].cir_queue.next = &sc.fbuf[0];
-	sc.cir_buffer_head = &sc.fbuf[0]; // point to the circular queue
+	sc.fbuf_cir_head = &sc.fbuf[0]; // point to the circular queue
 
 	for (i = 0; i < META_LEAF_DEPTH; i++)
-		LIST_INIT(&sc.indirect_head[i]); // point to active indirect blocks with depth i
+		LIST_INIT(&sc.fbuf_ind_head[i]); // point to active indirect blocks with depth i
 }
 
 static void
@@ -1307,7 +1319,7 @@ fbuf_mod_flush(void)
 	unsigned count = 0;
 
 //printf("%s: modified count before %d\n", __func__, sc.fbuf_modified_count);
-	buf = sc.cir_buffer_head;
+	buf = sc.fbuf_cir_head;
 	do {
 		MY_ASSERT(buf->on_cir_queue);
 		if (buf->modified) {
@@ -1315,11 +1327,11 @@ fbuf_mod_flush(void)
 			count++;
 		}
 		buf = buf->cir_queue.next;
-	} while (buf != sc.cir_buffer_head);
+	} while (buf != sc.fbuf_cir_head);
 	
 	// process active indirect blocks
 	for (i = META_LEAF_DEPTH - 1; i >= 0; i--)
-		LIST_FOREACH(buf, &sc.indirect_head[i], indir_queue) {
+		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], indir_queue) {
 			MY_ASSERT(buf->on_cir_queue == false);
 			if (buf->modified) {
 				fbuf_flush(buf, &sc.seg_sum_hot);
@@ -1450,7 +1462,7 @@ fbuf_queue_check(void)
 	unsigned i;
 	unsigned total, indir_cnt[META_LEAF_DEPTH];
 
-	buf = sc.cir_buffer_head;
+	buf = sc.fbuf_cir_head;
 	MY_ASSERT(buf != NULL);
 	total = 0;
 	do  {
@@ -1458,13 +1470,13 @@ fbuf_queue_check(void)
 		MY_ASSERT(total <= sc.fbuf_count);
 		MY_ASSERT(buf->on_cir_queue);
 		buf = buf->cir_queue.next;
-	} while (buf != sc.cir_buffer_head);
+	} while (buf != sc.fbuf_cir_head);
 
 	for (i = 0; i < META_LEAF_DEPTH; i++)
 		indir_cnt[i] = 0;
 
 	for (i = 0; i < META_LEAF_DEPTH ; ++i) {
-		buf = LIST_FIRST(&sc.indirect_head[i]);
+		buf = LIST_FIRST(&sc.fbuf_ind_head[i]);
 		while (buf != NULL) {
 			++indir_cnt[0];
 			MY_ASSERT(indir_cnt[0] <= sc.fbuf_count);
@@ -1489,9 +1501,9 @@ fbuf_cir_queue_insert(struct _fbuf *buf)
 {
 	struct _fbuf *prev;
 
-	prev = sc.cir_buffer_head->cir_queue.prev;
-	sc.cir_buffer_head->cir_queue.prev = buf;
-	buf->cir_queue.next = sc.cir_buffer_head;
+	prev = sc.fbuf_cir_head->cir_queue.prev;
+	sc.fbuf_cir_head->cir_queue.prev = buf;
+	buf->cir_queue.next = sc.fbuf_cir_head;
 	buf->cir_queue.prev = prev;
 	prev->cir_queue.next = buf;
 	buf->on_cir_queue = true;
@@ -1511,10 +1523,10 @@ fbuf_cir_queue_remove(struct _fbuf *buf)
 	struct _fbuf *next;
 
 	MY_ASSERT(buf->on_cir_queue);
-	MY_ASSERT(sc.cir_buffer_head->cir_queue.next != sc.cir_buffer_head);
-	MY_ASSERT(sc.cir_buffer_head->cir_queue.prev != sc.cir_buffer_head);
-	if (buf == sc.cir_buffer_head)
-		sc.cir_buffer_head = sc.cir_buffer_head->cir_queue.next;
+	MY_ASSERT(sc.fbuf_cir_head->cir_queue.next != sc.fbuf_cir_head);
+	MY_ASSERT(sc.fbuf_cir_head->cir_queue.prev != sc.fbuf_cir_head);
+	if (buf == sc.fbuf_cir_head)
+		sc.fbuf_cir_head = sc.fbuf_cir_head->cir_queue.next;
 	prev = buf->cir_queue.prev;
 	next = buf->cir_queue.next;
 	prev->cir_queue.next = next;
@@ -1585,7 +1597,7 @@ fbuf_get(union meta_addr ma)
 		if (buf->on_cir_queue) {
 			// move it to active indirect block queue
 			fbuf_cir_queue_remove(buf);
-			LIST_INSERT_HEAD(&sc.indirect_head[i], buf, indir_queue);
+			LIST_INSERT_HEAD(&sc.fbuf_ind_head[i], buf, indir_queue);
 			buf->ref_cnt = 0;
 		}
 		/*
@@ -1615,15 +1627,15 @@ fbuf_alloc(void)
 	struct _fbuf *pbuf;	// parent buffer
 	struct _fbuf *buf;
 
-	buf = sc.cir_buffer_head;
+	buf = sc.fbuf_cir_head;
 	do {
 		MY_ASSERT(buf->on_cir_queue);
 		if (!buf->accessed)
 			break;
 		buf->accessed = false;	// give this buffer a second chance
 		buf = buf->cir_queue.next;
-	} while (buf != sc.cir_buffer_head);
-	sc.cir_buffer_head = buf->cir_queue.next;
+	} while (buf != sc.fbuf_cir_head);
+	sc.fbuf_cir_head = buf->cir_queue.next;
 	if (buf->modified)
 		fbuf_flush(buf, &sc.seg_sum_hot);
 
@@ -1767,13 +1779,13 @@ fbuf_search(union meta_addr ma)
 	return NULL;	// cache miss
 }
 
+#if defined(MY_DEBUG)
 static void
 fbuf_dump(struct _fbuf *buf, FILE *fh)
 {
 	int i;
 
 	fprintf(fh, "addr %08u depth %d\n", buf->sa, buf->ma.depth);
-	fprintf(fh, "parent %08u\n", buf->parent ? buf->parent->sa: 0);
 	for (i = 0; i < SECTOR_SIZE/4;  i++)
 		fprintf(fh, "[%04d] %08u\n", i, buf->data[i]);
 	fprintf(fh, "======================\n");
@@ -1790,21 +1802,23 @@ fbuf_mod_dump(void)
 	MY_ASSERT(fh != NULL);
 
 	fbuf_mod_flush();
+	fprintf(fh, "\n\n");
 	for (i = 0; i < META_LEAF_DEPTH; i++) {
 		fprintf(fh, "indir queue %d\n", i);
-		LIST_FOREACH(buf, &sc.indirect_head[i], indir_queue) {
+		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], indir_queue) {
 			MY_ASSERT(buf->on_cir_queue == false);
 			fbuf_dump(buf, fh);
 		}
 	}
-	buf = sc.cir_buffer_head;
+	buf = sc.fbuf_cir_head;
 	do {
 		fbuf_dump(buf, fh);
 		buf = buf->cir_queue.next;
-	} while (buf != sc.cir_buffer_head);
+	} while (buf != sc.fbuf_cir_head);
 
 	fclose(fh);
 }
+#endif
 //===================================================
 #if 0
 static uint32_t

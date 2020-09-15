@@ -24,7 +24,7 @@ e-mail: wuyang.chung1@gmail.com
 #else
 	#define	RAND_SEED	0
 #endif
-double loop_ratio = 1.4; // loop_count / max_block;
+double loop_ratio = 0.4; // loop_count / max_block;
 
 typedef void (arrays_alloc_f)(unsigned max_block);
 
@@ -32,13 +32,22 @@ static arrays_alloc_f arrays_nop;
 static arrays_alloc_f arrays_alloc;
 static void arrays_free(void);
 
-static arrays_alloc_f *arrays_alloc_once = arrays_alloc;
-uint16_t *ba_write_count;	// write count for each block
-uint32_t *ba2i;	// stored value for ba
-uint32_t *i2ba;	// ba for iteration i
-uint32_t buf[SECTOR_SIZE/4];
-
 static uint64_t rdtsc(void);
+static void test(int n, unsigned max_block);
+static void test_write(int n, unsigned max_block);
+static void test_read(int n, unsigned max_block);
+#if defined(MY_DEBUG)
+static void arrays_check(void);
+#endif
+
+static arrays_alloc_f *arrays_alloc_once = arrays_alloc;
+static uint32_t *i2ba;	// ba for iteration i
+static uint32_t *ba2i;	// stored value for ba
+static uint32_t *ba2sa;	// stored value for ba
+static uint8_t *ba_write_count;	// write count for each block
+
+static uint32_t buf[SECTOR_SIZE/4];
+static unsigned loop_count;
 
 static void
 test_write(int n, unsigned max_block)
@@ -46,13 +55,11 @@ test_write(int n, unsigned max_block)
 	uint32_t ba;		// block address
 	int	overwrite_count;
 	uint64_t start_time;
-	unsigned i;
-	unsigned loop_count;
+	unsigned i, pre_i;
 	unsigned data_write_count, other_write_count;
 	unsigned fbuf_hit, fbuf_miss;
 
 	// writing data to logstor
-	loop_count = max_block * loop_ratio;
 	overwrite_count = 0;
 	printf("writing...\n");
 	start_time = rdtsc();
@@ -61,21 +68,21 @@ test_write(int n, unsigned max_block)
 		gdb_cond1 = i;
 		if ( (i % 0x10000) == 0)
 			printf("w%d %7d/%7d\n", n, i, loop_count);
-#if 1
+
 		ba = random() % max_block;	// get a random block address
-#else
-		ba = i;
-#endif
 		if (ba_write_count[ba] != 0) {
-#if 1
 			++overwrite_count;
-#else
-			continue;
-#endif
 		}
-		++ba_write_count[ba];
-		ba2i[ba] = i;
+		if (++ba_write_count[ba] == 0)		// wrap around
+			ba_write_count[ba] = -1;	// set to maximum value
+
+		// set prev_i point to nothing
+		pre_i = ba2i[ba];
+		if (pre_i != -1)
+			i2ba[pre_i] = -1;
+
 		i2ba[i] = ba;
+		ba2i[ba] = i;
 
 		buf[ba % 4] = i;
 		buf[4] = ba % 4;
@@ -84,7 +91,7 @@ test_write(int n, unsigned max_block)
 		//buf[7] = n;
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
 		logstor_write_test(ba, buf);
-		buf[7] = sa_rw; //wyctest
+		ba2sa[ba] = sa_rw;
 	}
 	printf("elapse time %lu ticks\n", rdtsc() - start_time);
 	printf("overwrite %d/%d\n", overwrite_count, loop_count);
@@ -104,36 +111,70 @@ test_write(int n, unsigned max_block)
 
 }
 
+#if defined(MY_DEBUG)
+static void
+arrays_check(void)
+{
+	unsigned i, i_exp;
+	uint32_t ba;
+
+	for (i = 0; i < loop_count; i++) {
+		ba = i2ba[i];
+		if (ba == -1)
+			continue;
+		i_exp = ba2i[ba];
+		MY_ASSERT(i == i_exp);
+	}
+}
+#endif
+
+static void
+test(int n, unsigned max_block)
+{
+
+	loop_count = max_block * loop_ratio;
+
+	test_write(n, max_block);
+#if defined(MY_DEBUG)
+	arrays_check();
+#endif
+	test_read(n, max_block);
+}
+
 static void 
 test_read(int n, unsigned max_block)
 {
 	uint64_t start_time;
 	int	read_count;
+	uint32_t i_exp;
+	uint32_t i_min;
 	uint32_t i_max;
 	uint32_t ba;		// block address
-	uint32_t act;
 
 	// reading data from logstor
 	read_count = 0;
 	printf("reading...\n");
 	start_time = rdtsc();
+	i_min = -1;
 	i_max = 0;
 	for (ba = 0 ; ba < max_block; ba += 1) {
 		if ( (ba % 0x10000) == 0)
 			printf("r%d %7d/%7d\n", n, ba, max_block);
 		if (ba_write_count[ba] > 0) {
+			if (ba2i[ba] < i_min)
+				i_min = ba2i[ba];
 			if (ba_write_count[ba] > i_max)
 				i_max = ba_write_count[ba];
 			logstor_read_test(ba, buf);
 			++read_count;
-			act = buf[5];
-			if (ba2i[ba] != act) {
-				printf("%s: ERROR miscompare: ba %u, exp_i %u, get_i %u\n",
-				    __func__, ba, ba2i[ba], act);
+			i_exp = buf[5];
+			if (ba2i[ba] != i_exp) {
+				printf("%s: ERROR miscompare: ba %u, exp_i %u, get_i %u ba_write_count %u\n",
+				    __func__, ba, ba2i[ba], i_exp, ba_write_count[ba]);
 				MY_PANIC();
 			} else {
-				MY_ASSERT(buf[ba%4] == act);
-				MY_ASSERT(buf[SECTOR_SIZE/4-4+(ba%4)] == act);
+				MY_ASSERT(buf[ba%4] == i_exp);
+				MY_ASSERT(buf[SECTOR_SIZE/4-4+(ba%4)] == i_exp);
 			}
 		}
 	}
@@ -141,27 +182,18 @@ test_read(int n, unsigned max_block)
 	printf("read_count %d i_max %u\n\n", read_count, i_max);
 }
 
-static void
-test(int n, unsigned max_block)
-{
-
-	test_write(n, max_block);
-	//logstor_check();
-	test_read(n, max_block);
-}
-
 int
 main(int argc, char *argv[])
 {
 	int	i;
-	int	loop_count;
+	int	main_loop_count;
 	unsigned max_block;
 
 	srandom(RAND_SEED);
 	logstor_init();
 
-	loop_count = ceil(3/loop_ratio);
-	for (i = 0; i < loop_count; i++) {
+	main_loop_count = ceil(3/loop_ratio);
+	for (i = 0; i < main_loop_count; i++) {
 	//	gdb_cond0 = i;
 		printf("### test %d\n", i);
 		logstor_open(DISK_FILE);
@@ -195,26 +227,36 @@ arrays_nop(unsigned max_block)
 static void
 arrays_alloc(unsigned max_block)
 {
+	size_t size;
 
-	ba_write_count = malloc(max_block * sizeof(*ba_write_count));
-	MY_ASSERT(ba_write_count != NULL);
-	memset(ba_write_count, 0, max_block * sizeof(*ba_write_count));
-
-	ba2i = malloc(max_block * sizeof(*ba2i));
-	MY_ASSERT(ba2i != NULL);
-	memset(ba2i, 0, max_block * sizeof(*ba2i));
-
-	i2ba = malloc(max_block * loop_ratio * sizeof(*i2ba));
+	size = (unsigned)(max_block * loop_ratio) * sizeof(*i2ba); // size == 2297920
+	i2ba = malloc(size);
 	MY_ASSERT(i2ba != NULL);
-	memset(i2ba, 0, max_block * loop_ratio * sizeof(*i2ba));
+	memset(i2ba, -1, size);
+
+	size = max_block * sizeof(*ba2i);	// size == 1641372
+	ba2i = malloc(size);
+	MY_ASSERT(ba2i != NULL);
+	memset(ba2i, -1, size);
+
+	size = max_block * sizeof(*ba2sa);	// size == 1641372
+	ba2sa = malloc(size);
+	MY_ASSERT(ba2sa != NULL);
+	memset(ba2sa, 0, size);
+
+	size = max_block * sizeof(*ba_write_count);	// size == 410343
+	ba_write_count = malloc(size);
+	MY_ASSERT(ba_write_count != NULL);
+	memset(ba_write_count, 0, size);
 
 	arrays_alloc_once = arrays_nop;	// don't do array alloc any more
 }
 
 static void arrays_free(void)
 {
-	free(ba2i);
 	free(ba_write_count);
+	free(ba2sa);
+	free(ba2i);
 	free(i2ba);
 }
 
