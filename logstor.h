@@ -46,7 +46,7 @@ extern uint32_t sa_rw; // the sector address for _logstor_read_one/_logstor_writ
 extern uint32_t gdb_cond0;	// for debug
 extern uint32_t gdb_cond1;	// for debug
 
-uint32_t superblock_init_write(int fd);
+void superblock_init_write(int fd);
 void logstor_init(void);
 void logstor_fini(void);
 int  logstor_open(const char *disk_file);

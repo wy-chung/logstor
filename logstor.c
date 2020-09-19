@@ -64,7 +64,6 @@ struct {
 	unsigned r_logstor_read;
 	unsigned r_logstor_read_one;
 	unsigned r_seg_sum_read;
-	unsigned r_superblock_read;
 	unsigned r_gc_seg_clean;
 	unsigned r_fbuf_read_and_hash;
 	unsigned w_logstor_write;
@@ -256,7 +255,6 @@ struct g_logstor_softc {
 
 	bool sb_modified;	// the super block is dirty
 	uint32_t sb_sa; 	// superblock's sector address
-	struct _superblock superblock;
 	/*
 	  The macro RAM_DISK is used for debug.
 	  By using RAM as the storage device, the test can run way much faster.
@@ -267,6 +265,7 @@ struct g_logstor_softc {
 	int disk_fd;
 	uint8_t *seg_age;
 #endif
+	struct _superblock superblock;
 };
 
 #if defined(RAM_DISK)
@@ -338,88 +337,6 @@ static uint32_t
 sega2sa(uint32_t sega)
 {
 	return sega << SA2SEGA_SHIFT;
-}
-
-/*
-Description:
-    Write the initialized supeblock to the downstream disk
-*/
-uint32_t
-superblock_init_write(int fd)
-{
-	int	i;
-	uint32_t sector_cnt;
-	struct _superblock *sb, *sb_out;
-	off_t media_size;
-	char buf[SECTOR_SIZE] __attribute__ ((aligned));
-
-	rw.w_superblock_init++;
-#if defined(RAM_DISK)
-	media_size = RAM_DISK_SIZE;
-#else
-	media_size = g_gate_mediasize(fd);
-#endif
-	sector_cnt = media_size / SECTOR_SIZE;
-
-	sb = &sc.superblock;
-	sb->sig = SIG_LOGSTOR;
-	sb->ver_major = VER_MAJOR;
-	sb->ver_minor = VER_MINOR;
-
-#if __BSD_VISIBLE
-	sb->sb_gen = arc4random();
-#else
-	sb->sb_gen = random();
-#endif
-	sb->seg_cnt = sector_cnt / SECTORS_PER_SEG;
-	if (sizeof(struct _superblock) + sb->seg_cnt > SECTOR_SIZE) {
-		printf("%s: size of superblock %d seg_cnt %d\n",
-		    __func__, (int)sizeof(struct _superblock), (int)sb->seg_cnt);
-		printf("    the size of the disk must be less than %lld\n",
-		    (SECTOR_SIZE - sizeof(struct _superblock)) * (long long)SEG_SIZE);
-		MY_PANIC();
-	}
-	sb->seg_free_cnt = sb->seg_cnt - SEG_DATA_START;
-
-	// the physical disk must have at least the space for the metadata
-	MY_ASSERT(sb->seg_free_cnt * BLOCKS_PER_SEG >
-	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT);
-
-	sb->max_block_cnt =
-	    sb->seg_free_cnt * BLOCKS_PER_SEG -
-	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT;
-	sb->max_block_cnt *= 0.9;
-#if defined(MY_DEBUG)
-	printf("%s: sector_cnt %u max_block_cnt %u\n",
-	    __func__, sector_cnt, sb->max_block_cnt);
-#endif
-	// the root sector address for the files
-	for (i = 0; i < FD_COUNT; i++) {
-		sb->ftab[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
-	}
-#if defined(RAM_DISK)
-	MY_ASSERT(sizeof(sc.seg_age) >= sc.superblock.seg_cnt);
-#else
-	sc.seg_age = malloc(sc.superblock.seg_cnt);
-	MY_ASSERT(sc.seg_age != NULL);
-#endif
-	memset(sc.seg_age, 0, sb->seg_cnt);
-	sb->seg_alloc_p = SEG_DATA_START;	// start allocate from here
-	sb->seg_reclaim_p = SEG_DATA_START;	// start reclaim from here
-
-	// write out super block
-	sb_out = (struct _superblock *)buf;
-	memcpy(sb_out, &sc.superblock, sizeof(sc.superblock));
-	memcpy(sb_out->sb_seg_age, sc.seg_age, sb->seg_cnt);
-	sc.sb_sa = 0;
-#if defined(RAM_DISK)
-	memcpy(ram_disk, sb_out, SECTOR_SIZE);
-#else
-	MY_ASSERT(pwrite(fd, sb_out, SECTOR_SIZE, 0) == SECTOR_SIZE);
-#endif
-	sc.sb_modified = false;
-
-	return sb->max_block_cnt;
 }
 
 void logstor_init(void)
@@ -805,40 +722,43 @@ superblock_init_read(void)
 	_Static_assert(sizeof(sb_gen) == sizeof(sc.superblock.sb_gen), "sb_gen");
 
 	// get the superblock
+	sb_in = (struct _superblock *)buf[0];
 #if defined(RAM_DISK)
-	memcpy(buf[0], ram_disk, SECTOR_SIZE);
+	memcpy(sb_in, ram_disk, SECTOR_SIZE);
 #else
-	MY_ASSERT(pread(sc.disk_fd, buf[0], SECTOR_SIZE, 0) == SECTOR_SIZE);
+	MY_ASSERT(pread(sc.disk_fd, sb_in, SECTOR_SIZE, 0) == SECTOR_SIZE);
 #endif
-	rw.r_superblock_read++;
-	memcpy(&sc.superblock, buf[0], sizeof(sc.superblock));
-	if (sc.superblock.sig != SIG_LOGSTOR ||
-	    sc.superblock.seg_alloc_p >= sc.superblock.seg_cnt ||
-	    sc.superblock.seg_reclaim_p >= sc.superblock.seg_cnt)
+	if (sb_in->sig != SIG_LOGSTOR ||
+	    sb_in->seg_alloc_p >= sb_in->seg_cnt ||
+	    sb_in->seg_reclaim_p >= sb_in->seg_cnt)
 		return EINVAL;
 
-	sb_gen = sc.superblock.sb_gen;
+	sb_gen = sb_in->sb_gen;
+	if (sb_gen == 0) {
+		// gen 0 at sector 0 means that the superblock is in sector 0
+		sc.sb_sa = 0;
+		goto seg_age_init;
+	}
+
 	for (i = 1 ; i < SECTORS_PER_SEG; i++) {
+		sb_in = (struct _superblock *)buf[i%2];
 #if defined(RAM_DISK)
-		memcpy(buf[i%2], ram_disk + i * SECTOR_SIZE, SECTOR_SIZE);
+		memcpy(sb_in, ram_disk + i * SECTOR_SIZE, SECTOR_SIZE);
 #else
-		MY_ASSERT(pread(sc.disk_fd, buf[i%2], SECTOR_SIZE, i * SECTOR_SIZE) == SECTOR_SIZE);
+		MY_ASSERT(pread(sc.disk_fd, sb_in, SECTOR_SIZE, i * SECTOR_SIZE) == SECTOR_SIZE);
 #endif
-		rw.r_superblock_read++;
-		memcpy(&sc.superblock, buf[i%2], sizeof(sc.superblock));
-		if (sc.superblock.sig != SIG_LOGSTOR)
+		if (sb_in->sig != SIG_LOGSTOR)
 			break;
-		if (sc.superblock.sb_gen != (uint16_t)(sb_gen + 1)) // IMPORTANT type cast
+		if (sb_in->sb_gen != (uint16_t)(sb_gen + 1)) // IMPORTANT type cast
 			break;
-		sb_gen = sc.superblock.sb_gen;
+		sb_gen = sb_in->sb_gen;
 	}
 	sc.sb_sa = (i - 1);
 	sb_in = (struct _superblock *)buf[(i-1)%2];
-	memcpy(&sc.superblock, sb_in, sizeof(sc.superblock));
-	sc.sb_modified = false;
-	if (sc.superblock.seg_alloc_p >= sc.superblock.seg_cnt ||
-	    sc.superblock.seg_reclaim_p >= sc.superblock.seg_cnt)
+	if (sb_in->seg_alloc_p >= sb_in->seg_cnt ||
+	    sb_in->seg_reclaim_p >= sb_in->seg_cnt)
 		return EINVAL;
+seg_age_init:
 #if defined(RAM_DISK)
 	MY_ASSERT(sizeof(sc.seg_age) >= sc.superblock.seg_cnt);
 #else
@@ -846,8 +766,76 @@ superblock_init_read(void)
 	MY_ASSERT(sc.seg_age != NULL);
 #endif
 	memcpy(sc.seg_age, sb_in->sb_seg_age, sb_in->seg_cnt);
+	memcpy(&sc.superblock, sb_in, sizeof(sc.superblock));
+	sc.sb_modified = false;
 
 	return 0;
+}
+
+/*
+Description:
+    Write the initialized supeblock to the downstream disk
+*/
+void
+superblock_init_write(int fd)
+{
+	int	i;
+	uint32_t sector_cnt;
+	struct _superblock *sb_out;
+	off_t media_size;
+	char buf[SECTOR_SIZE] __attribute__ ((aligned));
+
+	rw.w_superblock_init++;
+#if defined(RAM_DISK)
+	media_size = RAM_DISK_SIZE;
+#else
+	media_size = g_gate_mediasize(fd);
+#endif
+	sector_cnt = media_size / SECTOR_SIZE;
+
+	sb_out = (struct _superblock *)buf;
+	sb_out->sig = SIG_LOGSTOR;
+	sb_out->ver_major = VER_MAJOR;
+	sb_out->ver_minor = VER_MINOR;
+
+	// gen 0 at sector 0 means that there is no superblock following sector 0
+	sb_out->sb_gen = 0;
+	sb_out->seg_cnt = sector_cnt / SECTORS_PER_SEG;
+	if (sizeof(struct _superblock) + sb_out->seg_cnt > SECTOR_SIZE) {
+		printf("%s: size of superblock %d seg_cnt %d\n",
+		    __func__, (int)sizeof(struct _superblock), (int)sb_out->seg_cnt);
+		printf("    the size of the disk must be less than %lld\n",
+		    (SECTOR_SIZE - sizeof(struct _superblock)) * (long long)SEG_SIZE);
+		MY_PANIC();
+	}
+	sb_out->seg_free_cnt = sb_out->seg_cnt - SEG_DATA_START;
+
+	// the physical disk must have at least the space for the metadata
+	MY_ASSERT(sb_out->seg_free_cnt * BLOCKS_PER_SEG >
+	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT);
+
+	sb_out->max_block_cnt =
+	    sb_out->seg_free_cnt * BLOCKS_PER_SEG -
+	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT;
+	sb_out->max_block_cnt *= 0.9;
+#if defined(MY_DEBUG)
+	printf("%s: sector_cnt %u max_block_cnt %u\n",
+	    __func__, sector_cnt, sb_out->max_block_cnt);
+#endif
+	// the root sector address for the files
+	for (i = 0; i < FD_COUNT; i++) {
+		sb_out->ftab[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
+	}
+	sb_out->seg_alloc_p = SEG_DATA_START;	// start allocate from here
+	sb_out->seg_reclaim_p = SEG_DATA_START;	// start reclaim from here
+	memset(sb_out->sb_seg_age, 0, SECTOR_SIZE - sizeof(struct _superblock));
+
+	// write out super block
+#if defined(RAM_DISK)
+	memcpy(ram_disk, sb_out, SECTOR_SIZE);
+#else
+	MY_ASSERT(pwrite(fd, sb_out, SECTOR_SIZE, 0) == SECTOR_SIZE);
+#endif
 }
 
 static void
@@ -858,8 +846,13 @@ superblock_write(void)
 
 	rw.w_superblock_write++;
 	sc.superblock.sb_gen++;
-	if (++sc.sb_sa == SECTORS_PER_SEG)
+	if (++sc.sb_sa == SECTORS_PER_SEG) {
 		sc.sb_sa = 0;
+		// can not write a superblock with gen number 0 at sector 0
+		// see superblock_init_read.
+		if (sc.superblock.sb_gen == 0)
+			sc.superblock.sb_gen = 1;
+	}
 	sb_out = (struct _superblock *)buf;
 	memcpy(sb_out, &sc.superblock, sizeof(sc.superblock));
 	memcpy(sb_out->sb_seg_age, sc.seg_age, sb_out->seg_cnt);
@@ -1208,7 +1201,7 @@ file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
 	uint8_t	*fbd;	// point to file buffer data
 	uint32_t	offset;	// the offset within the file buffer data
 
-	MY_ASSERT((ba & 0xc0000000u) == 0);
+	MY_ASSERT((ba & META_BASE) == 0);
 	fbd = file_access(fd, ba << 2, &offset, true);
 	*((uint32_t *)(fbd + offset)) = sa;
 }
@@ -1497,7 +1490,7 @@ fbuf_queue_check(void)
     Circular queue insert before
 */
 static void
-fbuf_cir_queue_insert(struct _fbuf *buf)
+fbuf_cir_queue_insert_tail(struct _fbuf *buf)
 {
 	struct _fbuf *prev;
 
@@ -1606,9 +1599,9 @@ fbuf_get(union meta_addr ma)
 		*/
 		buf->ref_cnt++;
 
-		index = ma_index_get(ma, i);// the offset of indirect block for next level
-		ma_index_set(&tma, i, index);
+		index = ma_index_get(ma, i);// the index to next level's indirect block
 		sa = buf->data[index];	// the sector address of the next level indirect block
+		ma_index_set(&tma, i, index); // set the next level's index for @tma
 		pbuf = buf;		// @buf is the parent of next level indirect block
 	}
 #if defined(MY_DEBUG)
@@ -1648,7 +1641,7 @@ fbuf_alloc(void)
 		if (pbuf->ref_cnt == 0) {
 			// move it from indirect queue to circular queue
 			LIST_REMOVE(pbuf, indir_queue);
-			fbuf_cir_queue_insert(pbuf);
+			fbuf_cir_queue_insert_tail(pbuf);
 			// set @accessed to false so that it will be reclaimed
 			// next time by the second chance algorithm
 			pbuf->accessed = false;

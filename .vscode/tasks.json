@@ -15,7 +15,7 @@
                 "${workspaceFolder}/logstest.c",
                 "-o",
                 "${workspaceFolder}/a.out",
-                "-lm"
+                "-lm",
             ],
             "options": {
                 "cwd": "/usr/bin"

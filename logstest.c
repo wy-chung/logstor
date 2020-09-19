@@ -24,7 +24,7 @@ e-mail: wuyang.chung1@gmail.com
 #else
 	#define	RAND_SEED	0
 #endif
-double loop_ratio = 0.4; // loop_count / max_block;
+double loop_ratio = 1.4; // loop_count / max_block;
 
 typedef void (arrays_alloc_f)(unsigned max_block);
 
