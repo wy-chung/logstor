@@ -60,21 +60,6 @@ uint32_t sa_rw; // the sector address for _logstor_read_one/_logstor_write_one
 uint32_t gdb_cond0;
 uint32_t gdb_cond1;
 
-struct {
-	unsigned r_logstor_read;
-	unsigned r_logstor_read_one;
-	unsigned r_seg_sum_read;
-	unsigned r_gc_seg_clean;
-	unsigned r_fbuf_read_and_hash;
-	unsigned w_logstor_write;
-	unsigned w_logstor_write_one;
-	unsigned w_seg_sum_write;
-	unsigned w_superblock_init;
-	unsigned w_superblock_write;
-	unsigned w_fbuf_write;
-	unsigned d_delete_count;
-} rw;
-
 #define	SIG_LOGSTOR	0x4C4F4753	// "LOGS": Log-Structured Storage
 #define	VER_MAJOR	0
 #define	VER_MINOR	1
@@ -463,7 +448,6 @@ int logstor_delete(off_t offset, void *data, off_t length)
 	int size;	// number of remaining sectors to process
 	int i;
 
-	rw.d_delete_count++;
 	MY_ASSERT((offset & (SECTOR_SIZE - 1)) == 0);
 	MY_ASSERT((length & (SECTOR_SIZE - 1)) == 0);
 	ba = offset / SECTOR_SIZE;
@@ -508,7 +492,6 @@ _logstor_read(unsigned ba, char *data, int size)
 	unsigned i, count;
 	uint32_t start_sa, pre_sa, sa;	// sector address
 
-	rw.r_logstor_read++;
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	start_sa = pre_sa = file_read_4byte(FD_ACTIVE, ba);
@@ -544,7 +527,6 @@ _logstor_read_one(unsigned ba, char *data)
 {
 	uint32_t start_sa;	// sector address
 
-	rw.r_logstor_read_one++;
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	start_sa = file_read_4byte(FD_ACTIVE, ba);
@@ -578,7 +560,6 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 	int sec_free;	// number of free sectors in current segment
 	int i, count;
 
-	rw.w_logstor_write++;
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 	MY_ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFF);
 
@@ -620,7 +601,6 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
 {
 	uint32_t sa;	// sector address
 
-	rw.w_logstor_write_one++;
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 	MY_ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFF);
 
@@ -684,7 +664,6 @@ seg_sum_read(struct _seg_sum *seg_sum)
 {
 	uint32_t sa;
 
-	rw.r_seg_sum_read++;
 	sa = sega2sa(seg_sum->sega) + SEG_SUM_OFF;
 	my_read(sa, seg_sum, 1);
 }
@@ -697,7 +676,6 @@ seg_sum_write(struct _seg_sum *seg_sum)
 {
 	uint32_t sa;
 
-	rw.w_seg_sum_write++;
 	// segment summary is at the end of a segment
 	sa = sega2sa(seg_sum->sega) + SEG_SUM_OFF;
 	seg_sum->ss_gen = sc.superblock.sb_gen;
@@ -785,7 +763,6 @@ superblock_init_write(int fd)
 	off_t media_size;
 	char buf[SECTOR_SIZE] __attribute__ ((aligned));
 
-	rw.w_superblock_init++;
 #if defined(RAM_DISK)
 	media_size = RAM_DISK_SIZE;
 #else
@@ -844,7 +821,6 @@ superblock_write(void)
 	struct _superblock *sb_out;
 	char buf[SECTOR_SIZE];
 
-	rw.w_superblock_write++;
 	sc.superblock.sb_gen++;
 	if (++sc.sb_sa == SECTORS_PER_SEG) {
 		sc.sb_sa = 0;
@@ -957,6 +933,9 @@ seg_reclaim_init(struct _seg_sum *seg_sum)
 	sega_hot = sc.seg_sum_hot.sega;
 again:
 	sega = sc.superblock.seg_reclaim_p;
+	// increase its age to prevent it from being allocated
+	// before cleaned.
+	sc.seg_age[sega]++;
 	if (++sc.superblock.seg_reclaim_p == sc.superblock.seg_cnt)
 		sc.superblock.seg_reclaim_p = SEG_DATA_START;
 	MY_ASSERT(sc.superblock.seg_reclaim_p < sc.superblock.seg_cnt);
@@ -968,15 +947,14 @@ again:
 		goto again;
 #endif
 	// For wearleveling, if it is old enough reclaim it.
-	if (sc.seg_age[sega] >= CLEAN_AGE_LIMIT) {
+	if (sc.seg_age[sega] > CLEAN_AGE_LIMIT) {
 		seg_clean(seg_sum);
 		if (sc.superblock.seg_free_cnt > sc.clean_high_water) {
-			seg_sum->sega = 0;
+			seg_sum->sega = 0;	// has cleaned enough segments
 			return;
 		}
 		goto again;
 	}
-	sc.seg_age[sega]++; // increase its age
 	seg_sum->sega = sega;
 	seg_sum_read(seg_sum);
 	seg_live_count(seg_sum);
@@ -1027,7 +1005,6 @@ seg_clean(struct _seg_sum *seg_sum)
 	struct _fbuf *buf;
 	uint32_t sec_buf[SECTOR_SIZE/4];
 
-	rw.r_gc_seg_clean++;
 	seg_sa = sega2sa(seg_sum->sega);
 	for (i = 0; i < seg_sum->ss_alloc_p; i++) {
 		ba = seg_sum->ss_rm[i];	// get the block address from reverse map
@@ -1660,7 +1637,6 @@ fbuf_read_and_hash(uint32_t sa, union meta_addr ma)
 {
 	struct _fbuf *buf;
 
-	rw.r_fbuf_read_and_hash++;
 	buf = fbuf_alloc();
 
 	if (sa == SECTOR_NULL)	// the metadata block does not exist
@@ -1684,7 +1660,6 @@ fbuf_write(struct _fbuf *buf, struct _seg_sum *seg_sum)
 {
 	uint32_t	sa;	// sector address
 
-	rw.w_fbuf_write++;
 	// get the sector address where the block will be written
 	MY_ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFF);
 	sa = sega2sa(seg_sum->sega) + seg_sum->ss_alloc_p;
