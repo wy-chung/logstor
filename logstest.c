@@ -192,9 +192,9 @@ main(int argc, char *argv[])
 	srandom(RAND_SEED);
 	logstor_init();
 
-	main_loop_count = ceil(3/loop_ratio);
+	main_loop_count = ceil(4/loop_ratio);
 	for (i = 0; i < main_loop_count; i++) {
-	//	gdb_cond0 = i;
+		gdb_cond0 = i;
 		printf("### test %d\n", i);
 		logstor_open(DISK_FILE);
 		max_block = logstor_get_block_cnt();

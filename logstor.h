@@ -15,8 +15,6 @@ typedef long	int64_t;
 #endif
 
 #define	MY_DEBUG
-//#define MAX_FBUF_COUNT  4096
-#define MAX_FBUF_COUNT  500 //wyctest
 
 #if __linux
 #define DISK_FILE	"/home/wyc/mnt/Downloads/logstor.del"
