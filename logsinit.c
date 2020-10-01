@@ -25,10 +25,10 @@ main(int argc, char *argv[])
 	char *disk_file;
 	int disk_fd;
 
-	if (argc == 1 || *argv[1] == '\0')
-		disk_file = DISK_FILE;
-	else
+	if (argc == 2)
 		disk_file = argv[1];
+	else
+		disk_file = DISK_FILE;
 
 	disk_fd = open(disk_file, O_RDWR);
 	MY_ASSERT(disk_fd > 0);

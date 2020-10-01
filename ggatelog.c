@@ -199,8 +199,8 @@ g_gatelog_create(void)
 {
 	struct g_gate_ctl_create ggioc;
 
-	logstor_init(log_path);
-	logstor_open();
+	logstor_init();
+	logstor_open(log_path);
 
 	memset(&ggioc, 0, sizeof(ggioc));
 	ggioc.gctl_version = G_GATE_VERSION;
@@ -226,8 +226,8 @@ g_gatelog_rescue(void)
 {
 	struct g_gate_ctl_cancel ggioc;
 
-	logstor_init(log_path);
-	logstor_open();
+	logstor_init();
+	logstor_open(log_path);
 
 	ggioc.gctl_version = G_GATE_VERSION;
 	ggioc.gctl_unit = log_unit;

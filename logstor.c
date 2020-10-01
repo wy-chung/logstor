@@ -49,8 +49,8 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 }
 #endif
 
-//#define MAX_FBUF_COUNT  4096
-#define MAX_FBUF_COUNT  500 //wyctest
+#define MAX_FBUF_COUNT  4096
+//#define MAX_FBUF_COUNT  500 //wyctest
 
 #define	SIG_LOGSTOR	0x4C4F4753	// "LOGS": Log-Structured Storage
 #define	VER_MAJOR	0
@@ -285,7 +285,31 @@ static struct _fbuf *fbuf_search(union meta_addr ma);
 static bool fbuf_flush(struct _fbuf *buf, struct _seg_sum *seg_sum);
 static void fbuf_hash_insert(struct _fbuf *buf, unsigned key);
 
-#if !__BSD_VISIBLE
+#if __BSD_VISIBLE
+static off_t
+g_gate_mediasize(int fd)
+{
+	off_t mediasize;
+	struct stat sb;
+
+	if (fstat(fd, &sb) == -1) {
+		printf("fstat(): %s.", strerror(errno));
+		exit(1);
+	}
+	if (S_ISCHR(sb.st_mode)) {
+		if (ioctl(fd, DIOCGMEDIASIZE, &mediasize) == -1) {
+			printf("Can't get media size: %s.", strerror(errno));
+			exit(1);
+		}
+	} else if (S_ISREG(sb.st_mode)) {
+		mediasize = sb.st_size;
+	} else {
+		printf("Unsupported file system object.");
+		exit(1);
+	}
+	return (mediasize);
+}
+#else
 static off_t
 g_gate_mediasize(int fd)
 {
@@ -1261,9 +1285,7 @@ static void
 fbuf_mod_fini(void)
 {
 	fbuf_mod_flush();
-#if !defined(RAM_DISK)
 	free(sc.fbuf);
-#endif
 }
 
 static void

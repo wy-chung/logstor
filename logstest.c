@@ -24,7 +24,7 @@ e-mail: wuyang.chung1@gmail.com
 #else
 	#define	RAND_SEED	0
 #endif
-double loop_ratio = 1.4; // loop_count / max_block;
+double loop_ratio = 0.4; // loop_count / max_block;
 
 typedef void (arrays_alloc_f)(unsigned max_block);
 
@@ -132,8 +132,6 @@ static void
 test(int n, unsigned max_block)
 {
 
-	loop_count = max_block * loop_ratio;
-
 	test_write(n, max_block);
 #if defined(MY_DEBUG)
 	arrays_check();
@@ -192,13 +190,13 @@ main(int argc, char *argv[])
 	srandom(RAND_SEED);
 	logstor_init();
 
-	main_loop_count = ceil(4/loop_ratio);
+	main_loop_count = ceil(1/loop_ratio);
 	for (i = 0; i < main_loop_count; i++) {
 		gdb_cond0 = i;
 		printf("### test %d\n", i);
 		logstor_open(DISK_FILE);
 		max_block = logstor_get_block_cnt();
-		arrays_alloc_once(max_block);
+		arrays_alloc_once(max_block); // loop_count is calculated here
 		test(i, max_block);
 		logstor_close();
 	}
@@ -229,22 +227,24 @@ arrays_alloc(unsigned max_block)
 {
 	size_t size;
 
-	size = (unsigned)(max_block * loop_ratio) * sizeof(*i2ba); // size == 2297920
+	loop_count = max_block * loop_ratio;
+
+	size = loop_count * sizeof(*i2ba);
 	i2ba = malloc(size);
 	MY_ASSERT(i2ba != NULL);
 	memset(i2ba, -1, size);
 
-	size = max_block * sizeof(*ba2i);	// size == 1641372
+	size = max_block * sizeof(*ba2i);
 	ba2i = malloc(size);
 	MY_ASSERT(ba2i != NULL);
 	memset(ba2i, -1, size);
 
-	size = max_block * sizeof(*ba2sa);	// size == 1641372
+	size = max_block * sizeof(*ba2sa);
 	ba2sa = malloc(size);
 	MY_ASSERT(ba2sa != NULL);
 	memset(ba2sa, 0, size);
 
-	size = max_block * sizeof(*ba_write_count);	// size == 410343
+	size = max_block * sizeof(*ba_write_count);
 	ba_write_count = malloc(size);
 	MY_ASSERT(ba_write_count != NULL);
 	memset(ba_write_count, 0, size);

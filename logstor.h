@@ -20,7 +20,7 @@ typedef long	int64_t;
 #define DISK_FILE	"/home/wyc/mnt/Downloads/logstor.del"
 //#define DISK_FILE	"/media/wyc/500G/logstor.storage"
 #elif __BSD_VISIBLE
-#define DISK_FILE	"/dev/ada2"
+#define DISK_FILE	"/dev/ada1"
 #else
 #error "DISK_FILE"
 #endif
