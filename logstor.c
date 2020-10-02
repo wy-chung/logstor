@@ -185,8 +185,10 @@ struct _fbuf { // file buffer
 	union meta_addr	ma;	// the metadata address
 #if defined(MY_DEBUG)
 	uint32_t	sa;	// the sector address of the @data
-	//uint16_t	index;
-	//struct _fbuf 	*child[SECTOR_SIZE/sizeof(uint32_t)];
+#endif
+#if defined(FBUF_DEBUG)
+	uint16_t	index;
+	struct _fbuf 	*child[SECTOR_SIZE/sizeof(uint32_t)];
 #endif
 	// the metadata is cached here
 	uint32_t	data[SECTOR_SIZE/sizeof(uint32_t)];
@@ -1258,8 +1260,8 @@ fbuf_mod_init(void)
 	sc.cir_queue_cnt = sc.fbuf_count;
 #endif
 	for (i = 0; i < sc.fbuf_count; i++) {
-#if defined(MY_DEBUG)
-		//sc.fbuf[i].index = i;
+#if defined(FBUF_DEBUG)
+		sc.fbuf[i].index = i;
 #endif
 		sc.fbuf[i].cir_queue.prev = &sc.fbuf[i-1];
 		sc.fbuf[i].cir_queue.next = &sc.fbuf[i+1];
@@ -1550,9 +1552,9 @@ fbuf_get(union meta_addr ma)
 			  it is actually incremented in the previous loop to
 			  prevent it from being reclaimed by fbuf_read_and_hash.
 			*/
-#if defined(MY_DEBUG)
-			//if (pbuf)
-			//	pbuf->child[index] = buf;
+#if defined(FBUF_DEBUG)
+			if (pbuf)
+				pbuf->child[index] = buf;
 #endif
 		} else {
 			MY_ASSERT(buf->parent == pbuf);
@@ -1634,9 +1636,9 @@ fbuf_alloc(void)
 			// next time by the second chance algorithm
 			pbuf->accessed = false;
 		}
-#if defined(MY_DEBUG)
-		//pindex = ma_index_get(buf->ma, buf->ma.depth - 1);
-		//pbuf->child[pindex] = NULL;
+#if defined(FBUF_DEBUG)
+		pindex = ma_index_get(buf->ma, buf->ma.depth - 1);
+		pbuf->child[pindex] = NULL;
 #endif
 	}
 	return buf;
