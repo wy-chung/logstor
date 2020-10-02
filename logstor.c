@@ -289,7 +289,7 @@ static void fbuf_hash_insert(struct _fbuf *buf, unsigned key);
 
 #if __BSD_VISIBLE
 static off_t
-g_gate_mediasize(int fd)
+get_mediasize(int fd)
 {
 	off_t mediasize;
 	struct stat sb;
@@ -313,7 +313,7 @@ g_gate_mediasize(int fd)
 }
 #else
 static off_t
-g_gate_mediasize(int fd)
+get_mediasize(int fd)
 {
 	off_t mediasize;
 	struct stat sb;
@@ -786,7 +786,7 @@ superblock_init_write(int fd)
 #if defined(RAM_DISK)
 	media_size = RAM_DISK_SIZE;
 #else
-	media_size = g_gate_mediasize(fd);
+	media_size = get_mediasize(fd);
 #endif
 	sector_cnt = media_size / SECTOR_SIZE;
 
@@ -921,7 +921,7 @@ again:
 	if (++sc.superblock.seg_alloc_p == sc.superblock.seg_cnt)
 		sc.superblock.seg_alloc_p = SEG_DATA_START;
 	MY_ASSERT(sc.superblock.seg_alloc_p < sc.superblock.seg_cnt);
-	MY_ASSERT(sc.superblock.seg_alloc_p + 1 != sc.superblock.seg_reclaim_p);
+	MY_ASSERT(sc.superblock.seg_alloc_p + 1 != sc.superblock.seg_reclaim_p); //failed
 	MY_ASSERT(sega != sega_hot);
 
 	if (sc.seg_age[sega] != 0)	// this segment is not free
@@ -1605,7 +1605,7 @@ fbuf_alloc(void)
 {
 	struct _fbuf *pbuf;	// parent buffer
 	struct _fbuf *buf;
-#if defined(MY_DEBUG)
+#if defined(FBUF_DEBUG)
 	unsigned pindex;
 #endif
 
@@ -1671,10 +1671,12 @@ fbuf_read_and_hash(uint32_t sa, union meta_addr ma)
 	return buf;
 }
 
-static uint32_t
+static void
 fbuf_write(struct _fbuf *buf, struct _seg_sum *dst_seg)
 {
-	uint32_t	sa;	// sector address
+	struct _fbuf *pbuf;	// buffer parent
+	unsigned pindex;	// the index in parent indirect block
+	uint32_t sa;		// sector address
 
 	// get the sector address where the block will be written
 	MY_ASSERT(dst_seg->ss_alloc_p < SEG_SUM_OFFSET);
@@ -1682,43 +1684,14 @@ fbuf_write(struct _fbuf *buf, struct _seg_sum *dst_seg)
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG - 1);
 
 	my_write(sa, buf->data, 1);
+#if defined(MY_DEBUG)
+	buf->sa = sa;
+#endif
 	buf->modified = false;
 	sc.fbuf_modified_count--;
 	sc.other_write_count++;
 
-	// store the reverse mapping in segment summary
-	dst_seg->ss_rm[dst_seg->ss_alloc_p++] = buf->ma.uint32;
-
-	if (dst_seg->ss_alloc_p == SEG_SUM_OFFSET) { // current segment is full
-		seg_sum_write(dst_seg);
-		seg_alloc(dst_seg);
-		// Don't do segment cleaning when writing out fbuf
-	}
-	return sa;
-}
-
-/*
-Description:
-    Write the dirty data in file buffer to disk
-*/
-static bool
-fbuf_flush(struct _fbuf *buf, struct _seg_sum *dst_seg)
-{
-	struct _fbuf *pbuf;	// buffer parent
-	unsigned pindex; // the index in parent indirect block
-	uint32_t sa;	// sector address
-
-	if (!buf->modified)
-		return false;
-	MY_ASSERT(IS_META_ADDR(buf->ma.uint32));
-	/*
-	  Must disable segment cleaner until @sa is written out
-	*/
-	//cleaner_disable();
-	sa = fbuf_write(buf, dst_seg);
-#if defined(MY_DEBUG)
-	buf->sa = sa;
-#endif
+	// store the forward mapping in parent indirect block
 	pbuf = buf->parent;
 	if (pbuf) {
 		MY_ASSERT(buf->ma.depth != 0);
@@ -1736,7 +1709,30 @@ fbuf_flush(struct _fbuf *buf, struct _seg_sum *dst_seg)
 		sc.superblock.ftab[buf->ma.fd] = sa;
 		sc.sb_modified = true;
 	}
-	//cleaner_enable();
+
+	// store the reverse mapping in segment summary
+	dst_seg->ss_rm[dst_seg->ss_alloc_p++] = buf->ma.uint32;
+
+	if (dst_seg->ss_alloc_p == SEG_SUM_OFFSET) { // current segment is full
+		seg_sum_write(dst_seg);
+		seg_alloc(dst_seg);
+		clean_check();
+	}
+}
+
+/*
+Description:
+    Write the dirty data in file buffer to disk
+*/
+static bool
+fbuf_flush(struct _fbuf *buf, struct _seg_sum *dst_seg)
+{
+
+	if (!buf->modified)
+		return false;
+
+	MY_ASSERT(IS_META_ADDR(buf->ma.uint32));
+	fbuf_write(buf, dst_seg);
 	return true;
 }
 
