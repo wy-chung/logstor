@@ -258,37 +258,42 @@ static char *ram_disk;
 #endif
 static struct g_logstor_softc sc;
 
-static void superblock_init_write(int fd);
 static int _logstor_read(unsigned ba, char *data, int size);
 static int _logstor_read_one(unsigned ba, char *data);
 static int _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum);
 static int _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum, uint32_t *sa_out);
+
 static void seg_alloc(struct _seg_sum *seg_sum);
 static void seg_reclaim_init(struct _seg_sum *seg_sum);
-static void fbuf_mod_flush(void);
-static void fbuf_mod_init(void);
-static void fbuf_mod_fini(void);
-static uint32_t file_read_4byte(uint8_t fh, uint32_t ba);
-static void file_write_4byte(uint8_t fh, uint32_t ba, uint32_t sa);
-
-static union meta_addr fbuf_ma2pma(union meta_addr ma, unsigned *pindex_out);
-static uint32_t fbuf_ma2sa(union meta_addr ma);
 static void seg_sum_write(struct _seg_sum *seg_sum);
-static int superblock_init_read(void);
-static void superblock_write(void);
-static void clean_check(void);
 static void seg_clean(struct _seg_sum *seg_sum);
 static void seg_live_count(struct _seg_sum *seg_sum);
+static void clean_check(void);
+static void clean_metadata(uint32_t cur_sa, union meta_addr cur_ma);
+static void clean_data(uint32_t cur_sa, uint32_t cur_ba);
 
-static void my_read (uint32_t sa, void *buf, unsigned size);
-static void my_write(uint32_t sa, const void *buf, unsigned size);
+static int superblock_init_read(void);
+static void superblock_init_write(int fd);
+static void superblock_write(void);
 
+static uint32_t file_read_4byte(uint8_t fh, uint32_t ba);
+static void file_write_4byte(uint8_t fh, uint32_t ba, uint32_t sa);
 static uint8_t *file_access(uint8_t fd, uint32_t offset, uint32_t *buf_off, bool bl_write);
+
+static void fbuf_mod_init(void);
+static void fbuf_mod_fini(void);
+static void fbuf_mod_flush(void);
 static struct _fbuf *fbuf_get(union meta_addr ma);
 static struct _fbuf *fbuf_read_and_hash(uint32_t sa, union meta_addr ma);
 static struct _fbuf *fbuf_search(union meta_addr ma);
 static bool fbuf_flush(struct _fbuf *buf, struct _seg_sum *seg_sum);
 static void fbuf_hash_insert(struct _fbuf *buf, unsigned key);
+
+static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
+static uint32_t ma2sa(union meta_addr ma);
+
+static void my_read (uint32_t sa, void *buf, unsigned size);
+static void my_write(uint32_t sa, const void *buf, unsigned size);
 
 #if __BSD_VISIBLE
 static off_t
@@ -1003,40 +1008,6 @@ again:
 * segment cleaning  *
 *********************/
 
-/*
-  Input:  seg_sum->seg_sa, segment's sector address
-  Output: seg_sum->live_count
-*/
-static void
-seg_live_count(struct _seg_sum *seg_sum)
-{
-	int	i;
-	uint32_t ba;
-	uint32_t sa;
-	uint32_t seg_sa;
-	unsigned live_count = 0;
-	struct _fbuf *buf;
-
-	seg_sa = sega2sa(seg_sum->sega);
-	for (i = 0; i < seg_sum->ss_alloc_p; i++)
-	{
-		ba = seg_sum->ss_rm[i];	// get the block address from reverse map
-		if (IS_META_ADDR(ba)) {
-			sa = fbuf_ma2sa((union meta_addr)ba); 
-			if (sa == seg_sa + i) { // metadata might be live
-				buf = fbuf_search((union meta_addr)ba);
-				if (buf == NULL)
-					live_count++;
-			}
-		} else {
-			sa = file_read_4byte(FD_ACTIVE, ba); 
-			if (sa == seg_sa + i) // live data
-				live_count++;
-		}
-	}
-	seg_sum->live_count = live_count;
-}
-
 static void
 clean_metadata(uint32_t cur_sa, union meta_addr cur_ma)
 {
@@ -1046,14 +1017,14 @@ clean_metadata(uint32_t cur_sa, union meta_addr cur_ma)
 	union meta_addr pma;
 	uint32_t sec_buf[SECTOR_SIZE/4];
 
-	mapped_sa = fbuf_ma2sa(cur_ma);
+	mapped_sa = ma2sa(cur_ma);
 	if ( mapped_sa == cur_sa) { // metadata might be live
 		buf = fbuf_search(cur_ma);
 		if (buf == NULL) {
 			my_read(cur_sa, sec_buf, 1);
 			_logstor_write_one(cur_ma.uint32, (char *)sec_buf, &sc.seg_sum_cold, &new_sa);
 			if (cur_ma.depth != 0) {
-				pma = fbuf_ma2pma(cur_ma, &pindex);
+				pma = ma2pma(cur_ma, &pindex);
 				pbuf = fbuf_get(pma);
 				pbuf->data[pindex] = new_sa;
 				if (!pbuf->modified) {
@@ -1083,6 +1054,40 @@ clean_data(uint32_t cur_sa, uint32_t cur_ba)
 		my_read(cur_sa, sec_buf, 1);
 		_logstor_write_one(cur_ba, (char *)sec_buf, &sc.seg_sum_cold, NULL);
 	}
+}
+
+/*
+  Input:  seg_sum->seg_sa, segment's sector address
+  Output: seg_sum->live_count
+*/
+static void
+seg_live_count(struct _seg_sum *seg_sum)
+{
+	int	i;
+	uint32_t ba;
+	uint32_t sa;
+	uint32_t seg_sa;
+	unsigned live_count = 0;
+	struct _fbuf *buf;
+
+	seg_sa = sega2sa(seg_sum->sega);
+	for (i = 0; i < seg_sum->ss_alloc_p; i++)
+	{
+		ba = seg_sum->ss_rm[i];	// get the block address from reverse map
+		if (IS_META_ADDR(ba)) {
+			sa = ma2sa((union meta_addr)ba); 
+			if (sa == seg_sa + i) { // metadata might be live
+				buf = fbuf_search((union meta_addr)ba);
+				if (buf == NULL)
+					live_count++;
+			}
+		} else {
+			sa = file_read_4byte(FD_ACTIVE, ba); 
+			if (sa == seg_sa + i) // live data
+				live_count++;
+		}
+	}
+	seg_sum->live_count = live_count;
 }
 
 static void
@@ -1412,7 +1417,7 @@ ma_index_set(union meta_addr *ma, unsigned depth, unsigned index)
 }
 
 static union meta_addr
-fbuf_ma2pma(union meta_addr ma, unsigned *pindex_out)
+ma2pma(union meta_addr ma, unsigned *pindex_out)
 {
 	union meta_addr pma;	// parent's metadata address
 	
@@ -1439,7 +1444,7 @@ fbuf_ma2pma(union meta_addr ma, unsigned *pindex_out)
 
 #if 1
 static uint32_t
-fbuf_ma2sa(union meta_addr ma)
+ma2sa(union meta_addr ma)
 {
 	struct _fbuf *pbuf;
 	unsigned pindex;		//index in the parent indirect block
@@ -1453,7 +1458,7 @@ fbuf_ma2sa(union meta_addr ma)
 		break;
 	case 1:
 	case 2:
-		pma = fbuf_ma2pma(ma, &pindex);
+		pma = ma2pma(ma, &pindex);
 		pbuf = fbuf_get(pma);
 		sa = pbuf->data[pindex];
 		break;
@@ -1464,7 +1469,7 @@ fbuf_ma2sa(union meta_addr ma)
 }
 #else
 static uint32_t
-fbuf_ma2sa(union meta_addr ma)
+ma2sa(union meta_addr ma)
 {
 	struct _fbuf *buf, *pbuf;
 	int pindex;		//index in the parent indirect block
@@ -1900,7 +1905,7 @@ logstor_ba2sa(uint32_t ba)
 	uint32_t sa;
 
 	if (IS_META_ADDR(ba))
-		sa = fbuf_ma2sa((union meta_addr)ba);
+		sa = ma2sa((union meta_addr)ba);
 	else {
 		sa = file_read_4byte(FD_ACTIVE, ba);
 	}
