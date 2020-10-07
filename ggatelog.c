@@ -58,7 +58,8 @@ static enum {
     LOG_CREATE,
     LOG_DESTROY,
     LOG_LIST,
-    LOG_RESCUE
+    LOG_RESCUE,
+    LOG_INIT,
 } log_action = LOG_UNSET;
 
 static const char *log_path = NULL;
@@ -251,6 +252,8 @@ main(int argc, char *argv[])
 		log_action = LOG_DESTROY;
 	else if (strcasecmp(argv[1], "list") == 0)
 		log_action = LOG_LIST;
+	else if (strcasecmp(argv[1], "init") == 0)
+		log_action = LOG_INIT;
 	else
 		log_usage();
 	argc -= 1;
@@ -258,7 +261,7 @@ main(int argc, char *argv[])
 
 	log_flags = 0; // rw
 	log_sectorsize = SECTOR_SIZE;
-	g_gate_verbose = 1;
+	g_gate_verbose = 0;
 	for (;;) {
 		int ch;
 
@@ -320,9 +323,7 @@ main(int argc, char *argv[])
 	argv += optind;
 
 	log_path = NULL;
-	if (argc == 0)
-		log_path = ""; //DISK_FILE;
-	else if (argc == 1)
+	if (argc == 1)
 		log_path = argv[0];
 	else
 		log_usage();
@@ -341,8 +342,8 @@ main(int argc, char *argv[])
 			log_usage();
 		}
 		g_gate_open_device();
-		if (log_path == NULL)
-			log_usage();
+		//if (log_path == NULL)
+		//	log_usage();
 		g_gatelog_rescue();
 		break;
 	case LOG_DESTROY:
@@ -356,6 +357,9 @@ main(int argc, char *argv[])
 		break;
 	case LOG_LIST:
 		g_gate_list(log_unit, g_gate_verbose);
+		break;
+	case LOG_INIT:
+		logstor_superblock_init(log_path);
 		break;
 	case LOG_UNSET:
 	default:

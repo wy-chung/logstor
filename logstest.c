@@ -24,7 +24,7 @@ e-mail: wuyang.chung1@gmail.com
 #else
 	#define	RAND_SEED	0
 #endif
-double loop_ratio = 0.4; // loop_count / max_block;
+double loop_ratio = 1.4; // loop_count / max_block;
 
 typedef void (arrays_alloc_f)(unsigned max_block);
 
@@ -144,7 +144,7 @@ test_read(int n, unsigned max_block)
 {
 	uint64_t start_time;
 	int	read_count;
-	uint32_t i_exp;
+	uint32_t i_exp, i_get;
 	uint32_t i_min;
 	uint32_t i_max;
 	uint32_t ba;		// block address
@@ -165,14 +165,15 @@ test_read(int n, unsigned max_block)
 				i_max = ba_write_count[ba];
 			logstor_read_test(ba, buf);
 			++read_count;
-			i_exp = buf[5];
-			if (ba2i[ba] != i_exp) {
-				printf("%s: ERROR miscompare: ba %u, exp_i %u, get_i %u ba_write_count %u\n",
-				    __func__, ba, ba2i[ba], i_exp, ba_write_count[ba]);
+			i_exp = ba2i[ba];
+			i_get = buf[5];
+			if (i_exp != i_get) {
+				printf("%s: ERROR miscompare: ba %u, i_exp %u, i_get %u ba_write_count %u\n",
+				    __func__, ba, i_exp, i_get, ba_write_count[ba]);
 				MY_PANIC();
 			} else {
-				MY_ASSERT(buf[ba%4] == i_exp);
-				MY_ASSERT(buf[SECTOR_SIZE/4-4+(ba%4)] == i_exp);
+				MY_ASSERT(buf[ba%4] == i_get);
+				MY_ASSERT(buf[SECTOR_SIZE/4-4+(ba%4)] == i_get);
 			}
 		}
 	}
@@ -190,7 +191,7 @@ main(int argc, char *argv[])
 	srandom(RAND_SEED);
 	logstor_init();
 
-	main_loop_count = ceil(1/loop_ratio);
+	main_loop_count = ceil(4/loop_ratio);
 	for (i = 0; i < main_loop_count; i++) {
 		gdb_cond0 = i;
 		printf("### test %d\n", i);

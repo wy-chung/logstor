@@ -49,6 +49,7 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 }
 #endif
 
+#define FBUF_DEBUG
 #define MAX_FBUF_COUNT  4096
 //#define MAX_FBUF_COUNT  500 //wyctest
 
@@ -257,10 +258,11 @@ static char *ram_disk;
 #endif
 static struct g_logstor_softc sc;
 
+static void superblock_init_write(int fd);
 static int _logstor_read(unsigned ba, char *data, int size);
 static int _logstor_read_one(unsigned ba, char *data);
 static int _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum);
-static int _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum);
+static int _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum, uint32_t *sa_out);
 static void seg_alloc(struct _seg_sum *seg_sum);
 static void seg_reclaim_init(struct _seg_sum *seg_sum);
 static void fbuf_mod_flush(void);
@@ -269,6 +271,7 @@ static void fbuf_mod_fini(void);
 static uint32_t file_read_4byte(uint8_t fh, uint32_t ba);
 static void file_write_4byte(uint8_t fh, uint32_t ba, uint32_t sa);
 
+static union meta_addr fbuf_ma2pma(union meta_addr ma, unsigned *pindex_out);
 static uint32_t fbuf_ma2sa(union meta_addr ma);
 static void seg_sum_write(struct _seg_sum *seg_sum);
 static int superblock_init_read(void);
@@ -347,6 +350,15 @@ sega2sa(uint32_t sega)
 	return sega << SA2SEGA_SHIFT;
 }
 
+void logstor_superblock_init(const char *disk_file)
+{
+	int disk_fd;
+
+	disk_fd = open(disk_file, O_WRONLY);
+	MY_ASSERT(disk_fd > 0);
+	superblock_init_write(disk_fd);
+}
+
 void logstor_init(void)
 {
 #if defined(RAM_DISK)
@@ -385,7 +397,7 @@ logstor_open(const char *disk_file)
 	seg_alloc(&sc.seg_sum_hot);
 
 	sc.data_write_count = sc.other_write_count = 0;
-	sc.clean_low_water = CLEAN_WINDOW * 2;
+	sc.clean_low_water = CLEAN_WINDOW * 4;
 	sc.clean_high_water = sc.clean_low_water + CLEAN_WINDOW * 2;
 
 	fbuf_mod_init();
@@ -461,7 +473,7 @@ logstor_write(off_t offset, void *data, off_t length)
 	size = length / SECTOR_SIZE;
 
 	if (size == 1) {
-		error = _logstor_write_one(ba, data, &sc.seg_sum_hot);
+		error = _logstor_write_one(ba, data, &sc.seg_sum_hot, NULL);
 	} else {
 		error = _logstor_write(ba, data, size, &sc.seg_sum_hot);
 	}
@@ -500,7 +512,7 @@ int
 logstor_write_test(uint32_t ba, void *data)
 {
 	//wyctest return _logstor_write(ba, data, 1, &sc.seg_sum_hot);
-	return _logstor_write_one(ba, data, &sc.seg_sum_hot);
+	return _logstor_write_one(ba, data, &sc.seg_sum_hot, NULL);
 }
 
 /*
@@ -612,7 +624,8 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 			seg_alloc(seg_sum);
 			clean_check();
 		}
-		// record the forward mapping later after the segment summary block is flushed
+		// the forward mapping must be recorded after
+		// the segment summary block write
 		for (i = 0; i < count; i++)
 			file_write_4byte(FD_ACTIVE, ba++, sa++);
 
@@ -623,7 +636,7 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 }
 
 static int
-_logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
+_logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum, uint32_t *sa_out)
 {
 	uint32_t sa;	// sector address
 
@@ -650,8 +663,14 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
 		seg_alloc(seg_sum);
 		clean_check();
 	}
-	// record the forward mapping later after the segment summary block is flushed
-	file_write_4byte(FD_ACTIVE, ba, sa);
+	if (!IS_META_ADDR(ba)) {
+		// the forward mapping must be recorded after
+		// the segment summary block write
+		file_write_4byte(FD_ACTIVE, ba, sa);
+	}
+	if (sa_out != NULL)
+		*sa_out = sa;
+
 	return 0;
 }
 
@@ -774,7 +793,7 @@ superblock_init_read(void)
 Description:
     Write the initialized supeblock to the downstream disk
 */
-void
+static void
 superblock_init_write(int fd)
 {
 	int	i;
@@ -878,6 +897,7 @@ my_write(uint32_t sa, const void *buf, unsigned size)
 {
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(ram_disk + (off_t)sa * SECTOR_SIZE , buf, size * SECTOR_SIZE);
+if (sa==31883) my_break(); //wycdebug
 }
 #else
 static void
@@ -992,6 +1012,7 @@ seg_live_count(struct _seg_sum *seg_sum)
 {
 	int	i;
 	uint32_t ba;
+	uint32_t sa;
 	uint32_t seg_sa;
 	unsigned live_count = 0;
 	struct _fbuf *buf;
@@ -1001,13 +1022,15 @@ seg_live_count(struct _seg_sum *seg_sum)
 	{
 		ba = seg_sum->ss_rm[i];	// get the block address from reverse map
 		if (IS_META_ADDR(ba)) {
-			if (fbuf_ma2sa((union meta_addr)ba) == seg_sa + i) { // live metadata
-				buf = fbuf_get((union meta_addr)ba);
-				if (!buf->modified/* && !buf->accessed*/)
+			sa = fbuf_ma2sa((union meta_addr)ba); 
+			if (sa == seg_sa + i) { // metadata might be live
+				buf = fbuf_search((union meta_addr)ba);
+				if (buf == NULL)
 					live_count++;
 			}
 		} else {
-			if (file_read_4byte(FD_ACTIVE, ba) == seg_sa + i) // live data
+			sa = file_read_4byte(FD_ACTIVE, ba); 
+			if (sa == seg_sa + i) // live data
 				live_count++;
 		}
 	}
@@ -1015,37 +1038,69 @@ seg_live_count(struct _seg_sum *seg_sum)
 }
 
 static void
+clean_metadata(uint32_t cur_sa, union meta_addr cur_ma)
+{
+	struct _fbuf *buf, *pbuf;
+	unsigned pindex;
+	uint32_t mapped_sa, new_sa;
+	union meta_addr pma;
+	uint32_t sec_buf[SECTOR_SIZE/4];
+
+	mapped_sa = fbuf_ma2sa(cur_ma);
+	if ( mapped_sa == cur_sa) { // metadata might be live
+		buf = fbuf_search(cur_ma);
+		if (buf == NULL) {
+			my_read(cur_sa, sec_buf, 1);
+			_logstor_write_one(cur_ma.uint32, (char *)sec_buf, &sc.seg_sum_cold, &new_sa);
+			if (cur_ma.depth != 0) {
+				pma = fbuf_ma2pma(cur_ma, &pindex);
+				pbuf = fbuf_get(pma);
+				pbuf->data[pindex] = new_sa;
+				if (!pbuf->modified) {
+					pbuf->modified = true;
+					sc.fbuf_modified_count++;
+				}
+			} else {
+				sc.superblock.ftab[cur_ma.fd] = new_sa;
+				sc.sb_modified = true;
+			}
+		} else if (!buf->modified) {
+			// set modified to true so it will eventually be written out
+			buf->modified = true;
+			sc.fbuf_modified_count++;
+		}
+	}
+}
+
+static void
+clean_data(uint32_t cur_sa, uint32_t cur_ba)
+{
+	uint32_t mapped_sa;
+	uint32_t sec_buf[SECTOR_SIZE/4];
+
+	mapped_sa = file_read_4byte(FD_ACTIVE, cur_ba);
+	if ( mapped_sa == cur_sa) { // live data
+		my_read(cur_sa, sec_buf, 1);
+		_logstor_write_one(cur_ba, (char *)sec_buf, &sc.seg_sum_cold, NULL);
+	}
+}
+
+static void
 seg_clean(struct _seg_sum *seg_sum)
 {
-	uint32_t ba, sa;
 	uint32_t seg_sa;	// the sector address of the cleaning segment
+	uint32_t sa, ba;
 	uint32_t sega;
 	int	i;
-	struct _fbuf *buf;
-	uint32_t sec_buf[SECTOR_SIZE/4];
 
 	seg_sa = sega2sa(seg_sum->sega);
 	for (i = 0; i < seg_sum->ss_alloc_p; i++) {
+		sa = seg_sa + i;
 		ba = seg_sum->ss_rm[i];	// get the block address from reverse map
 		if (IS_META_ADDR(ba)) {
-			sa = fbuf_ma2sa((union meta_addr)ba); 
-			if (sa == seg_sa + i) { // live metadata
-				buf = fbuf_get((union meta_addr)ba);
-				if (!buf->modified) {
-					// Set it as modified and the buf
-					// will be flushed to disk eventually.
-					buf->modified = true;
-					sc.fbuf_modified_count++;
-					//if (!buf->accessed)
-					//	fbuf_flush(buf, &sc.seg_sum_cold);
-				}
-			}
+			clean_metadata(sa, (union meta_addr)ba);
 		} else {
-			sa = file_read_4byte(FD_ACTIVE, ba); 
-			if (sa == seg_sa + i) { // live data
-				my_read(seg_sa + i, sec_buf, 1);
-				_logstor_write_one(ba, (char *)sec_buf, &sc.seg_sum_cold);
-			}
+			clean_data(sa, ba);
 		}
 	}
 	sega = seg_sum->sega;
@@ -1169,7 +1224,7 @@ file_read_4byte(uint8_t fd, uint32_t ba)
 	uint8_t	*fbd;	// point to file buffer data
 	uint32_t	offset;	// the offset within the file buffer data
 
-	MY_ASSERT((ba & 0xc0000000u) == 0);
+	MY_ASSERT((ba & 0xc0000000u) == 0); // the most significant 2-bits can not be used
 	fbd = file_access(fd, ba << 2, &offset, false);
 	return *((uint32_t *)(fbd + offset));
 }
@@ -1189,7 +1244,7 @@ file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
 	uint8_t	*fbd;	// point to file buffer data
 	uint32_t	offset;	// the offset within the file buffer data
 
-	MY_ASSERT((ba & META_BASE) == 0);
+	MY_ASSERT((ba & 0xc0000000u) == 0); // the most significant 2-bits can not be used
 	fbd = file_access(fd, ba << 2, &offset, true);
 	*((uint32_t *)(fbd + offset)) = sa;
 }
@@ -1356,33 +1411,49 @@ ma_index_set(union meta_addr *ma, unsigned depth, unsigned index)
 	ma->uint32 |= index;
 }
 
-#if 0
+static union meta_addr
+fbuf_ma2pma(union meta_addr ma, unsigned *pindex_out)
+{
+	union meta_addr pma;	// parent's metadata address
+	
+	pma = ma;
+	switch (ma.depth)
+	{
+	case 1:
+		*pindex_out = ma_index_get(ma, 0);
+		//ma_index_set(&ma, 0, 0);
+		//ma_index_set(&ma, 1, 0);
+		pma.index = 0; // optimization of the above 2 statements
+		pma.depth = 0; // i.e. ma.depth - 1
+		break;
+	case 2:
+		*pindex_out = ma_index_get(ma, 1);
+		ma_index_set(&pma, 1, 0);
+		pma.depth = 1; // i.e. ma.depth - 1
+		break;
+	default:
+		MY_PANIC();
+	}
+	return pma;
+}
+
+#if 1
 static uint32_t
 fbuf_ma2sa(union meta_addr ma)
 {
 	struct _fbuf *pbuf;
-	int pindex;		//index in the parent indirect block
+	unsigned pindex;		//index in the parent indirect block
 	union meta_addr pma;	// parent's metadata address
 	uint32_t sa;
 
-	pma = ma;
 	switch (ma.depth)
 	{
 	case 0:
 		sa = sc.superblock.ftab[ma.fd];
 		break;
 	case 1:
-		pindex = ma_index_get(ma, 0);
-		//ma_index_set(&ma, 0, 0);
-		//ma_index_set(&ma, 1, 0);
-		pma.index = 0; // optimization of the above 2 statements
-		pma.depth = 0; // i.e. ma.depth - 1
-		goto get_sa;
 	case 2:
-		pindex = ma_index_get(ma, 1);
-		ma_index_set(&pma, 1, 0);
-		pma.depth = 1; // i.e. ma.depth - 1
-get_sa:
+		pma = fbuf_ma2pma(ma, &pindex);
 		pbuf = fbuf_get(pma);
 		sa = pbuf->data[pindex];
 		break;
