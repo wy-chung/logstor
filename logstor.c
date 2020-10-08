@@ -29,8 +29,9 @@ e-mail: wuyang.chung1@gmail.com
 #include "logstor.h"
 
 #if defined(MY_DEBUG)
-void my_break(void) {}
 static void fbuf_mod_dump(void);
+
+void my_break(void) {}
 
 void my_debug(const char * fname, int line_num, bool bl_panic)
 {
@@ -38,8 +39,9 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 
 	printf("*** %s *** %s %d\n", type[bl_panic], fname, line_num);
 	perror("");
-	//fbuf_mod_dump();
-	my_break();
+  #if defined(FBUF_DEBUG)
+	fbuf_mod_dump();
+  #endif
   	if (bl_panic)
   #if defined(EXIT_ON_PANIC)
 		exit(1);
@@ -49,7 +51,6 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 }
 #endif
 
-#define FBUF_DEBUG
 #define MAX_FBUF_COUNT  4096
 //#define MAX_FBUF_COUNT  500 //wyctest
 
@@ -278,7 +279,7 @@ static void superblock_write(void);
 
 static uint32_t file_read_4byte(uint8_t fh, uint32_t ba);
 static void file_write_4byte(uint8_t fh, uint32_t ba, uint32_t sa);
-static uint8_t *file_access(uint8_t fd, uint32_t offset, uint32_t *buf_off, bool bl_write);
+static struct _fbuf *file_access(uint8_t fd, uint32_t offset, uint32_t *buf_off, bool bl_write);
 
 static void fbuf_mod_init(void);
 static void fbuf_mod_fini(void);
@@ -888,13 +889,16 @@ superblock_write(void)
 	my_write(sc.sb_sa, sb_out, 1);
 	sc.other_write_count++;
 }
-
+#if defined(MY_DEBUG)
+uint32_t sa_watch = 0;
+#endif
 #if defined(RAM_DISK)
 static void
 my_read(uint32_t sa, void *buf, unsigned size)
 {
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(buf, ram_disk + (off_t)sa * SECTOR_SIZE, size * SECTOR_SIZE);
+	MY_BREAK(sa == sa_watch);
 }
 
 static void
@@ -902,7 +906,7 @@ my_write(uint32_t sa, const void *buf, unsigned size)
 {
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(ram_disk + (off_t)sa * SECTOR_SIZE , buf, size * SECTOR_SIZE);
-if (sa==31883) my_break(); //wycdebug
+	MY_BREAK(sa==sa_watch);
 }
 #else
 static void
@@ -1018,7 +1022,7 @@ clean_metadata(uint32_t cur_sa, union meta_addr cur_ma)
 	uint32_t sec_buf[SECTOR_SIZE/4];
 
 	mapped_sa = ma2sa(cur_ma);
-	if ( mapped_sa == cur_sa) { // metadata might be live
+	if (cur_sa == mapped_sa) { // metadata might be live
 		buf = fbuf_search(cur_ma);
 		if (buf == NULL) {
 			my_read(cur_sa, sec_buf, 1);
@@ -1050,7 +1054,7 @@ clean_data(uint32_t cur_sa, uint32_t cur_ba)
 	uint32_t sec_buf[SECTOR_SIZE/4];
 
 	mapped_sa = file_read_4byte(FD_ACTIVE, cur_ba);
-	if ( mapped_sa == cur_sa) { // live data
+	if (cur_sa == mapped_sa) { // live data
 		my_read(cur_sa, sec_buf, 1);
 		_logstor_write_one(cur_ba, (char *)sec_buf, &sc.seg_sum_cold, NULL);
 	}
@@ -1064,8 +1068,8 @@ static void
 seg_live_count(struct _seg_sum *seg_sum)
 {
 	int	i;
-	uint32_t ba;
-	uint32_t sa;
+	uint32_t cur_ba;
+	uint32_t cur_sa, mapped_sa;
 	uint32_t seg_sa;
 	unsigned live_count = 0;
 	struct _fbuf *buf;
@@ -1073,17 +1077,18 @@ seg_live_count(struct _seg_sum *seg_sum)
 	seg_sa = sega2sa(seg_sum->sega);
 	for (i = 0; i < seg_sum->ss_alloc_p; i++)
 	{
-		ba = seg_sum->ss_rm[i];	// get the block address from reverse map
-		if (IS_META_ADDR(ba)) {
-			sa = ma2sa((union meta_addr)ba); 
-			if (sa == seg_sa + i) { // metadata might be live
-				buf = fbuf_search((union meta_addr)ba);
+		cur_sa = seg_sa + i;
+		cur_ba = seg_sum->ss_rm[i];	// get the block address from reverse map
+		if (IS_META_ADDR(cur_ba)) {
+			mapped_sa = ma2sa((union meta_addr)cur_ba); 
+			if (cur_sa == mapped_sa) { // metadata might be live
+				buf = fbuf_search((union meta_addr)cur_ba);
 				if (buf == NULL)
 					live_count++;
 			}
 		} else {
-			sa = file_read_4byte(FD_ACTIVE, ba); 
-			if (sa == seg_sa + i) // live data
+			mapped_sa = file_read_4byte(FD_ACTIVE, cur_ba); 
+			if (cur_sa == mapped_sa) // live data
 				live_count++;
 		}
 	}
@@ -1094,18 +1099,18 @@ static void
 seg_clean(struct _seg_sum *seg_sum)
 {
 	uint32_t seg_sa;	// the sector address of the cleaning segment
-	uint32_t sa, ba;
+	uint32_t cur_sa, cur_ba;
 	uint32_t sega;
 	int	i;
 
 	seg_sa = sega2sa(seg_sum->sega);
 	for (i = 0; i < seg_sum->ss_alloc_p; i++) {
-		sa = seg_sa + i;
-		ba = seg_sum->ss_rm[i];	// get the block address from reverse map
-		if (IS_META_ADDR(ba)) {
-			clean_metadata(sa, (union meta_addr)ba);
+		cur_sa = seg_sa + i;
+		cur_ba = seg_sum->ss_rm[i];	// get the block address from reverse map
+		if (IS_META_ADDR(cur_ba)) {
+			clean_metadata(cur_sa, (union meta_addr)cur_ba);
 		} else {
-			clean_data(sa, ba);
+			clean_data(cur_sa, cur_ba);
 		}
 	}
 	sega = seg_sum->sega;
@@ -1226,12 +1231,12 @@ Return:
 static uint32_t
 file_read_4byte(uint8_t fd, uint32_t ba)
 {
-	uint8_t	*fbd;	// point to file buffer data
-	uint32_t	offset;	// the offset within the file buffer data
+	struct _fbuf *buf;
+	uint32_t offset;	// the offset within the file buffer data
 
 	MY_ASSERT((ba & 0xc0000000u) == 0); // the most significant 2-bits can not be used
-	fbd = file_access(fd, ba << 2, &offset, false);
-	return *((uint32_t *)(fbd + offset));
+	buf = file_access(fd, ba << 2, &offset, false);
+	return *((uint32_t *)((uint8_t *)buf->data + offset));
 }
 
 /*
@@ -1246,12 +1251,12 @@ Parameters:
 static void
 file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
 {
-	uint8_t	*fbd;	// point to file buffer data
-	uint32_t	offset;	// the offset within the file buffer data
+	struct _fbuf *buf;
+	uint32_t offset;	// the offset within the file buffer data
 
 	MY_ASSERT((ba & 0xc0000000u) == 0); // the most significant 2-bits can not be used
-	fbd = file_access(fd, ba << 2, &offset, true);
-	*((uint32_t *)(fbd + offset)) = sa;
+	buf = file_access(fd, ba << 2, &offset, true);
+	*((uint32_t *)((uint8_t*)buf->data + offset)) = sa;
 }
 
 /*
@@ -1268,11 +1273,11 @@ Parameters:
 Return:
 	the address of the file buffer data
 */
-static uint8_t *
+static struct _fbuf *
 file_access(uint8_t fd, uint32_t offset, uint32_t *buf_off, bool bl_write)
 {
 	union meta_addr	ma;		// metadata address
-	struct _fbuf	*buf;
+	struct _fbuf *buf;
 
 	*buf_off = offset & 0xfffu;
 
@@ -1286,8 +1291,7 @@ file_access(uint8_t fd, uint32_t offset, uint32_t *buf_off, bool bl_write)
 		buf->modified = true;
 		sc.fbuf_modified_count++;
 	}
-
-	return (uint8_t *)buf->data;
+	return buf;
 }
 
 /*

@@ -15,6 +15,7 @@ typedef long	int64_t;
 #endif
 
 #define	MY_DEBUG
+#define FBUF_DEBUG
 
 #if __linux
 #define DISK_FILE	"/home/wyc/mnt/Downloads/logstor.del"
@@ -30,9 +31,11 @@ void my_debug(const char * fname, int line_num, bool bl_panic);
 void my_break(void);
 
 #define MY_ASSERT(x)	do if (!(x)) my_debug(__func__, __LINE__, true); while(0)
+#define MY_BREAK(x)	do if ((x)) my_break(); while(0)
 #define MY_PANIC()	my_debug(__FILE__, __LINE__, true)
 #else
 #define MY_ASSERT(x)
+#define MY_BREAK(x)
 #define MY_PANIC()
 #endif
 
