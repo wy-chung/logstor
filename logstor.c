@@ -29,7 +29,9 @@ e-mail: wuyang.chung1@gmail.com
 #include "logstor.h"
 
 #if defined(MY_DEBUG)
+  #if defined(FBUF_DEBUG)
 static void fbuf_mod_dump(void);
+  #endif
 
 void my_break(void) {}
 
@@ -370,7 +372,7 @@ void logstor_init(void)
 #if defined(RAM_DISK)
 	ram_disk = malloc(RAM_DISK_SIZE);
 	MY_ASSERT(ram_disk != NULL);
-	superblock_init_write(0);
+	superblock_init_write(-1);
 #endif
 }
 
@@ -1841,7 +1843,7 @@ fbuf_search(union meta_addr ma)
 	return NULL;	// cache miss
 }
 
-#if defined(MY_DEBUG)
+#if defined(FBUF_DEBUG)
 static void
 fbuf_dump(struct _fbuf *buf, FILE *fh)
 {

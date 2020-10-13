@@ -15,7 +15,7 @@ typedef long	int64_t;
 #endif
 
 #define	MY_DEBUG
-#define FBUF_DEBUG
+//#define FBUF_DEBUG
 
 #if __linux
 #define DISK_FILE	"/home/wyc/mnt/Downloads/logstor.del"
