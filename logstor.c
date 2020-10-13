@@ -387,7 +387,7 @@ logstor_open(const char *disk_file)
 {
 	int error;
 
-	memset(&sc, 0, sizeof(sc));
+	bzero(&sc, sizeof(sc));
 #if !defined(RAM_DISK)
   #if __BSD_VISIBLE
 	sc.disk_fd = open(disk_file, O_RDWR | O_DIRECT | O_FSYNC);
@@ -547,7 +547,7 @@ _logstor_read(unsigned ba, char *data, int size)
 			pre_sa = sa;
 		} else {
 			if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
-				memset(data, 0, SECTOR_SIZE);
+				bzero(data, SECTOR_SIZE);
 			else {
 				my_read(start_sa, data, count);
 			}
@@ -558,7 +558,7 @@ _logstor_read(unsigned ba, char *data, int size)
 		}
 	}
 	if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
-		memset(data, 0, SECTOR_SIZE);
+		bzero(data, SECTOR_SIZE);
 	else {
 		my_read(start_sa, data, count);
 	}
@@ -578,7 +578,7 @@ _logstor_read_one(unsigned ba, char *data)
 	sa_rw = start_sa; //wyctest
 #endif
 	if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
-		memset(data, 0, SECTOR_SIZE);
+		bzero(data, SECTOR_SIZE);
 	else {
 		my_read(start_sa, data, 1);
 	}
@@ -853,7 +853,7 @@ superblock_init_write(int fd)
 	}
 	sb_out->seg_alloc_p = SEG_DATA_START;	// start allocate from here
 	sb_out->seg_reclaim_p = SEG_DATA_START + 1;	// start reclaim from here
-	memset(sb_out->sb_seg_age, 0, SECTOR_SIZE - sizeof(struct _superblock));
+	bzero(sb_out->sb_seg_age, SECTOR_SIZE - sizeof(struct _superblock));
 
 	// write out super block
 #if defined(RAM_DISK)
@@ -863,7 +863,7 @@ superblock_init_write(int fd)
 #endif
 
 	// clear the rest of the supeblock's segment
-	memset(buf, 0, SECTOR_SIZE);
+	bzero(buf, SECTOR_SIZE);
 	for ( i = 1; i < SECTORS_PER_SEG; i++) {
 #if defined(RAM_DISK)
 		memcpy(ram_disk + i * SECTOR_SIZE, buf, SECTOR_SIZE);
@@ -898,7 +898,7 @@ my_read(uint32_t sa, void *buf, unsigned size)
 {
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(buf, ram_disk + (off_t)sa * SECTOR_SIZE, size * SECTOR_SIZE);
-	MY_BREAK(sa == sa_watch);
+//MY_BREAK(sa == sa_watch);
 }
 
 static void
@@ -906,7 +906,7 @@ my_write(uint32_t sa, const void *buf, unsigned size)
 {
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(ram_disk + (off_t)sa * SECTOR_SIZE , buf, size * SECTOR_SIZE);
-	MY_BREAK(sa==sa_watch);
+//MY_BREAK(sa==sa_watch);
 }
 #else
 static void
@@ -1699,8 +1699,8 @@ fbuf_alloc(void)
 	} while (buf != sc.fbuf_cir_head);
 	sc.fbuf_cir_head = buf->cir_queue.next;
 
-	fbuf_flush(buf, &sc.seg_sum_hot);
 	LIST_REMOVE(buf, buffer_bucket_queue);
+	fbuf_flush(buf, &sc.seg_sum_hot);
 
 	// set buf's parent to NULL
 	pbuf = buf->parent;
@@ -1737,7 +1737,7 @@ fbuf_read_and_hash(uint32_t sa, union meta_addr ma)
 	buf = fbuf_alloc();	// allocate a fbuf from circular queue
 
 	if (sa == SECTOR_NULL)	// the metadata block does not exist
-		memset(buf->data, 0, sizeof(buf->data));
+		bzero(buf->data, sizeof(buf->data));
 	else {
 		my_read(sa, buf->data, 1);
 		//sc.other_write_count++;
@@ -1748,6 +1748,7 @@ fbuf_read_and_hash(uint32_t sa, union meta_addr ma)
 #if defined(MY_DEBUG)
 	buf->sa = sa;
 #endif
+
 	return buf;
 }
 
@@ -1796,7 +1797,7 @@ fbuf_write(struct _fbuf *buf, struct _seg_sum *dst_seg)
 	if (dst_seg->ss_alloc_p == SEG_SUM_OFFSET) { // current segment is full
 		seg_sum_write(dst_seg);
 		seg_alloc(dst_seg);
-		clean_check();
+		//clean_check();	// cannot do cleaning during fbuf_write
 	}
 }
 
@@ -1846,7 +1847,7 @@ fbuf_dump(struct _fbuf *buf, FILE *fh)
 {
 	int i;
 
-	fprintf(fh, "addr %08u depth %d\n", buf->sa, buf->ma.depth);
+	fprintf(fh, "sa %08u depth %d\n", buf->sa, buf->ma.depth);
 	for (i = 0; i < SECTOR_SIZE/4;  i++)
 		fprintf(fh, "[%04d] %08u\n", i, buf->data[i]);
 	fprintf(fh, "======================\n");

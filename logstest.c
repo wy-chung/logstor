@@ -243,12 +243,12 @@ arrays_alloc(unsigned max_block)
 	size = max_block * sizeof(*ba2sa);
 	ba2sa = malloc(size);
 	MY_ASSERT(ba2sa != NULL);
-	memset(ba2sa, 0, size);
+	bzero(ba2sa, size);
 
 	size = max_block * sizeof(*ba_write_count);
 	ba_write_count = malloc(size);
 	MY_ASSERT(ba_write_count != NULL);
-	memset(ba_write_count, 0, size);
+	bzero(ba_write_count, size);
 
 	arrays_alloc_once = arrays_nop;	// don't do array alloc any more
 }

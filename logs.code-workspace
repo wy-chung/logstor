@@ -10,6 +10,5 @@
 			"queue.h": "c",
 			"stat.h": "c"
 		},
-		"editor.fontSize": 11,
 	}
 }
