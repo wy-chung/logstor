@@ -11,7 +11,7 @@ e-mail: wuyang.chung1@gmail.com
 #include <fcntl.h>
 //#include <assert.h>
 #include <time.h>
-#include <math.h>
+//#include <math.h>
 #include <sys/queue.h>
 
 #include "logstor.h"
@@ -24,7 +24,8 @@ e-mail: wuyang.chung1@gmail.com
 #else
 	#define	RAND_SEED	0
 #endif
-double loop_ratio = 1.4; // loop_count / max_block;
+#define MUTIPLIER_TO_MAXBLOCK 4
+double ratio_to_maxblock = 0.4; // the ratio to max_block;
 
 typedef void (arrays_alloc_f)(unsigned max_block);
 
@@ -93,7 +94,7 @@ test_write(int n, unsigned max_block)
 		logstor_write_test(ba, buf);
 		ba2sa[ba] = sa_rw;
 	}
-	printf("elapse time %lu ticks\n", rdtsc() - start_time);
+	printf("elapse time %llu ticks\n", rdtsc() - start_time);
 	printf("overwrite %d/%d\n", overwrite_count, loop_count);
 	printf("\n");
 
@@ -177,7 +178,7 @@ test_read(int n, unsigned max_block)
 			}
 		}
 	}
-	printf("elapse time %lu ticks\n", rdtsc()-start_time);
+	printf("elapse time %llu ticks\n", rdtsc()-start_time);
 	printf("read_count %d i_max %u\n\n", read_count, i_max);
 }
 
@@ -191,7 +192,7 @@ main(int argc, char *argv[])
 	srandom(RAND_SEED);
 	logstor_init();
 
-	main_loop_count = ceil(4/loop_ratio);
+	main_loop_count = MUTIPLIER_TO_MAXBLOCK/ratio_to_maxblock + 0.999;
 	for (i = 0; i < main_loop_count; i++) {
 		gdb_cond0 = i;
 		printf("### test %d\n", i);
@@ -228,7 +229,7 @@ arrays_alloc(unsigned max_block)
 {
 	size_t size;
 
-	loop_count = max_block * loop_ratio;
+	loop_count = max_block * ratio_to_maxblock;
 
 	size = loop_count * sizeof(*i2ba);
 	i2ba = malloc(size);

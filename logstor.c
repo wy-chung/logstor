@@ -1469,6 +1469,7 @@ ma2sa(union meta_addr ma)
 		sa = pbuf->data[pindex];
 		break;
 	default:
+		sa = 0;
 		MY_PANIC();
 	}
 	return sa;
