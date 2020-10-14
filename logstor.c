@@ -506,6 +506,11 @@ int logstor_delete(off_t offset, void *data, off_t length)
 		for (i = 0; i<size; i++)
 			file_write_4byte(FD_ACTIVE, ba + i, SECTOR_DELETE);
 	}
+	// file_read_4byte/file_write_4byte might trigger fbuf_write and
+	// clean check cannot be done in fbuf_write
+	// so need to do a clean check here
+	clean_check();
+
 	return (0);
 }
 
@@ -564,6 +569,10 @@ _logstor_read(unsigned ba, char *data, int size)
 	else {
 		my_read(start_sa, data, count);
 	}
+	// file_read_4byte/file_write_4byte might trigger fbuf_write and
+	// clean check cannot be done in fbuf_write
+	// so need to do a clean check here
+	clean_check();
 
 	return 0;
 }
@@ -584,6 +593,10 @@ _logstor_read_one(unsigned ba, char *data)
 	else {
 		my_read(start_sa, data, 1);
 	}
+	// file_read_4byte/file_write_4byte might trigger fbuf_write and
+	// clean check cannot be done in fbuf_write
+	// so need to do a clean check here
+	clean_check();
 
 	return 0;
 }
@@ -632,6 +645,7 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 			seg_alloc(seg_sum);
 			clean_check();
 		}
+		// record the forward mapping
 		// the forward mapping must be recorded after
 		// the segment summary block write
 		for (i = 0; i < count; i++)
@@ -672,6 +686,7 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum, uint32_t *
 		clean_check();
 	}
 	if (!IS_META_ADDR(ba)) {
+		// record the forward mapping
 		// the forward mapping must be recorded after
 		// the segment summary block write
 		file_write_4byte(FD_ACTIVE, ba, sa);
@@ -1425,35 +1440,33 @@ ma_index_set(union meta_addr *ma, unsigned depth, unsigned index)
 static union meta_addr
 ma2pma(union meta_addr ma, unsigned *pindex_out)
 {
-	union meta_addr pma;	// parent's metadata address
-	
-	pma = ma;
+
 	switch (ma.depth)
 	{
 	case 1:
 		*pindex_out = ma_index_get(ma, 0);
 		//ma_index_set(&ma, 0, 0);
 		//ma_index_set(&ma, 1, 0);
-		pma.index = 0; // optimization of the above 2 statements
-		pma.depth = 0; // i.e. ma.depth - 1
+		ma.index = 0; // optimization of the above 2 statements
+		ma.depth = 0; // i.e. ma.depth - 1
 		break;
 	case 2:
 		*pindex_out = ma_index_get(ma, 1);
-		ma_index_set(&pma, 1, 0);
-		pma.depth = 1; // i.e. ma.depth - 1
+		ma_index_set(&ma, 1, 0);
+		ma.depth = 1; // i.e. ma.depth - 1
 		break;
 	default:
 		MY_PANIC();
+		break;
 	}
-	return pma;
+	return ma;
 }
 
-#if 1
 static uint32_t
 ma2sa(union meta_addr ma)
 {
 	struct _fbuf *pbuf;
-	unsigned pindex;		//index in the parent indirect block
+	unsigned pindex;	//index in the parent indirect block
 	union meta_addr pma;	// parent's metadata address
 	uint32_t sa;
 
@@ -1469,37 +1482,12 @@ ma2sa(union meta_addr ma)
 		sa = pbuf->data[pindex];
 		break;
 	default:
+		MY_PANIC();
 		sa = 0;
-		MY_PANIC();
+		break;
 	}
 	return sa;
 }
-#else
-static uint32_t
-ma2sa(union meta_addr ma)
-{
-	struct _fbuf *buf, *pbuf;
-	int pindex;		//index in the parent indirect block
-	uint32_t sa;
-
-	switch (ma.depth)
-	{
-	case 0:
-		sa = sc.superblock.ftab[ma.fd];
-		break;
-	case 1:
-	case 2:
-		buf = fbuf_get(ma);
-		pbuf = buf->parent;
-		pindex = ma_index_get(ma, ma.depth - 1);
-		sa = pbuf->data[pindex];
-		break;
-	default:
-		MY_PANIC();
-	}
-	return sa;
-}
-#endif
 
 static void
 fbuf_hash_insert(struct _fbuf *buf, unsigned key)
@@ -1800,7 +1788,7 @@ fbuf_write(struct _fbuf *buf, struct _seg_sum *dst_seg)
 	if (dst_seg->ss_alloc_p == SEG_SUM_OFFSET) { // current segment is full
 		seg_sum_write(dst_seg);
 		seg_alloc(dst_seg);
-		//clean_check();	// cannot do cleaning during fbuf_write
+		// Cannot do clean_check() here. It will cause recursive call.
 	}
 }
 

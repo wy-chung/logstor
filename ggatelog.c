@@ -325,15 +325,13 @@ main(int argc, char *argv[])
 	log_path = NULL;
 	if (argc == 1)
 		log_path = argv[0];
-	else
-		log_usage();
 
 	switch (log_action) {
 	case LOG_CREATE:
+		if (log_path == NULL)
+			log_usage();
 		g_gate_load_module();
 		g_gate_open_device();
-		//if (log_path == NULL)
-		//	log_usage();
 		g_gatelog_create();
 		break;
 	case LOG_RESCUE:
@@ -341,9 +339,9 @@ main(int argc, char *argv[])
 			fprintf(stderr, "Required unit number.\n");
 			log_usage();
 		}
+		if (log_path == NULL)
+			log_usage();
 		g_gate_open_device();
-		//if (log_path == NULL)
-		//	log_usage();
 		g_gatelog_rescue();
 		break;
 	case LOG_DESTROY:

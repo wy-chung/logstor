@@ -24,6 +24,7 @@ e-mail: wuyang.chung1@gmail.com
 #else
 	#define	RAND_SEED	0
 #endif
+#define TIME_SCALE 100000000
 #define MUTIPLIER_TO_MAXBLOCK 4
 double ratio_to_maxblock = 0.4; // the ratio to max_block;
 
@@ -94,7 +95,8 @@ test_write(int n, unsigned max_block)
 		logstor_write_test(ba, buf);
 		ba2sa[ba] = sa_rw;
 	}
-	printf("elapse time %llu ticks\n", rdtsc() - start_time);
+	printf("elapse time %u\n",
+	    (unsigned)(rdtsc() - start_time)/TIME_SCALE);
 	printf("overwrite %d/%d\n", overwrite_count, loop_count);
 	printf("\n");
 
@@ -178,7 +180,8 @@ test_read(int n, unsigned max_block)
 			}
 		}
 	}
-	printf("elapse time %llu ticks\n", rdtsc()-start_time);
+	printf("elapse time %u\n",
+	    (unsigned)(rdtsc() - start_time)/TIME_SCALE);
 	printf("read_count %d i_max %u\n\n", read_count, i_max);
 }
 

@@ -8,7 +8,8 @@
 		"files.associations": {
 			"cstdio": "c",
 			"queue.h": "c",
-			"stat.h": "c"
+			"stat.h": "c",
+			"*.tcc": "c"
 		},
 	}
 }
