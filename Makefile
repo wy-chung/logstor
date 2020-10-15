@@ -9,7 +9,7 @@ SRCS=	ggatelog.c ggate.c logstor.c
 CFLAGS+= -DLIBGEOM
 CFLAGS+= -I${.CURDIR:H}
 CFLAGS+= -DEXIT_ON_PANIC
-#CFLAGS+= -O0
+CFLAGS+= -O0
 
 LIBADD=	geom util
 

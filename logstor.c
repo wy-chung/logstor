@@ -44,6 +44,7 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
   #if defined(FBUF_DEBUG)
 	fbuf_mod_dump();
   #endif
+	my_break();
   	if (bl_panic)
   #if defined(EXIT_ON_PANIC)
 		exit(1);
@@ -55,6 +56,7 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 
 #define MAX_FBUF_COUNT  4096
 //#define MAX_FBUF_COUNT  500 //wyctest
+#define RECLAIM_AGE_LIMIT	3
 
 #define	SIG_LOGSTOR	0x4C4F4753	// "LOGS": Log-Structured Storage
 #define	VER_MAJOR	0
@@ -66,14 +68,12 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 #define	SECTORS_PER_SEG	(SEG_SIZE/SECTOR_SIZE) // 1024
 #define SA2SEGA_SHIFT	10
 #define BLOCKS_PER_SEG	(SEG_SIZE/SECTOR_SIZE - 1)
-#define CLEAN_WINDOW	6
-#define CLEAN_AGE_LIMIT	4
 
 #define	META_BASE	0xFF000000u	// metadata block start address
 #define	META_INVALID	0		// invalid metadata address
 
 #define	SECTOR_NULL	0	// this sector address can not map to any block address
-#define SECTOR_DELETE	2	// delete marker for a block
+#define SECTOR_DELETE	1	// delete marker for a block
 
 #define	IS_META_ADDR(x)	(((x) & META_BASE) == META_BASE)
 #define META_LEAF_DEPTH 2
@@ -206,7 +206,6 @@ struct g_logstor_softc {
 	struct _seg_sum seg_sum_hot;// segment summary for the hot segment
 	
 	TAILQ_HEAD(, _seg_sum) cc_head; // clean candidate
-	struct _seg_sum clean_candidate[CLEAN_WINDOW];
 	unsigned char cleaner_disabled;
 	uint32_t clean_low_water;
 	uint32_t clean_high_water;
@@ -405,8 +404,8 @@ logstor_open(const char *disk_file)
 	seg_alloc(&sc.seg_sum_hot);
 
 	sc.data_write_count = sc.other_write_count = 0;
-	sc.clean_low_water = CLEAN_WINDOW * 4;
-	sc.clean_high_water = sc.clean_low_water + CLEAN_WINDOW * 2;
+	sc.clean_low_water = 8;
+	sc.clean_high_water = sc.clean_low_water + 4;
 
 	fbuf_mod_init();
 	//clean_check();
@@ -506,8 +505,7 @@ int logstor_delete(off_t offset, void *data, off_t length)
 		for (i = 0; i<size; i++)
 			file_write_4byte(FD_ACTIVE, ba + i, SECTOR_DELETE);
 	}
-	// file_read_4byte/file_write_4byte might trigger fbuf_write and
-	// clean check cannot be done in fbuf_write
+	// file_read_4byte/file_write_4byte might trigger fbuf_write
 	// so need to do a clean check here
 	clean_check();
 
@@ -569,8 +567,7 @@ _logstor_read(unsigned ba, char *data, int size)
 	else {
 		my_read(start_sa, data, count);
 	}
-	// file_read_4byte/file_write_4byte might trigger fbuf_write and
-	// clean check cannot be done in fbuf_write
+	// file_read_4byte/file_write_4byte might trigger fbuf_write
 	// so need to do a clean check here
 	clean_check();
 
@@ -593,8 +590,7 @@ _logstor_read_one(unsigned ba, char *data)
 	else {
 		my_read(start_sa, data, 1);
 	}
-	// file_read_4byte/file_write_4byte might trigger fbuf_write and
-	// clean check cannot be done in fbuf_write
+	// file_read_4byte/file_write_4byte might trigger fbuf_write
 	// so need to do a clean check here
 	clean_check();
 
@@ -657,6 +653,10 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 	return 0;
 }
 
+/*
+Note:
+  sa_out is not NULL only when called from clean_metadata
+*/
 static int
 _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum, uint32_t *sa_out)
 {
@@ -685,15 +685,17 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum, uint32_t *
 		seg_alloc(seg_sum);
 		clean_check();
 	}
-	if (!IS_META_ADDR(ba)) {
+	if (IS_META_ADDR(ba)) {
+		// the forwarding mapping is returned to the caller
+		MY_ASSERT(sa_out != NULL);
+		*sa_out = sa;
+	} else {
 		// record the forward mapping
 		// the forward mapping must be recorded after
 		// the segment summary block write
+		MY_ASSERT(sa_out == NULL);
 		file_write_4byte(FD_ACTIVE, ba, sa);
 	}
-	if (sa_out != NULL)
-		*sa_out = sa;
-
 	return 0;
 }
 
@@ -728,11 +730,12 @@ logstor_get_fbuf_miss(void)
 }
 
 static void
-seg_sum_read(struct _seg_sum *seg_sum)
+seg_sum_read(struct _seg_sum *seg_sum, uint32_t sega)
 {
 	uint32_t sa;
 
-	sa = sega2sa(seg_sum->sega) + SEG_SUM_OFFSET;
+	seg_sum->sega = sega;
+	sa = sega2sa(sega) + SEG_SUM_OFFSET;
 	my_read(sa, seg_sum, 1);
 }
 
@@ -1011,18 +1014,9 @@ again:
 	if (sega == sega_cold)
 		goto again;
 #endif
-	// For wearleveling, if it is old enough clean it.
-	if (sc.seg_age[sega] > CLEAN_AGE_LIMIT) {
-		seg_clean(seg_sum);
-		if (sc.superblock.seg_free_cnt > sc.clean_high_water) {
-			seg_sum->sega = 0;	// has cleaned enough segments
-			return;
-		}
-		goto again;
-	}
-	seg_sum->sega = sega;
-	seg_sum_read(seg_sum);
+	seg_sum_read(seg_sum, sega);
 	seg_live_count(seg_sum);
+	return;
 }
 
 /********************
@@ -1136,6 +1130,23 @@ seg_clean(struct _seg_sum *seg_sum)
 	//gc_trim(seg_sa);
 }
 
+#if 1
+static void
+cleaner(void)
+{
+	struct _seg_sum seg;
+
+	do {
+		seg_reclaim_init(&seg);
+		if (seg.live_count < (SECTORS_PER_SEG - 1) * 0.98 ||
+		    // For wearleveling, if it is old enough clean it.
+		    sc.seg_age[seg.sega] > RECLAIM_AGE_LIMIT)
+			seg_clean(&seg);
+		else
+			sc.seg_age[seg.sega]++;
+	} while (sc.superblock.seg_free_cnt < sc.clean_high_water);
+}
+#else
 static void
 cleaner(void)
 {
@@ -1204,6 +1215,7 @@ exit:
 	}
 //printf("%s <<<\n", __func__);
 }
+#endif
 
 static inline void
 cleaner_enable(void)
@@ -1788,7 +1800,7 @@ fbuf_write(struct _fbuf *buf, struct _seg_sum *dst_seg)
 	if (dst_seg->ss_alloc_p == SEG_SUM_OFFSET) { // current segment is full
 		seg_sum_write(dst_seg);
 		seg_alloc(dst_seg);
-		// Cannot do clean_check() here. It will cause recursive call.
+		clean_check();
 	}
 }
 
