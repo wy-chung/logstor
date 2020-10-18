@@ -19,13 +19,13 @@ e-mail: wuyang.chung1@gmail.com
 /**************************************
  *           Test function            *
  **************************************/
-#if 0
+#if 1
 	#define	RAND_SEED	time(NULL)
 #else
 	#define	RAND_SEED	0
 #endif
 #define TIME_SCALE 100000000
-#define MUTIPLIER_TO_MAXBLOCK 5
+#define MUTIPLIER_TO_MAXBLOCK 10
 double ratio_to_maxblock = 1.4; // the ratio to max_block;
 
 typedef void (arrays_alloc_f)(unsigned max_block);

@@ -1141,9 +1141,10 @@ cleaner(void)
 
 	do {
 		seg_reclaim_init(&seg);
-		if (seg.live_count < (SECTORS_PER_SEG - 1) * 0.96 ||
-		    // For wearleveling, if it is old enough clean it.
-		    sc.seg_age[seg.sega] > CLEAN_AGE_LIMIT)
+		if (seg.live_count < (SECTORS_PER_SEG - 1) * 0.95)
+			seg_clean(&seg);
+		else if (sc.seg_age[seg.sega] > CLEAN_AGE_LIMIT)
+			// For wearleveling, if it is old enough clean it.
 			seg_clean(&seg);
 		else
 			sc.seg_age[seg.sega]++;
