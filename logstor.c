@@ -56,7 +56,8 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 
 #define MAX_FBUF_COUNT  4096
 //#define MAX_FBUF_COUNT  500 //wyctest
-#define RECLAIM_AGE_LIMIT	3
+#define CLEAN_AGE_LIMIT	3
+//#define CLEAN_WINDOW	4
 
 #define	SIG_LOGSTOR	0x4C4F4753	// "LOGS": Log-Structured Storage
 #define	VER_MAJOR	0
@@ -138,7 +139,7 @@ struct _seg_sum {
 	// below are not stored on disk
 	uint32_t sega; // the segment address of the segment summary
 	unsigned live_count;		
-	TAILQ_ENTRY(_seg_sum) queue;
+	//LIST_ENTRY(_seg_sum) queue;
 };
 
 _Static_assert(offsetof(struct _seg_sum, sega) == SECTOR_SIZE,
@@ -205,7 +206,8 @@ struct g_logstor_softc {
 	struct _seg_sum seg_sum_cold;// segment summary for the cold segment
 	struct _seg_sum seg_sum_hot;// segment summary for the hot segment
 	
-	TAILQ_HEAD(, _seg_sum) cc_head; // clean candidate
+	//struct _seg_sum clean_candidate[CLEAN_WINDOW];
+	//LIST_HEAD(, _seg_sum) cc_head; // clean candidate
 	unsigned char cleaner_disabled;
 	uint32_t clean_low_water;
 	uint32_t clean_high_water;
@@ -288,7 +290,7 @@ static void fbuf_mod_flush(void);
 static struct _fbuf *fbuf_get(union meta_addr ma);
 static struct _fbuf *fbuf_read_and_hash(uint32_t sa, union meta_addr ma);
 static struct _fbuf *fbuf_search(union meta_addr ma);
-static bool fbuf_flush(struct _fbuf *buf, struct _seg_sum *seg_sum);
+static bool fbuf_flush(struct _fbuf *buf);
 static void fbuf_hash_insert(struct _fbuf *buf, unsigned key);
 
 static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
@@ -1037,7 +1039,8 @@ clean_metadata(uint32_t cur_sa, union meta_addr cur_ma)
 		buf = fbuf_search(cur_ma);
 		if (buf == NULL) {
 			my_read(cur_sa, sec_buf, 1);
-			_logstor_write_one(cur_ma.uint32, (char *)sec_buf, &sc.seg_sum_cold, &new_sa);
+			_logstor_write_one(cur_ma.uint32, (char *)sec_buf,
+			    &sc.seg_sum_cold, &new_sa);
 			if (cur_ma.depth != 0) {
 				pma = ma2pma(cur_ma, &pindex);
 				pbuf = fbuf_get(pma);
@@ -1138,9 +1141,9 @@ cleaner(void)
 
 	do {
 		seg_reclaim_init(&seg);
-		if (seg.live_count < (SECTORS_PER_SEG - 1) * 0.98 ||
+		if (seg.live_count < (SECTORS_PER_SEG - 1) * 0.96 ||
 		    // For wearleveling, if it is old enough clean it.
-		    sc.seg_age[seg.sega] > RECLAIM_AGE_LIMIT)
+		    sc.seg_age[seg.sega] > CLEAN_AGE_LIMIT)
 			seg_clean(&seg);
 		else
 			sc.seg_age[seg.sega]++;
@@ -1150,69 +1153,46 @@ cleaner(void)
 static void
 cleaner(void)
 {
-	struct _seg_sum *seg, *seg_to_clean, *seg_prev_head;
-	unsigned live_count, live_count_min;
+	struct _seg_sum *seg, *seg_to_clean;
+	unsigned live_count_min;
 	int	i;
 
 //printf("\n%s >>>\n", __func__);
-	TAILQ_INIT(&sc.cc_head);
-	for (i = 0; i < CLEAN_WINDOW; i++) {
-		seg = &sc.clean_candidate[i];
-		seg_reclaim_init(seg);
-		if (seg->sega == 0) // reached the clean_high_water
-			goto exit;
-		TAILQ_INSERT_TAIL(&sc.cc_head, seg, queue);
-	}
-
-	seg_prev_head = NULL;
-	for (;;) {
-		// find the segment with min live sectors
-		live_count_min = -1; // the maximum unsigned integer
-		TAILQ_FOREACH(seg, &sc.cc_head, queue) {
-			live_count = seg->live_count;
-			if (live_count < live_count_min) {
-				live_count_min = live_count;
-				seg_to_clean = seg;
-			}
-		}
-		// seg == NULL at this point
-//clean:
-		TAILQ_REMOVE(&sc.cc_head, seg_to_clean, queue);
-		// clean the segment with min live data blocks
-		// or the first segment in @cc_head
-		seg_clean(seg_to_clean);
-		if (sc.superblock.seg_free_cnt > sc.clean_high_water)
-			// reached the clean_high_water
-			goto exit;
-//reclaim_init:
-		// init @seg_to_clean with the next segment to reclaim
-		seg_reclaim_init(seg_to_clean);
-		if (seg_to_clean->sega == 0)  // reached the clean_high_water
-			goto exit;
-		TAILQ_INSERT_TAIL(&sc.cc_head, seg_to_clean, queue);
-
-//		if (seg != NULL) // the head of queue has been processed
-//			continue;
-
-		// keep the CLEAN_WINDOW moving by aging the head of
-		// @cc_head if it has not been selected for cleaning for certain times
-		seg = TAILQ_FIRST(&sc.cc_head);
-		if (seg == seg_prev_head) {
-			seg_prev_head = TAILQ_NEXT(seg, queue);
-			sc.seg_age[seg->sega]++;
-			TAILQ_REMOVE(&sc.cc_head, seg, queue);
-			// init @seg_to_clean with the next segment to reclaim
+	do {
+		LIST_INIT(&sc.cc_head);
+		for (i = 0; i < CLEAN_WINDOW; i++) {
+			seg = &sc.clean_candidate[i];
 			seg_reclaim_init(seg);
-			if (seg->sega == 0)  // reached the clean_high_water
-				goto exit;
-			TAILQ_INSERT_TAIL(&sc.cc_head, seg, queue);
-		} else
-			seg_prev_head = seg;
-	}
-exit:
-	TAILQ_FOREACH(seg, &sc.cc_head, queue) {
-		sc.seg_age[seg->sega]++;
-	}
+			LIST_INSERT_HEAD(&sc.cc_head, seg, queue);
+		}
+		for (i = 0; i < CLEAN_WINDOW; i++) {
+			// find the segment with min live sectors and clean it
+			live_count_min = -1; // the maximum unsigned integer
+			LIST_FOREACH(seg, &sc.cc_head, queue) {
+				if (sc.seg_age[seg->sega] > CLEAN_AGE_LIMIT) {
+					// force to clean this segment
+					seg_to_clean = seg;
+					break;
+				}
+				if (seg->live_count < live_count_min) {
+					live_count_min = seg->live_count;
+					seg_to_clean = seg;
+				}
+			}
+			seg_clean(seg_to_clean);
+
+			// get the next segment and place it at the end of the queue
+			seg_reclaim_init(seg_to_clean);
+			LIST_REMOVE(seg_to_clean, queue);
+			LIST_INSERT_HEAD(&sc.cc_head, seg_to_clean, queue);
+		}
+		LIST_FOREACH(seg, &sc.cc_head, queue) {
+			if (seg->live_count < (SECTORS_PER_SEG - 1) * 0.96)
+				seg_clean(seg);
+			else
+				sc.seg_age[seg->sega]++;
+		}
+	} while (sc.superblock.seg_free_cnt < sc.clean_high_water);
 //printf("%s <<<\n", __func__);
 }
 #endif
@@ -1394,7 +1374,7 @@ fbuf_mod_flush(void)
 	buf = sc.fbuf_cir_head;
 	do {
 		MY_ASSERT(buf->on_cir_queue);
-		if (fbuf_flush(buf, &sc.seg_sum_hot))
+		if (fbuf_flush(buf))
 			count++;
 		buf = buf->cir_queue.next;
 	} while (buf != sc.fbuf_cir_head);
@@ -1403,7 +1383,7 @@ fbuf_mod_flush(void)
 	for (i = META_LEAF_DEPTH - 1; i >= 0; i--)
 		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], indir_queue) {
 			MY_ASSERT(buf->on_cir_queue == false);
-			if (fbuf_flush(buf, &sc.seg_sum_hot))
+			if (fbuf_flush(buf))
 				count++;
 		}
 //printf("%s: modified count after %d\n", __func__, sc.fbuf_modified_count);
@@ -1703,7 +1683,7 @@ fbuf_alloc(void)
 	sc.fbuf_cir_head = buf->cir_queue.next;
 
 	LIST_REMOVE(buf, buffer_bucket_queue);
-	fbuf_flush(buf, &sc.seg_sum_hot);
+	fbuf_flush(buf);
 
 	// set buf's parent to NULL
 	pbuf = buf->parent;
@@ -1756,15 +1736,16 @@ fbuf_read_and_hash(uint32_t sa, union meta_addr ma)
 }
 
 static void
-fbuf_write(struct _fbuf *buf, struct _seg_sum *dst_seg)
+fbuf_write(struct _fbuf *buf)
 {
 	struct _fbuf *pbuf;	// buffer parent
 	unsigned pindex;	// the index in parent indirect block
 	uint32_t sa;		// sector address
+	struct _seg_sum *seg_hot = &sc.seg_sum_hot;
 
 	// get the sector address where the block will be written
-	MY_ASSERT(dst_seg->ss_alloc_p < SEG_SUM_OFFSET);
-	sa = sega2sa(dst_seg->sega) + dst_seg->ss_alloc_p;
+	MY_ASSERT(seg_hot->ss_alloc_p < SEG_SUM_OFFSET);
+	sa = sega2sa(seg_hot->sega) + seg_hot->ss_alloc_p;
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG - 1);
 
 	my_write(sa, buf->data, 1);
@@ -1795,12 +1776,14 @@ fbuf_write(struct _fbuf *buf, struct _seg_sum *dst_seg)
 	}
 
 	// store the reverse mapping in segment summary
-	dst_seg->ss_rm[dst_seg->ss_alloc_p++] = buf->ma.uint32;
+	seg_hot->ss_rm[seg_hot->ss_alloc_p++] = buf->ma.uint32;
 
-	if (dst_seg->ss_alloc_p == SEG_SUM_OFFSET) { // current segment is full
-		seg_sum_write(dst_seg);
-		seg_alloc(dst_seg);
-		clean_check();
+	if (seg_hot->ss_alloc_p == SEG_SUM_OFFSET) { // current segment is full
+		seg_sum_write(seg_hot);
+		seg_alloc(seg_hot);
+		// Cannot call clean_check() here
+		// It will cause a bug. Reason unknown.
+		//clean_check();
 	}
 }
 
@@ -1809,14 +1792,14 @@ Description:
     Write the dirty data in file buffer to disk
 */
 static bool
-fbuf_flush(struct _fbuf *buf, struct _seg_sum *dst_seg)
+fbuf_flush(struct _fbuf *buf)
 {
 
 	if (!buf->modified)
 		return false;
 
 	MY_ASSERT(IS_META_ADDR(buf->ma.uint32));
-	fbuf_write(buf, dst_seg);
+	fbuf_write(buf);
 	return true;
 }
 

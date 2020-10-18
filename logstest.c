@@ -25,8 +25,8 @@ e-mail: wuyang.chung1@gmail.com
 	#define	RAND_SEED	0
 #endif
 #define TIME_SCALE 100000000
-#define MUTIPLIER_TO_MAXBLOCK 4
-double ratio_to_maxblock = 0.4; // the ratio to max_block;
+#define MUTIPLIER_TO_MAXBLOCK 5
+double ratio_to_maxblock = 1.4; // the ratio to max_block;
 
 typedef void (arrays_alloc_f)(unsigned max_block);
 
