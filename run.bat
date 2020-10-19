@@ -23,5 +23,5 @@ fsck /dev/ggate0
 
 # destroy the ggate device
 umount /mnt
-./ggatel destroy -u 0
+./ggatelog destroy -u 0
 
