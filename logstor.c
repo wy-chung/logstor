@@ -103,8 +103,8 @@ struct _superblock {
 	 */
 	int32_t	seg_cnt;	// total number of segments
 	int32_t seg_free_cnt;	// number of free segments
-	int32_t	seg_alloc_p;	// allocate this segment
-	int32_t	seg_reclaim_p;	// clean this segment
+	int32_t	sega_alloc;	// allocate this segment
+	int32_t	sega_reclaim;	// clean this segment
 	/*
 	   The files for forward mapping file
 
@@ -507,10 +507,6 @@ int logstor_delete(off_t offset, void *data, off_t length)
 		for (i = 0; i<size; i++)
 			file_write_4byte(FD_ACTIVE, ba + i, SECTOR_DELETE);
 	}
-	// file_read_4byte/file_write_4byte might trigger fbuf_write
-	// so need to do a clean check here
-	clean_check();
-
 	return (0);
 }
 
@@ -569,10 +565,6 @@ _logstor_read(unsigned ba, char *data, int size)
 	else {
 		my_read(start_sa, data, count);
 	}
-	// file_read_4byte/file_write_4byte might trigger fbuf_write
-	// so need to do a clean check here
-	clean_check();
-
 	return 0;
 }
 
@@ -592,10 +584,6 @@ _logstor_read_one(unsigned ba, char *data)
 	else {
 		my_read(start_sa, data, 1);
 	}
-	// file_read_4byte/file_write_4byte might trigger fbuf_write
-	// so need to do a clean check here
-	clean_check();
-
 	return 0;
 }
 
@@ -780,8 +768,8 @@ superblock_init_read(void)
 	MY_ASSERT(pread(sc.disk_fd, sb_in, SECTOR_SIZE, 0) == SECTOR_SIZE);
 #endif
 	if (sb_in->sig != SIG_LOGSTOR ||
-	    sb_in->seg_alloc_p >= sb_in->seg_cnt ||
-	    sb_in->seg_reclaim_p >= sb_in->seg_cnt)
+	    sb_in->sega_alloc >= sb_in->seg_cnt ||
+	    sb_in->sega_reclaim >= sb_in->seg_cnt)
 		return EINVAL;
 
 	sb_gen = sb_in->sb_gen;
@@ -800,8 +788,8 @@ superblock_init_read(void)
 	}
 	sc.sb_sa = (i - 1);
 	sb_in = (struct _superblock *)buf[(i-1)%2];
-	if (sb_in->seg_alloc_p >= sb_in->seg_cnt ||
-	    sb_in->seg_reclaim_p >= sb_in->seg_cnt)
+	if (sb_in->sega_alloc >= sb_in->seg_cnt ||
+	    sb_in->sega_reclaim >= sb_in->seg_cnt)
 		return EINVAL;
 
 #if defined(RAM_DISK)
@@ -873,8 +861,8 @@ superblock_init_write(int fd)
 	for (i = 0; i < FD_COUNT; i++) {
 		sb_out->ftab[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
 	}
-	sb_out->seg_alloc_p = SEG_DATA_START;	// start allocate from here
-	sb_out->seg_reclaim_p = SEG_DATA_START + 1;	// start reclaim from here
+	sb_out->sega_alloc = SEG_DATA_START;	// start allocate from here
+	sb_out->sega_reclaim = SEG_DATA_START + 1;	// start reclaim from here
 	bzero(sb_out->sb_seg_age, SECTOR_SIZE - sizeof(struct _superblock));
 
 	// write out super block
@@ -968,11 +956,11 @@ seg_alloc(struct _seg_sum *seg_sum)
 	uint32_t sega_hot = sc.seg_sum_hot.sega;
 #endif
 again:
-	sega = sc.superblock.seg_alloc_p;
-	if (++sc.superblock.seg_alloc_p == sc.superblock.seg_cnt)
-		sc.superblock.seg_alloc_p = SEG_DATA_START;
-	MY_ASSERT(sc.superblock.seg_alloc_p < sc.superblock.seg_cnt);
-	MY_ASSERT(sc.superblock.seg_alloc_p + 1 != sc.superblock.seg_reclaim_p); //failed
+	sega = sc.superblock.sega_alloc;
+	if (++sc.superblock.sega_alloc == sc.superblock.seg_cnt)
+		sc.superblock.sega_alloc = SEG_DATA_START;
+	MY_ASSERT(sc.superblock.sega_alloc < sc.superblock.seg_cnt);
+	MY_ASSERT(sc.superblock.sega_alloc + 1 != sc.superblock.sega_reclaim);
 	MY_ASSERT(sega != sega_hot);
 
 	if (sc.seg_age[sega] != 0)	// this segment is not free
@@ -1005,10 +993,10 @@ seg_reclaim_init(struct _seg_sum *seg_sum)
 	uint32_t sega_hot = sc.seg_sum_hot.sega;
 #endif
 again:
-	sega = sc.superblock.seg_reclaim_p;
-	if (++sc.superblock.seg_reclaim_p == sc.superblock.seg_cnt)
-		sc.superblock.seg_reclaim_p = SEG_DATA_START;
-	MY_ASSERT(sc.superblock.seg_reclaim_p < sc.superblock.seg_cnt);
+	sega = sc.superblock.sega_reclaim;
+	if (++sc.superblock.sega_reclaim == sc.superblock.seg_cnt)
+		sc.superblock.sega_reclaim = SEG_DATA_START;
+	MY_ASSERT(sc.superblock.sega_reclaim < sc.superblock.seg_cnt);
 	MY_ASSERT(sega != sega_hot);
 #if 0
 	MY_ASSERT(sega != sega_cold);
@@ -1782,9 +1770,11 @@ fbuf_write(struct _fbuf *buf)
 	if (seg_hot->ss_alloc_p == SEG_SUM_OFFSET) { // current segment is full
 		seg_sum_write(seg_hot);
 		seg_alloc(seg_hot);
-		// Cannot call clean_check() here
-		// It will cause a bug. Reason unknown.
-		//clean_check();
+		// NOTE: It will cause a bug if cleaner_disable and cleaner_enable
+		// are removed here. Reason unknown.
+		cleaner_disable();
+		clean_check();
+		cleaner_enable();
 	}
 }
 
