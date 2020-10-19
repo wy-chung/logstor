@@ -9,3 +9,6 @@ Currently it is implemented as a user-level GEOM, i.e. ggate. To build the progr
 
 ## Run the program
 First you have to run 'ggatelog init device_name' to initialize the underlying device and then run 'ggatelog create device_name' to create the gate device (i.e. /dev/ggate0). After that the log-structured device can be mounted.
+
+## Memo
+'run.bat' is a sample batch file. It shows how to create a ggate device, create a file system on the ggate device, copy the src files to the file system and build the kernel on the file system.
