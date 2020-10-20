@@ -172,7 +172,7 @@ once_again:
 			// in "case BIO_GETATTR" of g_gate_start() of g_gate.c
 			//	if (g_handleattr_int(pbp, "GEOM::candelete", 1))
 			//		return;
-			// and the command below must be executed before mount the device
+			// and the command below must be executed before mounting the device
 			//	tunefs -t enabled /dev/ggate0
 			error = logstor_delete(ggio.gctl_offset, ggio.gctl_data, ggio.gctl_length);
 			break;

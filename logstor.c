@@ -489,6 +489,12 @@ logstor_write(off_t offset, void *data, off_t length)
 	return error;
 }
 
+// To enable TRIM, the following statement must be added
+// in "case BIO_GETATTR" of g_gate_start() of g_gate.c
+//	if (g_handleattr_int(pbp, "GEOM::candelete", 1))
+//		return;
+// and the command below must be executed before mounting the device
+//	tunefs -t enabled /dev/ggate0
 int logstor_delete(off_t offset, void *data, off_t length)
 {
 	uint32_t ba;	// block address
