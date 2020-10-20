@@ -1777,7 +1777,7 @@ fbuf_write(struct _fbuf *buf)
 		seg_sum_write(seg_hot);
 		seg_alloc(seg_hot);
 		// NOTE: It will cause a bug if cleaner_disable and cleaner_enable
-		// are removed here. Reason unknown.
+		// are removed here. It is used to prevent recursive call.
 		cleaner_disable();
 		clean_check();
 		cleaner_enable();
