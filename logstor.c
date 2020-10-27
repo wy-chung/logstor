@@ -513,6 +513,11 @@ int logstor_delete(off_t offset, void *data, off_t length)
 		for (i = 0; i<size; i++)
 			file_write_4byte(FD_ACTIVE, ba + i, SECTOR_DELETE);
 	}
+	// file_read_4byte/file_write_4byte might trigger fbuf_write and
+	// clean check cannot be done in fbuf_write
+	// so need to do a clean check here
+	clean_check();
+
 	return (0);
 }
 
@@ -571,6 +576,11 @@ _logstor_read(unsigned ba, char *data, int size)
 	else {
 		my_read(start_sa, data, count);
 	}
+	// file_read_4byte/file_write_4byte might trigger fbuf_write and
+	// clean check cannot be done in fbuf_write
+	// so need to do a clean check here
+	clean_check();
+
 	return 0;
 }
 
@@ -590,6 +600,11 @@ _logstor_read_one(unsigned ba, char *data)
 	else {
 		my_read(start_sa, data, 1);
 	}
+	// file_read_4byte/file_write_4byte might trigger fbuf_write and
+	// clean check cannot be done in fbuf_write
+	// so need to do a clean check here
+	clean_check();
+
 	return 0;
 }
 
@@ -1776,11 +1791,7 @@ fbuf_write(struct _fbuf *buf)
 	if (seg_hot->ss_alloc_p == SEG_SUM_OFFSET) { // current segment is full
 		seg_sum_write(seg_hot);
 		seg_alloc(seg_hot);
-		// NOTE: It will cause a bug if cleaner_disable and cleaner_enable
-		// are removed here. It is used to prevent recursive call.
-		cleaner_disable();
-		clean_check();
-		cleaner_enable();
+		// Cannot do clean_check() here. It will cause recursive call.
 	}
 }
 
