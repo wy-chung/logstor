@@ -1,4 +1,4 @@
-# logstor, Log-Structured GEOM storage Layer
+# logstor, a Log-Structured GEOM storage Layer
 
 ## Introduction
 Logstor is a log-structured user-level FreeBSD GEOM layer that uses the same 
