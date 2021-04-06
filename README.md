@@ -9,17 +9,17 @@ The next section will give a detailed information about the implementation of lo
 ## Implementation
 Figure 1 shows the disk layout of logstor. It has only two areas, superblock area and data area. Superblock area is used to store logstor・s data structure. The data area is divided into segments. Each segment is divided into sectors. The last sector of each segment stores another logstor・s data structure called segment summary block which is used to store reverse map for all the sectors in that segment.
 
-![image](/Figure_1.png)
+![image](/docs/Figure_1.png)
 
 Figure 1. The disk layout of logstor
 
 The forward map information is not stored on a specific area of the disk. It is stored in the data area. I create a simple file system to store the forward map information. This simple file system does not support sub-directory. It can only have at most 4 files in the root directory. It does not support string file name. Eeach file is named by an integer number. It does not use inode instead it uses page table like data structure to track all the data blocks of a file. Figure 2a shows the page table like data structure when it is stored on disk and figure 2b shows the data structure when it is in DRAM. The currently active PDE, PTEs and data blocks are loaded in the simple file system・s buffer cache. All the data blocks of a file in buffer cache are put in a circular queue. All the PDEs and PTEs in buffer cache are put in their indirect queue. When a cache miss happened, the simple file system will choose a victim buffer from the circular queue. The replacement policy used is the second chance policy. The victim buffer is written back to disk if dirty and the new data is loaded to this buffer. Logstor supports TRIM command. When a TRIM command is received, it simply puts delete marks for the mappings of the blocks that are trimmed.
 
-![image](/Figure_2a.png)
+![image](/docs/Figure_2a.png)
 
 Figure 2a. Simple file system in disk
 
-![image](/Figure_2b.png)
+![image](/docs/Figure_2b.png)
 
 Figure 2b. Simple file system in DRAM
 
@@ -39,42 +39,10 @@ The benchmark used for performance test is FreeBSD kernel build. I compare the p
 5. Build kernel
 6. Remove the src and obj directory in /mnt
 repeat step 4
-The table below shows the test result.
-test case
-test
-logstor
-ggatel
 
-4
-cp src
-575.31s
-662.98s
-0.87
-5
-build kernel
-3575.11s
-2445.47s
-1.46
-6
-rm src and obj
-512.33s
-233.84s
-2.19
-4
-cp src
-870.66s
-567.34s
-1.53
-5
-build kernel
-2957.48s
-2474.65s
-1.20
-6
-rm src and obj
-378.19s
-238.38s
-1.59
+The table below shows the test result.
+
+![image](/docs/Table_1.png)
 
 As can be seen the only time that the performance is better is when the src is first copied to /mnt. It is expected because logstor transforms random write to sequential write. All the other test results are worse because garbage collection is triggered. In this test the disk size is 7GB and the size of the FreeBSD is 3GB (including the hidden directory .git).
 ## Future Work and Conclusion
