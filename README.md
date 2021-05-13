@@ -1,5 +1,7 @@
 # logstor: A Log-structured user level FreeBSD GEOM layer
 Wuyang Chung, wy-chung@outlook.com
+
+Oct 20, 2020
 ## Abstract
 Most file systems today are write-in-place file system. This kind of file system will generate random writes to the underlying storage device and random writes are bad for both hard disk and flash disk. On the other hand, log-structured file system is a copy-on-write file system. The new written data are appended to the end of the log so it writes data sequentially. Logstor is a user level FreeBSD GEOM layer that can be inserted between the file system and the storage device. It uses the same principle of log-structured file system, that is the data are always appended to the end of the log, so it can also transform random writes from file system above to sequential writes to the underlying storage device. Logstor can make any file system a log-structured file system when that file system is created on top of it. If the logstor commands snapshot and commit are implemented, it can make the file system run faster by not having to sync file system's metadata frequently.
 ## Introduction
