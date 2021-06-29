@@ -1158,6 +1158,7 @@ cleaner(void)
 		else
 			sc.seg_age[seg.sega]++;
 	} while (sc.superblock.seg_free_cnt < sc.clean_high_water);
+	//NOTE: need to flush the metadata to disk before erase the reclaimed segments
 }
 #else
 static void
