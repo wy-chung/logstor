@@ -13,6 +13,6 @@ CFLAGS+= -O0
 
 LIBADD=	geom util
 
-NO_WERROR= yes
+#NO_WERROR= yes
 
 .include <bsd.prog.mk>
