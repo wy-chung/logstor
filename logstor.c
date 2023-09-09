@@ -120,7 +120,7 @@ struct _superblock {
 	   The first mapping that is not empty is used.
 	*/
 	uint32_t ftab[FD_COUNT]; 	// the file table
-	uint8_t sb_seg_age[0];	// the starting address to store seg_age in superblock
+	uint8_t sb_seg_age[];	// the starting address to store seg_age in superblock
 };
 
 #if !defined(WYC)
