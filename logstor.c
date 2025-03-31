@@ -1,6 +1,6 @@
 /*
 Author: Wuyang Chung
-e-mail: wuyang.chung1@gmail.com
+e-mail: wy-chung@outlook.com
 */
 
 #include <stdio.h>

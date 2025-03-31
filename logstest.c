@@ -1,6 +1,6 @@
 /*
 Author: Wuyang Chung
-e-mail: wuyang.chung1@gmail.com
+e-mail: wy-chung@outlook.com
 */
 
 #include <stdio.h>
@@ -28,9 +28,8 @@ e-mail: wuyang.chung1@gmail.com
 #define MUTIPLIER_TO_MAXBLOCK 10
 double ratio_to_maxblock = 1.4; // the ratio to max_block;
 
-typedef void (arrays_alloc_f)(unsigned max_block);
+typedef void arrays_alloc_f(unsigned max_block);
 
-static arrays_alloc_f arrays_nop;
 static arrays_alloc_f arrays_alloc;
 static void arrays_free(void);
 
@@ -188,7 +187,6 @@ test_read(int n, unsigned max_block)
 int
 main(int argc, char *argv[])
 {
-	int	i;
 	int	main_loop_count;
 	unsigned max_block;
 
@@ -196,7 +194,7 @@ main(int argc, char *argv[])
 	logstor_init();
 
 	main_loop_count = MUTIPLIER_TO_MAXBLOCK/ratio_to_maxblock + 0.999;
-	for (i = 0; i < main_loop_count; i++) {
+	for (int i = 0; i < main_loop_count; i++) {
 		gdb_cond0 = i;
 		printf("### test %d\n", i);
 		logstor_open(DISK_FILE);

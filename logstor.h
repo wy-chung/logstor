@@ -1,7 +1,8 @@
 /*
 Author: Wuyang Chung
-e-mail: wuyang.chung1@gmail.com
+e-mail: wy-chung@outlook.com
 */
+
 #if __linux
 typedef unsigned char	uint8_t;
 typedef unsigned short	uint16_t;
