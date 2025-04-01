@@ -16,15 +16,11 @@ typedef long	int64_t;
 #endif
 
 #define	MY_DEBUG
+#define RAM_DISK_SIZE		0x80000000 // 2G
 //#define FBUF_DEBUG
 
-#if __linux
 #define DISK_FILE	"logstor.disk"
-#elif __BSD_VISIBLE
-#define DISK_FILE	"/dev/ada1"
-#else
-#error "DISK_FILE"
-#endif
+//#define DISK_FILE	"/dev/ada1"
 
 #if defined(MY_DEBUG)
 void my_debug(const char * fname, int line_num, bool bl_panic);

@@ -193,7 +193,8 @@ main_logstest(int argc, char *argv[])
 	srandom(RAND_SEED);
 	logstor_init();
 
-	main_loop_count = MUTIPLIER_TO_MAXBLOCK/ratio_to_maxblock + 0.999;
+	//main_loop_count = MUTIPLIER_TO_MAXBLOCK/ratio_to_maxblock + 0.999;
+	main_loop_count = 3;
 	for (int i = 0; i < main_loop_count; i++) {
 		gdb_cond0 = i;
 		printf("### test %d\n", i);
