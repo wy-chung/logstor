@@ -374,13 +374,17 @@ void logstor_superblock_init(const char *disk_file)
 
 void logstor_init(void)
 {
+	int disk_fd;
+
 #if defined(RAM_DISK_SIZE)
 	ram_disk = malloc(RAM_DISK_SIZE);
 	MY_ASSERT(ram_disk != NULL);
-	superblock_init_write(-1);
+	disk_fd = -1;
 #else
-	logstor_superblock_init(DISK_FILE);
+	disk_fd = open(disk_file, O_WRONLY);
+	MY_ASSERT(disk_fd > 0);
 #endif
+	superblock_init_write(disk_fd);
 }
 
 void
