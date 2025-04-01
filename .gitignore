@@ -35,9 +35,8 @@
 
 # *.json
 # *.code-workspace
-t.c
-core
 
+logstor.disk
 ggatelog
 ggatelog.debug
 ggatelog.full
