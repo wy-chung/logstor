@@ -19,8 +19,7 @@ typedef long	int64_t;
 //#define FBUF_DEBUG
 
 #if __linux
-#define DISK_FILE	"/home/wyc/mnt/Downloads/logstor.del"
-//#define DISK_FILE	"/media/wyc/500G/logstor.storage"
+#define DISK_FILE	"logstor.disk"
 #elif __BSD_VISIBLE
 #define DISK_FILE	"/dev/ada1"
 #else

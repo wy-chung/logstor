@@ -237,8 +237,8 @@ g_gatelog_rescue(void)
 	g_gatelog_serve();
 }
 
-int
-main(int argc, char *argv[])
+static int
+main_ggate(int argc, char *argv[])
 {
 
 	if (argc < 2)
@@ -364,4 +364,9 @@ main(int argc, char *argv[])
 	}
 	g_gate_close_device();
 	exit(EXIT_SUCCESS);
+}
+
+int main(int argc, char *argv[])
+{
+	return main_ggate(argc, argv);
 }

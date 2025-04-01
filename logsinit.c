@@ -19,8 +19,8 @@ e-mail: wy-chung@outlook.com
  *           Test function            *
  **************************************/
 
-int
-main(int argc, char *argv[])
+static int
+main_logsinit(int argc, char *argv[])
 {
 	char *disk_file;
 
@@ -34,4 +34,8 @@ main(int argc, char *argv[])
 	return 0;
 }
 
-
+int
+main(int argc, char *argv[])
+{
+	return main_logsinit(argc, argv);
+}

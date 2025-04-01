@@ -184,8 +184,8 @@ test_read(int n, unsigned max_block)
 	printf("read_count %d i_max %u\n\n", read_count, i_max);
 }
 
-int
-main(int argc, char *argv[])
+static int
+main_logstest(int argc, char *argv[])
 {
 	int	main_loop_count;
 	unsigned max_block;
@@ -200,6 +200,10 @@ main(int argc, char *argv[])
 		logstor_open(DISK_FILE);
 		max_block = logstor_get_block_cnt();
 		arrays_alloc_once(max_block); // loop_count is calculated here
+#if defined(WYC)
+		arrays_alloc();
+		arrays_nop();
+#endif
 		test(i, max_block);
 		logstor_close();
 	}
@@ -207,6 +211,11 @@ main(int argc, char *argv[])
 	logstor_fini();
 
 	return 0;
+}
+
+int main(int argc, char *argv[]) // main_logstest
+{
+	return main_logstest(argc, argv);
 }
 
 static uint64_t rdtsc(void)

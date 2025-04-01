@@ -655,8 +655,10 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 		// record the forward mapping
 		// the forward mapping must be recorded after
 		// the segment summary block write
+		// lock
 		for (i = 0; i < count; i++)
 			file_write_4byte(FD_ACTIVE, ba++, sa++);
+		// unlock
 
 		sec_remain -= count;
 	}
@@ -816,7 +818,7 @@ superblock_init_read(void)
 #if defined(RAM_DISK)
 	MY_ASSERT(sizeof(sc.seg_age) >= sc.superblock.seg_cnt);
 #else
-	sc.seg_age = malloc(sc.superblock.seg_cnt);
+	sc.seg_age = malloc(sb_in->seg_cnt);
 	MY_ASSERT(sc.seg_age != NULL);
 #endif
 	memcpy(sc.seg_age, sb_in->sb_seg_age, sb_in->seg_cnt);
@@ -833,7 +835,6 @@ Description:
 static void
 superblock_init_write(int fd)
 {
-	int	i;
 	uint32_t sector_cnt;
 	struct _superblock *sb_out;
 	off_t media_size;
@@ -879,7 +880,7 @@ superblock_init_write(int fd)
 	    __func__, sector_cnt, sb_out->max_block_cnt);
 #endif
 	// the root sector address for the files
-	for (i = 0; i < FD_COUNT; i++) {
+	for (int i = 0; i < FD_COUNT; i++) {
 		sb_out->ftab[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
 	}
 	sb_out->sega_alloc = SEG_DATA_START;	// start allocate from here
@@ -895,7 +896,7 @@ superblock_init_write(int fd)
 
 	// clear the rest of the supeblock's segment
 	bzero(buf, SECTOR_SIZE);
-	for ( i = 1; i < SECTORS_PER_SEG; i++) {
+	for (int i = 1; i < SECTORS_PER_SEG; i++) {
 #if defined(RAM_DISK)
 		memcpy(ram_disk + i * SECTOR_SIZE, buf, SECTOR_SIZE);
 #else
@@ -1327,7 +1328,8 @@ fbuf_mod_init(void)
 	sc.fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4);
 	if (sc.fbuf_count > MAX_FBUF_COUNT)
 		sc.fbuf_count = MAX_FBUF_COUNT;
-	sc.fbuf = malloc(sizeof(*sc.fbuf) * sc.fbuf_count);
+	size_t fbuf_size = sizeof(*sc.fbuf) * sc.fbuf_count;
+	sc.fbuf = malloc(fbuf_size);
 	MY_ASSERT(sc.fbuf != NULL);
 
 	for (i = 0; i < FILE_BUCKET_COUNT; i++)
