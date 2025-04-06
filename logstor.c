@@ -70,26 +70,19 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 #define SA2SEGA_SHIFT	10
 #define BLOCKS_PER_SEG	(SEG_SIZE/SECTOR_SIZE - 1)
 
-#define	META_BASE	0xFF000000u	// metadata block start address
+#define	META_START	0xFF000000u	// metadata block start address
 #define	META_INVALID	0		// invalid metadata address
 
 #define	SECTOR_NULL	0	// this sector address can not map to any block address
 #define SECTOR_DELETE	1	// delete marker for a block
 
-#define	IS_META_ADDR(x)	(((x) & META_BASE) == META_BASE)
+#define	IS_META_ADDR(x)	((x) >= META_START)
 #define META_LEAF_DEPTH 2
 
 #define FILE_BUCKET_COUNT	4099
 
-/*
-  The file descriptor for the forward map files
-*/
-enum {
-	FD_BASE,	// file descriptor for base map
-	FD_ACTIVE,	// file descriptor for active map
-	FD_DELTA,	// file descriptor for delta map
-	FD_COUNT	// the number of file descriptors
-};
+#define	FD_CUR	0
+#define FD_COUNT	4	// max number of metadata files supported
 
 struct _superblock {
 	uint32_t	sig;		// signature
@@ -107,18 +100,18 @@ struct _superblock {
 	/*
 	   The files for forward mapping file
 
-	   Mapping is always updated in @FD_ACTIVE. When snapshot command is issued
-	   @FD_ACTIVE is copied to @FD_DELTA and then cleaned.
+	   Mapping is always updated in @FD_CUR. When snapshot command is issued
+	   @FD_CUR is copied to @FD_DELTA and then cleaned.
 	   Backup program then backs up the delta by reading @FD_DELTA.
 	   After backup is finished, @FD_DELTA is merged into @FD_BASE and then cleaned.
 
-	   If reduced to reboot restore usage, only @FD_ACTIVE and @FD_BASE are needed.
-	   Each time a PC is rebooted @FD_ACTIVE is cleaned so all data are restored.
+	   If reduced to reboot restore usage, only @FD_CUR and @FD_BASE are needed.
+	   Each time a PC is rebooted @FD_CUR is cleaned so all data are restored.
 
-	   So the actual mapping is @FD_ACTIVE || @FD_DELTA || @FD_BASE.
+	   So the actual mapping is @FD_CUR || @FD_DELTA || @FD_BASE.
 	   The first mapping that is not empty is used.
 	*/
-	uint32_t ftab[FD_COUNT]; 	// the file table
+	uint32_t ftab[FD_COUNT]; 	// file handles table
 	uint8_t sb_seg_age[];	// the starting address to store seg_age in superblock
 };
 
@@ -145,14 +138,14 @@ _Static_assert(offsetof(struct _seg_sum, sega) == SECTOR_SIZE,
     "The size of segment summary must be equal to SECTOR_SIZE");
 
 /*
-  File data and its indirect blocks are also stored in the downstream disk.
-  The sectors used to store the file data and its indirect blocks are called metadata.
+  Forward map and its indirect blocks are also stored in the downstream disk.
+  The sectors used to store the forward map and its indirect blocks are called metadata.
 
   Each metadata block has a corresponding metadata address.
   Below is the format of the metadata address.
 
   The metadata address occupies a small part of buffer address space. For buffer address
-  that is >= META_BASE, it is actually a metadata address.
+  that is >= META_START, it is actually a metadata address.
 */
 union meta_addr { // metadata address for file data and its indirect blocks
 	uint32_t	uint32;
@@ -518,10 +511,10 @@ int logstor_delete(off_t offset, void *data, off_t length)
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	if (size == 1) {
-		file_write_4byte(FD_ACTIVE, ba, SECTOR_DELETE);
+		file_write_4byte(FD_CUR, ba, SECTOR_DELETE);
 	} else {
 		for (i = 0; i<size; i++)
-			file_write_4byte(FD_ACTIVE, ba + i, SECTOR_DELETE);
+			file_write_4byte(FD_CUR, ba + i, SECTOR_DELETE);
 	}
 	// file_read_4byte/file_write_4byte might trigger fbuf_write and
 	// clean check cannot be done in fbuf_write
@@ -562,10 +555,10 @@ _logstor_read(unsigned ba, char *data, int size)
 
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
-	start_sa = pre_sa = file_read_4byte(FD_ACTIVE, ba);
+	start_sa = pre_sa = file_read_4byte(FD_CUR, ba);
 	count = 1;
 	for (i = 1; i < size; i++) {
-		sa = file_read_4byte(FD_ACTIVE, ba + i);
+		sa = file_read_4byte(FD_CUR, ba + i);
 		if (sa == pre_sa + 1) {
 			count++;
 			pre_sa = sa;
@@ -601,7 +594,7 @@ _logstor_read_one(unsigned ba, char *data)
 
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
-	start_sa = file_read_4byte(FD_ACTIVE, ba);
+	start_sa = file_read_4byte(FD_CUR, ba);
 #if defined(MY_DEBUG)
 	sa_rw = start_sa; //wyctest
 #endif
@@ -667,7 +660,7 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 		// the segment summary block write
 		// lock
 		for (i = 0; i < count; i++)
-			file_write_4byte(FD_ACTIVE, ba++, sa++);
+			file_write_4byte(FD_CUR, ba++, sa++);
 		// unlock
 
 		sec_remain -= count;
@@ -717,7 +710,7 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum, uint32_t *
 		// the forward mapping must be recorded after
 		// the segment summary block write
 		MY_ASSERT(sa_out == NULL);
-		file_write_4byte(FD_ACTIVE, ba, sa);
+		file_write_4byte(FD_CUR, ba, sa);
 	}
 	return 0;
 }
@@ -1079,7 +1072,7 @@ clean_data(uint32_t cur_sa, uint32_t cur_ba)
 	uint32_t mapped_sa;
 	uint32_t sec_buf[SECTOR_SIZE/4];
 
-	mapped_sa = file_read_4byte(FD_ACTIVE, cur_ba);
+	mapped_sa = file_read_4byte(FD_CUR, cur_ba);
 	if (cur_sa == mapped_sa) { // live data
 		my_read(cur_sa, sec_buf, 1);
 		_logstor_write_one(cur_ba, (char *)sec_buf, &sc.seg_sum_cold, NULL);
@@ -1113,7 +1106,7 @@ seg_live_count(struct _seg_sum *seg_sum)
 					live_count++;
 			}
 		} else {
-			mapped_sa = file_read_4byte(FD_ACTIVE, cur_ba); 
+			mapped_sa = file_read_4byte(FD_CUR, cur_ba); 
 			if (cur_sa == mapped_sa) // live data
 				live_count++;
 		}
@@ -1305,7 +1298,7 @@ file_access(uint8_t fd, uint32_t offset, uint32_t *buf_off, bool bl_write)
 	*buf_off = offset & 0xfffu;
 
 	// convert to metadata address from (@fd, @offset)
-	ma.uint32 = META_BASE + (offset >> 12); // also set .index, .depth and .fd to 0
+	ma.uint32 = META_START + (offset >> 12); // also set .index, .depth and .fd to 0
 	ma.depth = META_LEAF_DEPTH;
 	ma.fd = fd;
 	buf = fbuf_get(ma);
@@ -1323,7 +1316,6 @@ file_access(uint8_t fd, uint32_t offset, uint32_t *buf_off, bool bl_write)
 static void
 fbuf_mod_init(void)
 {
-	unsigned i;
 
 	sc.fbuf_hit = sc.fbuf_miss = 0;
 	sc.fbuf_modified_count = 0;
@@ -1334,7 +1326,7 @@ fbuf_mod_init(void)
 	sc.fbuf = malloc(fbuf_size);
 	MY_ASSERT(sc.fbuf != NULL);
 
-	for (i = 0; i < FILE_BUCKET_COUNT; i++)
+	for (int i = 0; i < FILE_BUCKET_COUNT; i++)
 		LIST_INIT(&sc.fbuf_bucket[i]);
 #if 0
 	sc.fbuf_accessed = malloc(sc.fbuf_count/8);
@@ -1347,10 +1339,11 @@ fbuf_mod_init(void)
 #if defined(MY_DEBUG)
 	sc.cir_queue_cnt = sc.fbuf_count;
 #endif
-	for (i = 0; i < sc.fbuf_count; i++) {
+	for (int i = 0; i < sc.fbuf_count; i++) {
 #if defined(FBUF_DEBUG)
 		sc.fbuf[i].index = i;
 #endif
+		sc.fbuf[i].ma.uint32 = META_INVALID;
 		sc.fbuf[i].cir_queue.prev = &sc.fbuf[i-1];
 		sc.fbuf[i].cir_queue.next = &sc.fbuf[i+1];
 		sc.fbuf[i].parent = NULL;
@@ -1359,7 +1352,6 @@ fbuf_mod_init(void)
 		sc.fbuf[i].modified = false;
 		// to distribute the file buffer to buckets evenly 
 		// use @i as the key when the tag is META_INVALID
-		sc.fbuf[i].ma.uint32 = META_INVALID;
 		fbuf_hash_insert(&sc.fbuf[i], i);
 	}
 	// fix the circular queue for the first and last buffer
@@ -1367,7 +1359,7 @@ fbuf_mod_init(void)
 	sc.fbuf[sc.fbuf_count-1].cir_queue.next = &sc.fbuf[0];
 	sc.fbuf_cir_head = &sc.fbuf[0]; // point to the circular queue
 
-	for (i = 0; i < META_LEAF_DEPTH; i++)
+	for (int i = 0; i < META_LEAF_DEPTH; i++)
 		LIST_INIT(&sc.fbuf_ind_head[i]); // point to active indirect blocks with depth i
 }
 
@@ -1444,6 +1436,7 @@ ma_index_set(union meta_addr *ma, unsigned depth, unsigned index)
 	ma->uint32 |= index;
 }
 
+// to parent's metadata address
 static union meta_addr
 ma2pma(union meta_addr ma, unsigned *pindex_out)
 {
@@ -1614,7 +1607,7 @@ fbuf_get(union meta_addr ma)
 	MY_ASSERT(ma.fd < FD_COUNT);
 	sa = sc.superblock.ftab[ma.fd];
 	pbuf = NULL;	// parent for root is NULL
-	tma.uint32 = META_BASE; // also set .index, .depth and .fd to 0
+	tma.uint32 = META_START; // also set .index, .depth and .fd to 0
 	tma.fd = ma.fd;
 	// read the metadata from root to leaf node
 	for (i = 0; ; ++i) {	// read the indirect blocks to block cache
@@ -1911,7 +1904,7 @@ logstor_ba2sa(uint32_t ba)
 	if (IS_META_ADDR(ba))
 		sa = ma2sa((union meta_addr)ba);
 	else {
-		sa = file_read_4byte(FD_ACTIVE, ba);
+		sa = file_read_4byte(FD_CUR, ba);
 	}
 
 	return sa;
