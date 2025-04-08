@@ -166,21 +166,27 @@ _Static_assert(sizeof(union meta_addr) == 4, "The size of emta_addr must be 4");
 */
 struct _fbuf { // file buffer
 	union {
-		LIST_ENTRY(_fbuf) indir_queue; // for the indirect queue
+		struct {
+			LIST_ENTRY(_fbuf) entry; // for the indirect queue
+			unsigned ref_cnt;
+		} indir_queue;
 		struct {
 			struct _fbuf *next;
 			struct _fbuf *prev;
 		} cir_queue; // list entry for the circular queue
 	};
-	uint16_t ref_cnt;	// only used for fbufs on indirect queue
-	bool	on_cir_queue;	// on circular queue
-	bool	accessed;	// only used for fbufs on circular queue
-	bool	modified;	// the fbuf is dirty
+	struct { // flags
+		unsigned on_cir_queue:1;	// on circular queue
+		unsigned accessed:1;	// only used for fbufs on circular queue
+		unsigned modified:1;	// the fbuf is dirty
+	};
 	
 	LIST_ENTRY(_fbuf)	buffer_bucket_queue;// the pointer for bucket chain
 	struct _fbuf	*parent;
 
 	union meta_addr	ma;	// the metadata address
+	// the metadata is cached here
+	uint32_t	data[SECTOR_SIZE/sizeof(uint32_t)];
 #if defined(MY_DEBUG)
 	uint32_t	sa;	// the sector address of the @data
 #endif
@@ -188,8 +194,6 @@ struct _fbuf { // file buffer
 	uint16_t	index;
 	struct _fbuf 	*child[SECTOR_SIZE/sizeof(uint32_t)];
 #endif
-	// the metadata is cached here
-	uint32_t	data[SECTOR_SIZE/sizeof(uint32_t)];
 };
 
 /*
@@ -1386,7 +1390,7 @@ fbuf_mod_flush(void)
 	
 	// process active indirect blocks
 	for (i = META_LEAF_DEPTH - 1; i >= 0; i--)
-		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], indir_queue) {
+		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], indir_queue.entry) {
 			MY_ASSERT(buf->on_cir_queue == false);
 			if (fbuf_flush(buf))
 				count++;
@@ -1530,7 +1534,7 @@ fbuf_queue_check(void)
 			MY_ASSERT(indir_cnt[0] <= sc.fbuf_count);
 			MY_ASSERT(buf->on_cir_queue == false);
 			MY_ASSERT(buf->ma.depth == i);
-			buf = LIST_NEXT(buf, indir_queue);
+			buf = LIST_NEXT(buf, indir_queue.entry);
 		}
 	}
 
@@ -1633,14 +1637,14 @@ fbuf_get(union meta_addr ma)
 			MY_ASSERT(buf->parent == pbuf);
 			MY_ASSERT(buf->sa == sa);
 			if (pbuf) {
-				MY_ASSERT(pbuf->ref_cnt != 1);
+				MY_ASSERT(pbuf->indir_queue.ref_cnt != 1);
 				/*
 				  The reference count of the parent is always
 				  incremented in the previous loop. In this case
 				  we don't need to, so decremented it here to
 				  compensate the increment in the previous loop.
 				*/
-				pbuf->ref_cnt--;
+				pbuf->indir_queue.ref_cnt--;
 			}
 		}
 		if (i == ma.depth) // reach intended depth
@@ -1649,14 +1653,14 @@ fbuf_get(union meta_addr ma)
 		if (buf->on_cir_queue) {
 			// move it to active indirect block queue
 			fbuf_cir_queue_remove(buf);
-			LIST_INSERT_HEAD(&sc.fbuf_ind_head[i], buf, indir_queue);
-			buf->ref_cnt = 0;
+			LIST_INSERT_HEAD(&sc.fbuf_ind_head[i], buf, indir_queue.entry);
+			buf->indir_queue.ref_cnt = 0;
 		}
 		/*
 		  Increment the reference count of this buffer to prevent it
 		  from being reclaimed by the call to function fbuf_read_and_hash.
 		*/
-		buf->ref_cnt++;
+		buf->indir_queue.ref_cnt++;
 
 		index = ma_index_get(ma, i);// the index to next level's indirect block
 		sa = buf->data[index];	// the sector address of the next level indirect block
@@ -1700,10 +1704,10 @@ fbuf_alloc(void)
 	if (pbuf != NULL) {
 		MY_ASSERT(pbuf->on_cir_queue == false);
 		buf->parent = NULL;
-		pbuf->ref_cnt--;
-		if (pbuf->ref_cnt == 0) {
+		pbuf->indir_queue.ref_cnt--;
+		if (pbuf->indir_queue.ref_cnt == 0) {
 			// move it from indirect queue to circular queue
-			LIST_REMOVE(pbuf, indir_queue);
+			LIST_REMOVE(pbuf, indir_queue.entry);
 			fbuf_cir_queue_insert_tail(pbuf);
 			// set @accessed to false so that it will be reclaimed
 			// next time by the second chance algorithm
@@ -1859,7 +1863,7 @@ fbuf_mod_dump(void)
 	fprintf(fh, "\n\n");
 	for (i = 0; i < META_LEAF_DEPTH; i++) {
 		fprintf(fh, "indir queue %d\n", i);
-		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], indir_queue) {
+		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], indir_queue.entry) {
 			MY_ASSERT(buf->on_cir_queue == false);
 			fbuf_dump(buf, fh);
 		}
