@@ -640,10 +640,6 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 		MY_ASSERT(sa + count < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 		my_write(sa, data, count);
 		data += count * SECTOR_SIZE;
-		if (sc.cleaner_disabled) // if doing segment cleaning
-			sc.other_write_count += count;
-		else
-			sc.data_write_count += count;
 
 		// record the reverse mapping immediately after the data have been written
 		for (i = 0; i < count; i++)
@@ -687,10 +683,6 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum, uint32_t *
 #endif
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	my_write(sa, data, 1);
-	if (sc.cleaner_disabled) // if doing segment cleaning
-		sc.other_write_count++;
-	else
-		sc.data_write_count ++;
 
 	// record the reverse mapping
 	seg_sum->ss_rm[seg_sum->ss_alloc_p++] = ba;
@@ -916,16 +908,13 @@ superblock_write(void)
 	my_write(sc.sb_sa, sb_out, 1);
 	sc.other_write_count++;
 }
-#if defined(MY_DEBUG)
-uint32_t sa_watch = 0;
-#endif
+
 #if defined(RAM_DISK_SIZE)
 static void
 my_read(uint32_t sa, void *buf, unsigned size)
 {
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(buf, ram_disk + (off_t)sa * SECTOR_SIZE, size * SECTOR_SIZE);
-//MY_BREAK(sa == sa_watch);
 }
 
 static void
@@ -933,7 +922,6 @@ my_write(uint32_t sa, const void *buf, unsigned size)
 {
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(ram_disk + (off_t)sa * SECTOR_SIZE , buf, size * SECTOR_SIZE);
-//MY_BREAK(sa==sa_watch);
 }
 #else
 static void
@@ -956,6 +944,7 @@ my_write(uint32_t sa, const void *buf, unsigned size)
 	MY_ASSERT(bc == size * SECTOR_SIZE);
 }
 #endif
+
 /*
 Description:
   Allocate a segment for writing
@@ -1005,10 +994,9 @@ static void
 seg_reclaim_init(struct _seg_sum *seg_sum)
 {
 	uint32_t sega;
-#if defined(MY_DEBUG)
 	uint32_t sega_cold = sc.seg_sum_cold.sega;
 	uint32_t sega_hot = sc.seg_sum_hot.sega;
-#endif
+
 again:
 	sega = sc.superblock.sega_reclaim;
 	if (++sc.superblock.sega_reclaim == sc.superblock.seg_cnt)
@@ -1086,7 +1074,6 @@ clean_data(uint32_t cur_sa, uint32_t cur_ba)
 static void
 seg_live_count(struct _seg_sum *seg_sum)
 {
-	int	i;
 	uint32_t cur_ba;
 	uint32_t cur_sa, mapped_sa;
 	uint32_t seg_sa;
@@ -1094,7 +1081,7 @@ seg_live_count(struct _seg_sum *seg_sum)
 	struct _fbuf *buf;
 
 	seg_sa = sega2sa(seg_sum->sega);
-	for (i = 0; i < seg_sum->ss_alloc_p; i++)
+	for (int i = 0; i < seg_sum->ss_alloc_p; i++)
 	{
 		cur_sa = seg_sa + i;
 		cur_ba = seg_sum->ss_rm[i];	// get the block address from reverse map
@@ -1135,7 +1122,6 @@ seg_clean(struct _seg_sum *seg_sum)
 	sega = seg_sum->sega;
 	sc.seg_age[sega] = 0; // It's cleaned
 	sc.superblock.seg_free_cnt++;
-	//gc_trim(seg_sa);
 }
 
 #if 1
