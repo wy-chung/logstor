@@ -144,7 +144,7 @@ _Static_assert(offsetof(struct _seg_sum, sega) == SECTOR_SIZE,
   Each metadata block has a corresponding metadata address.
   Below is the format of the metadata address.
 
-  The metadata address occupies a small part of buffer address space. For buffer address
+  The metadata address occupies a small part of block address space. For block address
   that is >= META_START, it is actually a metadata address.
 */
 union meta_addr { // metadata address for file data and its indirect blocks
@@ -667,19 +667,33 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 /*
 Note:
   sa_out is not NULL only when called from clean_metadata
+
+  write only data block
 */
 static int
 _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum, uint32_t *sa_out)
 {
-	uint32_t sa;	// sector address
-
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 	MY_ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFFSET);
-
+#if 0
+again:
+	uint32_t seg_sa = sega2sa(seg_sum->sega) + seg_sum->ss_alloc_p;
+	for (int i = seg_sum->ss_alloc_p; i < SEG_SUM_OFFSET; ++i)
+	{
+		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
+		uint32_t sa_rev = file_read_4byte(FD_CUR, ba_rev);
+		if (sa_rev != seg_sa + i) { // stale block
+			my_write(seg_sa + i, data, 1);
+			file_write_4byte(FD_CUR, ba, seg_sa + i);
+			return 0;
+		}
+	}
+#else
+	uint32_t sa;	// sector address
 	sa = sega2sa(seg_sum->sega) + seg_sum->ss_alloc_p;
-#if defined(MY_DEBUG)
+  #if defined(MY_DEBUG)
 	sa_rw = sa; //wyctest
-#endif
+  #endif
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	my_write(sa, data, 1);
 
@@ -704,6 +718,7 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum, uint32_t *
 		file_write_4byte(FD_CUR, ba, sa);
 	}
 	return 0;
+#endif
 }
 
 uint32_t
@@ -1415,7 +1430,15 @@ ma_index_set(union meta_addr *ma, unsigned depth, unsigned index)
 	ma->uint32 |= index;
 }
 
-// to parent's metadata address
+/*
+  to parent's metadata address
+
+output:
+  pindex_out: the index in parent's metadata
+
+return:
+  parent's metadata address
+*/
 static union meta_addr
 ma2pma(union meta_addr ma, unsigned *pindex_out)
 {
@@ -1441,6 +1464,7 @@ ma2pma(union meta_addr ma, unsigned *pindex_out)
 	return ma;
 }
 
+// metadata address to sector address
 static uint32_t
 ma2sa(union meta_addr ma)
 {
