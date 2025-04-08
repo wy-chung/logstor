@@ -70,7 +70,7 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 #define SA2SEGA_SHIFT	10
 #define BLOCKS_PER_SEG	(SEG_SIZE/SECTOR_SIZE - 1)
 
-#define	META_START	0xFF000000u	// metadata block start address
+#define	META_START	0xFF000000u	// metadata block address start
 #define	META_INVALID	0		// invalid metadata address
 
 #define	SECTOR_NULL	0	// this sector address can not map to any block address
@@ -272,7 +272,7 @@ static void superblock_write(void);
 
 static uint32_t file_read_4byte(uint8_t fh, uint32_t ba);
 static void file_write_4byte(uint8_t fh, uint32_t ba, uint32_t sa);
-static struct _fbuf *file_access(uint8_t fd, uint32_t offset, uint32_t *buf_off, bool bl_write);
+static struct _fbuf *file_access_4byte(uint8_t fd, uint32_t offset, uint32_t *buf_off, bool bl_write);
 
 static void fbuf_mod_init(void);
 static void fbuf_mod_fini(void);
@@ -1249,8 +1249,8 @@ file_read_4byte(uint8_t fd, uint32_t ba)
 	struct _fbuf *buf;
 	uint32_t offset;	// the offset within the file buffer data
 
-	MY_ASSERT((ba & 0xc0000000u) == 0); // the most significant 2-bits can not be used
-	buf = file_access(fd, ba << 2, &offset, false);
+	MY_ASSERT(ba < META_START);
+	buf = file_access_4byte(fd, ba, &offset, false);
 	return *((uint32_t *)((uint8_t *)buf->data + offset));
 }
 
@@ -1269,8 +1269,8 @@ file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
 	struct _fbuf *buf;
 	uint32_t offset;	// the offset within the file buffer data
 
-	MY_ASSERT((ba & 0xc0000000u) == 0); // the most significant 2-bits can not be used
-	buf = file_access(fd, ba << 2, &offset, true);
+	MY_ASSERT(ba < META_START);
+	buf = file_access_4byte(fd, ba, &offset, true);
 	*((uint32_t *)((uint8_t*)buf->data + offset)) = sa;
 }
 
@@ -1289,15 +1289,17 @@ Return:
 	the address of the file buffer data
 */
 static struct _fbuf *
-file_access(uint8_t fd, uint32_t offset, uint32_t *buf_off, bool bl_write)
+file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *buf_off, bool bl_write)
 {
 	union meta_addr	ma;		// metadata address
 	struct _fbuf *buf;
 
-	*buf_off = offset & 0xfffu;
+	// the data stored in file for this ba is 4 bytes, so << 2
+	*buf_off = (ba << 2) & 0xfffu;	// the buffer is 4 KiB
 
-	// convert to metadata address from (@fd, @offset)
-	ma.uint32 = META_START + (offset >> 12); // also set .index, .depth and .fd to 0
+	// convert to metadata address from (@fd, @ba)
+	// (ba << 2) / 4 KiB == ba >> 10
+	ma.uint32 = META_START + (ba >> 10); // also set .index, .depth and .fd to 0
 	ma.depth = META_LEAF_DEPTH;
 	ma.fd = fd;
 	buf = fbuf_get(ma);
