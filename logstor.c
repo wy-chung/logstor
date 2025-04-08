@@ -204,13 +204,12 @@ struct g_logstor_softc {
 	uint32_t clean_low_water;
 	uint32_t clean_high_water;
 	
-	int fbuf_count;
-	int fbuf_modified_count;	// This field is for debug use.
 	struct _fbuf *fbuf;
-#if 0
-	uint32_t *fbuf_accessed;
-	uint32_t *fbuf_modified;
-	uint32_t *fbuf_on_cir_queue;
+	int fbuf_count;
+#if 0 // the accessed, modified and flag bits should be moved out of struct _fbuf
+	unsigned *fbuf_accessed;
+	unsigned *fbuf_modified;
+	unsigned *fbuf_on_cir_queue;
 #endif	
 	// buffer hash queue
 	LIST_HEAD(_fbuf_bucket, _fbuf)	fbuf_bucket[FILE_BUCKET_COUNT];
@@ -1040,7 +1039,6 @@ clean_metadata(uint32_t cur_sa, union meta_addr cur_ma)
 				pbuf->data[pindex] = new_sa;
 				if (!pbuf->modified) {
 					pbuf->modified = true;
-					sc.fbuf_modified_count++;
 				}
 			} else {
 				sc.superblock.ftab[cur_ma.fd] = new_sa;
@@ -1049,7 +1047,6 @@ clean_metadata(uint32_t cur_sa, union meta_addr cur_ma)
 		} else if (!buf->modified) {
 			// set modified to true so it will eventually be written out
 			buf->modified = true;
-			sc.fbuf_modified_count++;
 		}
 	}
 }
@@ -1291,7 +1288,6 @@ file_access(uint8_t fd, uint32_t offset, uint32_t *buf_off, bool bl_write)
 	buf->accessed = true;
 	if (!buf->modified && bl_write) {
 		buf->modified = true;
-		sc.fbuf_modified_count++;
 	}
 	return buf;
 }
@@ -1304,7 +1300,6 @@ fbuf_mod_init(void)
 {
 
 	sc.fbuf_hit = sc.fbuf_miss = 0;
-	sc.fbuf_modified_count = 0;
 	sc.fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4);
 	if (sc.fbuf_count > MAX_FBUF_COUNT)
 		sc.fbuf_count = MAX_FBUF_COUNT;
@@ -1363,7 +1358,6 @@ fbuf_mod_flush(void)
 	int	i;
 	unsigned count = 0;
 
-//printf("%s: modified count before %d\n", __func__, sc.fbuf_modified_count);
 	buf = sc.fbuf_cir_head;
 	do {
 		MY_ASSERT(buf->on_cir_queue);
@@ -1379,7 +1373,6 @@ fbuf_mod_flush(void)
 			if (fbuf_flush(buf))
 				count++;
 		}
-//printf("%s: modified count after %d\n", __func__, sc.fbuf_modified_count);
 //printf("%s: flushed count %u\n", __func__, count);
 }
 
@@ -1747,7 +1740,6 @@ fbuf_write(struct _fbuf *buf)
 	buf->sa = sa;
 #endif
 	buf->modified = false;
-	sc.fbuf_modified_count--;
 	sc.other_write_count++;
 
 	// store the forward mapping in parent indirect block
@@ -1759,7 +1751,6 @@ fbuf_write(struct _fbuf *buf)
 		pbuf->data[pindex] = sa;
 		if (!pbuf->modified) {
 			pbuf->modified = true;
-			sc.fbuf_modified_count++;
 		}
 	} else {
 		MY_ASSERT(buf->ma.depth == 0);
