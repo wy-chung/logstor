@@ -150,7 +150,8 @@ _Static_assert(offsetof(struct _seg_sum, sega) == SECTOR_SIZE,
 union meta_addr { // metadata address for file data and its indirect blocks
 	uint32_t	uint32;
 	struct {
-		uint32_t index  :20;	// index for indirect block
+		uint32_t index1 :10;	// index for indirect block
+		uint32_t index0 :10;	// index for indirect block
 		uint32_t depth	:2;	// depth of the node
 		uint32_t fd	:2;	// file descriptor
 		uint32_t meta	:8;	// 0xFF for metadata address
@@ -1396,38 +1397,35 @@ ma_index_get(union meta_addr ma, unsigned depth)
 {
 	unsigned index;
 
-	index = ma.uint32;
 	switch (depth) {
 	case 0:
-		index >>= 10;
+		index = ma.index0;
 		break;
 	case 1:
+		index = ma.index1;
 		break;
 	default:
 		MY_PANIC();
 	}
-	return (index & 0x3ffu);
+	return (index);
 }
 
-static void
-ma_index_set(union meta_addr *ma, unsigned depth, unsigned index)
+static union meta_addr
+ma_index_set(union meta_addr ma, unsigned depth, unsigned index)
 {
-
-	MY_ASSERT(depth < META_LEAF_DEPTH);
 	MY_ASSERT(index < 1024);
 
 	switch (depth) {
 	case 0:
-		index <<= 10;
-		ma->uint32 &= 0xfff003ffu;
+		ma.index0 = index;
 		break;
 	case 1:
-		ma->uint32 &= 0xfffffc00u;
+		ma.index1 = index;
 		break;
 	default:
 		MY_PANIC();
 	}
-	ma->uint32 |= index;
+	return ma;
 }
 
 /*
@@ -1446,16 +1444,15 @@ ma2pma(union meta_addr ma, unsigned *pindex_out)
 	switch (ma.depth)
 	{
 	case 1:
-		*pindex_out = ma_index_get(ma, 0);
-		//ma_index_set(&ma, 0, 0);
-		//ma_index_set(&ma, 1, 0);
-		ma.index = 0; // optimization of the above 2 statements
+		*pindex_out = ma.index0;
 		ma.depth = 0; // i.e. ma.depth - 1
+		ma.index0 = 0;
+		ma.index1 = 0;
 		break;
 	case 2:
-		*pindex_out = ma_index_get(ma, 1);
-		ma_index_set(&ma, 1, 0);
+		*pindex_out = ma.index1;
 		ma.depth = 1; // i.e. ma.depth - 1
+		ma.index1 = 0;
 		break;
 	default:
 		MY_PANIC();
@@ -1661,7 +1658,7 @@ fbuf_get(union meta_addr ma)
 
 		index = ma_index_get(ma, i);// the index to next level's indirect block
 		sa = buf->data[index];	// the sector address of the next level indirect block
-		ma_index_set(&tma, i, index); // set the next level's index for @tma
+		tma = ma_index_set(tma, i, index); // set the next level's index for @tma
 		pbuf = buf;		// @buf is the parent of next level indirect block
 	}
 #if defined(MY_DEBUG)
