@@ -1445,14 +1445,14 @@ ma2pma(union meta_addr ma, unsigned *pindex_out)
 	{
 	case 1:
 		*pindex_out = ma.index0;
-		ma.depth = 0; // i.e. ma.depth - 1
-		ma.index0 = 0;
 		ma.index1 = 0;
+		ma.index0 = 0;
+		ma.depth = 0; // i.e. ma.depth - 1
 		break;
 	case 2:
 		*pindex_out = ma.index1;
-		ma.depth = 1; // i.e. ma.depth - 1
 		ma.index1 = 0;
+		ma.depth = 1; // i.e. ma.depth - 1
 		break;
 	default:
 		MY_PANIC();
