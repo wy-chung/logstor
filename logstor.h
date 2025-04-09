@@ -16,8 +16,8 @@ typedef long	int64_t;
 #endif
 
 #define	MY_DEBUG
-#define RAM_DISK_SIZE		0x80000000 // 2G
 //#define FBUF_DEBUG
+#define RAM_DISK_SIZE		0x80000000 // 2G
 
 #define DISK_FILE	"logstor.disk"
 //#define DISK_FILE	"/dev/ada1"

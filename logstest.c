@@ -134,12 +134,12 @@ static void
 test(int n, unsigned max_block)
 {
 
-	printf("writing%d...\n", n);
+	printf("writing %d...\n", n);
 	test_write(max_block);
 #if defined(MY_DEBUG)
 	arrays_check();
 #endif
-	printf("reading%d...\n", n);
+	printf("reading %d...\n", n);
 	test_read(max_block);
 }
 
@@ -194,7 +194,7 @@ main_logstest(int argc, char *argv[])
 	main_loop_count = 3;
 	for (int i = 0; i < main_loop_count; i++) {
 		gdb_cond0 = i;
-		printf("### test %d\n", i);
+		printf("#### test %d ####\n", i);
 		logstor_open(DISK_FILE);
 		max_block = logstor_get_block_cnt();
 		arrays_alloc_once(max_block); // loop_count is calculated here

@@ -54,6 +54,12 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 }
 #endif
 
+#define likely(x)       __builtin_expect(!!(x), 1)
+#define unlikely(x)     __builtin_expect(!!(x), 0)
+
+#define __predict_true(exp)     __builtin_expect((exp), 1)
+#define __predict_false(exp)    __builtin_expect((exp), 0)
+
 #define MAX_FBUF_COUNT  4096
 //#define MAX_FBUF_COUNT  500 //wyctest
 #define CLEAN_AGE_LIMIT	3
@@ -81,7 +87,7 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 
 #define FILE_BUCKET_COUNT	4099
 
-#define	FD_CUR	0
+#define	FD_CUR	2
 #define FD_COUNT	4	// max number of metadata files supported
 
 struct _superblock {
@@ -175,12 +181,9 @@ struct _fbuf { // file buffer
 			struct _fbuf *prev;
 		} cir_queue; // list entry for the circular queue
 	};
-	struct { // flags
-		unsigned on_cir_queue:1;	// on circular queue
-		unsigned accessed:1;	// only used for fbufs on circular queue
-		unsigned modified:1;	// the fbuf is dirty
-	};
-	
+	bool on_cir_queue;	// on circular queue
+	bool accessed;	// only used for fbufs on circular queue
+	bool modified;	// the fbuf is dirty
 	LIST_ENTRY(_fbuf)	buffer_bucket_queue;// the pointer for bucket chain
 	struct _fbuf	*parent;
 
@@ -284,7 +287,7 @@ static void fbuf_mod_flush(void);
 static struct _fbuf *fbuf_get(union meta_addr ma);
 static struct _fbuf *fbuf_read_and_hash(uint32_t sa, union meta_addr ma);
 static struct _fbuf *fbuf_search(union meta_addr ma);
-static bool fbuf_flush(struct _fbuf *buf);
+static void fbuf_flush(struct _fbuf *buf);
 static void fbuf_hash_insert(struct _fbuf *buf, unsigned key);
 
 static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
@@ -395,8 +398,6 @@ logstor_fini(void)
 int
 logstor_open(const char *disk_file)
 {
-	int error;
-
 	bzero(&sc, sizeof(sc));
 #if !defined(RAM_DISK_SIZE)
   #if __BSD_VISIBLE
@@ -406,7 +407,7 @@ logstor_open(const char *disk_file)
   #endif
 	MY_ASSERT(sc.disk_fd > 0);
 #endif
-	error = superblock_init_read();
+	int error __attribute__((unused)) = superblock_init_read();
 	MY_ASSERT(error == 0);
 	// the order of the two statements below is important
 	seg_alloc(&sc.seg_sum_cold);
@@ -1013,9 +1014,11 @@ static void
 seg_reclaim_init(struct _seg_sum *seg_sum)
 {
 	uint32_t sega;
-	uint32_t sega_cold = sc.seg_sum_cold.sega;
-	uint32_t sega_hot = sc.seg_sum_hot.sega;
+	uint32_t sega_cold;
+	uint32_t sega_hot __attribute__((unused));
 
+	sega_cold = sc.seg_sum_cold.sega;
+	sega_hot = sc.seg_sum_hot.sega;
 again:
 	sega = sc.superblock.sega_reclaim;
 	if (++sc.superblock.sega_reclaim == sc.superblock.seg_cnt)
@@ -1298,17 +1301,17 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *buf_off, bool bl_write)
 	union meta_addr	ma;		// metadata address
 	struct _fbuf *buf;
 
-	// the data stored in file for this ba is 4 bytes, so << 2
-	*buf_off = (ba << 2) & 0xfffu;	// the buffer is 4 KiB
+	// the data stored in file for this ba is 4 bytes
+	*buf_off = (ba * 4) & (SECTOR_SIZE - 1);	// the buffer is 4 KiB
 
 	// convert to metadata address from (@fd, @ba)
 	// (ba << 2) / 4 KiB == ba >> 10
-	ma.uint32 = META_START + (ba >> 10); // also set .index, .depth and .fd to 0
+	ma.uint32 = META_START + (ba >> 10); // set .meta, .index0 and .index1
 	ma.depth = META_LEAF_DEPTH;
 	ma.fd = fd;
 	buf = fbuf_get(ma);
 	buf->accessed = true;
-	if (!buf->modified && bl_write) {
+	if (__predict_false(!buf->modified) && bl_write) {
 		buf->modified = true;
 	}
 	return buf;
@@ -1378,13 +1381,11 @@ fbuf_mod_flush(void)
 {
 	struct _fbuf	*buf;
 	int	i;
-	unsigned count = 0;
 
 	buf = sc.fbuf_cir_head;
 	do {
 		MY_ASSERT(buf->on_cir_queue);
-		if (fbuf_flush(buf))
-			count++;
+		fbuf_flush(buf);
 		buf = buf->cir_queue.next;
 	} while (buf != sc.fbuf_cir_head);
 	
@@ -1392,10 +1393,8 @@ fbuf_mod_flush(void)
 	for (i = META_LEAF_DEPTH - 1; i >= 0; i--)
 		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], indir_queue.entry) {
 			MY_ASSERT(buf->on_cir_queue == false);
-			if (fbuf_flush(buf))
-				count++;
+			fbuf_flush(buf);
 		}
-//printf("%s: flushed count %u\n", __func__, count);
 }
 
 static unsigned
@@ -1600,7 +1599,6 @@ fbuf_get(union meta_addr ma)
 	struct _fbuf *buf;
 	union meta_addr	tma;	// temporary metadata address
 	uint32_t sa;	// sector address where the metadata is stored
-	unsigned i;
 	unsigned index;
 
 	MY_ASSERT(IS_META_ADDR(ma.uint32));
@@ -1613,10 +1611,10 @@ fbuf_get(union meta_addr ma)
 	MY_ASSERT(ma.fd < FD_COUNT);
 	sa = sc.superblock.ftab[ma.fd];
 	pbuf = NULL;	// parent for root is NULL
-	tma.uint32 = META_START; // also set .index, .depth and .fd to 0
+	tma.uint32 = META_START; // set .meta to 0xFF and all others to 0
 	tma.fd = ma.fd;
 	// read the metadata from root to leaf node
-	for (i = 0; ; ++i) {	// read the indirect blocks to block cache
+	for (int i = 0; ; ++i) {
 		tma.depth = i;
 		buf = fbuf_search(tma);
 		if (buf == NULL) {
@@ -1704,8 +1702,7 @@ fbuf_alloc(void)
 	if (pbuf != NULL) {
 		MY_ASSERT(pbuf->on_cir_queue == false);
 		buf->parent = NULL;
-		pbuf->indir_queue.ref_cnt--;
-		if (pbuf->indir_queue.ref_cnt == 0) {
+		if (--pbuf->indir_queue.ref_cnt == 0) {
 			// move it from indirect queue to circular queue
 			LIST_REMOVE(pbuf, indir_queue.entry);
 			fbuf_cir_queue_insert_tail(pbuf);
@@ -1801,16 +1798,16 @@ fbuf_write(struct _fbuf *buf)
 Description:
     Write the dirty data in file buffer to disk
 */
-static bool
+static void
 fbuf_flush(struct _fbuf *buf)
 {
 
 	if (!buf->modified)
-		return false;
+		return;
 
 	MY_ASSERT(IS_META_ADDR(buf->ma.uint32));
 	fbuf_write(buf);
-	return true;
+	return;
 }
 
 /*
