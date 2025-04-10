@@ -37,9 +37,6 @@ void my_break(void);
 
 #define	SECTOR_SIZE	0x1000		// 4K
 
-#if defined(MY_DEBUG)
-extern uint32_t sa_rw; // the sector address for _logstor_read_one/_logstor_write_one
-#endif
 extern uint32_t gdb_cond0;	// for debug
 extern uint32_t gdb_cond1;	// for debug
 

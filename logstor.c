@@ -248,9 +248,6 @@ struct g_logstor_softc {
 	struct _superblock superblock;
 };
 
-#if defined(MY_DEBUG)
-uint32_t sa_rw; // the sector address for _logstor_read_one/_logstor_write_one
-#endif
 uint32_t gdb_cond0;
 uint32_t gdb_cond1;
 
@@ -600,9 +597,6 @@ _logstor_read_one(unsigned ba, char *data)
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	start_sa = file_read_4byte(FD_CUR, ba);
-#if defined(MY_DEBUG)
-	sa_rw = start_sa; //wyctest
-#endif
 	if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
 		bzero(data, SECTOR_SIZE);
 	else {
@@ -697,9 +691,6 @@ again:
 #else
 	uint32_t sa;	// sector address
 	sa = sega2sa(seg_sum->sega) + seg_sum->ss_alloc_p;
-  #if defined(MY_DEBUG)
-	sa_rw = sa; //wyctest
-  #endif
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	my_write(sa, data, 1);
 
@@ -1067,7 +1058,7 @@ clean_metadata(uint32_t cur_sa, union meta_addr cur_ma)
 				sc.superblock.ftab[cur_ma.fd] = new_sa;
 				sc.sb_modified = true;
 			}
-		} else if (!buf->modified) {
+		} else if (__predict_false(!buf->modified)) {
 			// set modified to true so it will eventually be written out
 			buf->modified = true;
 		}
@@ -1873,7 +1864,7 @@ fbuf_mod_dump(void)
 
 	fclose(fh);
 }
-#endif
+#endif // FBUF_DEBUG
 //===================================================
 #if 0
 static uint32_t

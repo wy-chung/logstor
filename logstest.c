@@ -46,9 +46,6 @@ static arrays_alloc_f *arrays_alloc_once = arrays_alloc;
 static uint32_t *i2ba;	// ba for iteration i
 static uint32_t *ba2i;	// stored value for ba
 static uint8_t *ba_write_count;	// write count for each block
-#if defined(MY_DEBUG)
-static uint32_t *ba2sa;	// stored value for ba
-#endif
 
 static uint32_t buf[SECTOR_SIZE/4];
 static unsigned loop_count;
@@ -90,9 +87,6 @@ test_write(unsigned max_block)
 		buf[6] = ba;
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
 		logstor_write_test(ba, buf);
-#if defined(MY_DEBUG)
-		ba2sa[ba] = sa_rw;
-#endif
 	}
 	printf("elapse time %u\n",
 	    (unsigned)(rdtsc() - start_time)/TIME_SCALE);
@@ -239,12 +233,6 @@ arrays_alloc(unsigned max_block)
 
 	loop_count = max_block * ratio_to_maxblock;
 
-#if defined(MY_DEBUG)
-	size = max_block * sizeof(*ba2sa);
-	ba2sa = malloc(size);
-	MY_ASSERT(ba2sa != NULL);
-	bzero(ba2sa, size);
-#endif
 	size = loop_count * sizeof(*i2ba);
 	i2ba = malloc(size);
 	MY_ASSERT(i2ba != NULL);
@@ -268,8 +256,5 @@ static void arrays_free(void)
 	free(ba_write_count);
 	free(ba2i);
 	free(i2ba);
-#if defined(MY_DEBUG)
-	free(ba2sa);
-#endif
 }
 
