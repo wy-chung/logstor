@@ -290,6 +290,7 @@ static void fbuf_mod_fini(void);
 static void fbuf_mod_flush(void);
 static struct _fbuf *fbuf_get(union meta_addr ma);
 static struct _fbuf *fbuf_read_and_hash(uint32_t sa, union meta_addr ma);
+static struct _fbuf *fbuf_alloc(void);
 static struct _fbuf *fbuf_search(union meta_addr ma);
 static void fbuf_flush(struct _fbuf *buf);
 static void fbuf_hash_insert(struct _fbuf *buf, unsigned key);
@@ -1302,96 +1303,16 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *buf_off, bool bl_write)
 	*buf_off = (ba * 4) & (SECTOR_SIZE - 1);	// the buffer is 4 KiB
 
 	// convert to metadata address from (@fd, @ba)
-	// (ba << 2) / 4 KiB == ba >> 10
-	ma.uint32 = META_START + (ba >> 10); // set .meta, .index0 and .index1
+	ma.index = ba / (SECTOR_SIZE / 4); // (ba * 4) / SECTOR_SIZE
 	ma.depth = META_LEAF_DEPTH;
 	ma.fd = fd;
+	ma.meta = 0xFF;	// for metadata address, bits 31:24 are all 1s
 	buf = fbuf_get(ma);
 	buf->accessed = true;
 	if (__predict_false(!buf->modified) && bl_write) {
 		buf->modified = true;
 	}
 	return buf;
-}
-
-/*
-  Initialize metadata file buffer
-*/
-static void
-fbuf_mod_init(void)
-{
-
-	sc.fbuf_hit = sc.fbuf_miss = 0;
-	sc.fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4);
-	if (sc.fbuf_count > MAX_FBUF_COUNT)
-		sc.fbuf_count = MAX_FBUF_COUNT;
-	size_t fbuf_size = sizeof(*sc.fbuf) * sc.fbuf_count;
-	sc.fbuf = malloc(fbuf_size);
-	MY_ASSERT(sc.fbuf != NULL);
-
-	for (int i = 0; i < FILE_BUCKET_COUNT; i++)
-		LIST_INIT(&sc.fbuf_bucket[i]);
-#if 0
-	sc.fbuf_accessed = malloc(sc.fbuf_count/8);
-	MY_ASSERT(sc.fbuf_accessed != NULL);
-	sc.fbuf_modified = malloc(sc.fbuf_count/8);
-	MY_ASSERT(sc.fbuf_modified != NULL);
-	sc.fbuf_on_cir_queue = malloc(sc.fbuf_count/8);
-	MY_ASSERT(sc.fbuf_on_cir_queue != NULL);
-#endif
-#if defined(MY_DEBUG)
-	sc.cir_queue_cnt = sc.fbuf_count;
-#endif
-	for (int i = 0; i < sc.fbuf_count; i++) {
-#if defined(FBUF_DEBUG)
-		sc.fbuf[i].index = i;
-#endif
-		sc.fbuf[i].ma.uint32 = META_INVALID;
-		sc.fbuf[i].cir_queue.prev = &sc.fbuf[i-1];
-		sc.fbuf[i].cir_queue.next = &sc.fbuf[i+1];
-		sc.fbuf[i].parent = NULL;
-		sc.fbuf[i].on_cir_queue = true;
-		sc.fbuf[i].accessed = false;
-		sc.fbuf[i].modified = false;
-		// to distribute the file buffer to buckets evenly 
-		// use @i as the key when the tag is META_INVALID
-		fbuf_hash_insert(&sc.fbuf[i], i);
-	}
-	// fix the circular queue for the first and last buffer
-	sc.fbuf[0].cir_queue.prev = &sc.fbuf[sc.fbuf_count-1];
-	sc.fbuf[sc.fbuf_count-1].cir_queue.next = &sc.fbuf[0];
-	sc.fbuf_cir_head = &sc.fbuf[0]; // point to the circular queue
-
-	for (int i = 0; i < META_LEAF_DEPTH; i++)
-		LIST_INIT(&sc.fbuf_ind_head[i]); // point to active indirect blocks with depth i
-}
-
-static void
-fbuf_mod_fini(void)
-{
-	fbuf_mod_flush();
-	free(sc.fbuf);
-}
-
-static void
-fbuf_mod_flush(void)
-{
-	struct _fbuf	*buf;
-	int	i;
-
-	buf = sc.fbuf_cir_head;
-	do {
-		MY_ASSERT(buf->on_cir_queue);
-		fbuf_flush(buf);
-		buf = buf->cir_queue.next;
-	} while (buf != sc.fbuf_cir_head);
-	
-	// process active indirect blocks
-	for (i = META_LEAF_DEPTH - 1; i >= 0; i--)
-		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], indir_queue.entry) {
-			MY_ASSERT(buf->on_cir_queue == false);
-			fbuf_flush(buf);
-		}
 }
 
 static unsigned
@@ -1488,6 +1409,86 @@ ma2sa(union meta_addr ma)
 		break;
 	}
 	return sa;
+}
+
+/*
+  Initialize metadata file buffer
+*/
+static void
+fbuf_mod_init(void)
+{
+
+	sc.fbuf_hit = sc.fbuf_miss = 0;
+	sc.fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4);
+	if (sc.fbuf_count > MAX_FBUF_COUNT)
+		sc.fbuf_count = MAX_FBUF_COUNT;
+	size_t fbuf_size = sizeof(*sc.fbuf) * sc.fbuf_count;
+	sc.fbuf = malloc(fbuf_size);
+	MY_ASSERT(sc.fbuf != NULL);
+
+	for (int i = 0; i < FILE_BUCKET_COUNT; i++)
+		LIST_INIT(&sc.fbuf_bucket[i]);
+#if 0
+	sc.fbuf_accessed = malloc(sc.fbuf_count/8);
+	MY_ASSERT(sc.fbuf_accessed != NULL);
+	sc.fbuf_modified = malloc(sc.fbuf_count/8);
+	MY_ASSERT(sc.fbuf_modified != NULL);
+	sc.fbuf_on_cir_queue = malloc(sc.fbuf_count/8);
+	MY_ASSERT(sc.fbuf_on_cir_queue != NULL);
+#endif
+#if defined(MY_DEBUG)
+	sc.cir_queue_cnt = sc.fbuf_count;
+#endif
+	for (int i = 0; i < sc.fbuf_count; i++) {
+#if defined(FBUF_DEBUG)
+		sc.fbuf[i].index = i;
+#endif
+		sc.fbuf[i].ma.uint32 = META_INVALID;
+		sc.fbuf[i].cir_queue.prev = &sc.fbuf[i-1];
+		sc.fbuf[i].cir_queue.next = &sc.fbuf[i+1];
+		sc.fbuf[i].parent = NULL;
+		sc.fbuf[i].on_cir_queue = true;
+		sc.fbuf[i].accessed = false;
+		sc.fbuf[i].modified = false;
+		// to distribute the file buffer to buckets evenly
+		// use @i as the key when the metadata address is META_INVALID
+		fbuf_hash_insert(&sc.fbuf[i], i);
+	}
+	// fix the circular queue for the first and last buffer
+	sc.fbuf[0].cir_queue.prev = &sc.fbuf[sc.fbuf_count-1];
+	sc.fbuf[sc.fbuf_count-1].cir_queue.next = &sc.fbuf[0];
+	sc.fbuf_cir_head = &sc.fbuf[0]; // point to the circular queue
+
+	for (int i = 0; i < META_LEAF_DEPTH; i++)
+		LIST_INIT(&sc.fbuf_ind_head[i]); // point to active indirect blocks with depth i
+}
+
+static void
+fbuf_mod_fini(void)
+{
+	fbuf_mod_flush();
+	free(sc.fbuf);
+}
+
+static void
+fbuf_mod_flush(void)
+{
+	struct _fbuf	*buf;
+	int	i;
+
+	buf = sc.fbuf_cir_head;
+	do {
+		MY_ASSERT(buf->on_cir_queue);
+		fbuf_flush(buf);
+		buf = buf->cir_queue.next;
+	} while (buf != sc.fbuf_cir_head);
+
+	// process active indirect blocks
+	for (i = META_LEAF_DEPTH - 1; i >= 0; i--)
+		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], indir_queue.entry) {
+			MY_ASSERT(buf->on_cir_queue == false);
+			fbuf_flush(buf);
+		}
 }
 
 static void
@@ -1669,53 +1670,6 @@ fbuf_get(union meta_addr ma)
 
 /*
 Description:
-    Use the second chance algorithm to allocate a file buffer
-*/
-struct _fbuf *
-fbuf_alloc(void)
-{
-	struct _fbuf *pbuf;	// parent buffer
-	struct _fbuf *buf;
-#if defined(FBUF_DEBUG)
-	unsigned pindex;
-#endif
-
-	buf = sc.fbuf_cir_head;
-	do {
-		MY_ASSERT(buf->on_cir_queue);
-		if (!buf->accessed)
-			break;
-		buf->accessed = false;	// give this buffer a second chance
-		buf = buf->cir_queue.next;
-	} while (buf != sc.fbuf_cir_head);
-	sc.fbuf_cir_head = buf->cir_queue.next;
-
-	LIST_REMOVE(buf, buffer_bucket_queue);
-	fbuf_flush(buf);
-
-	// set buf's parent to NULL
-	pbuf = buf->parent;
-	if (pbuf != NULL) {
-		MY_ASSERT(pbuf->on_cir_queue == false);
-		buf->parent = NULL;
-		if (--pbuf->indir_queue.ref_cnt == 0) {
-			// move it from indirect queue to circular queue
-			LIST_REMOVE(pbuf, indir_queue.entry);
-			fbuf_cir_queue_insert_tail(pbuf);
-			// set @accessed to false so that it will be reclaimed
-			// next time by the second chance algorithm
-			pbuf->accessed = false;
-		}
-#if defined(FBUF_DEBUG)
-		pindex = ma_index_get(buf->ma, buf->ma.depth - 1);
-		pbuf->child[pindex] = NULL;
-#endif
-	}
-	return buf;
-}
-
-/*
-Description:
     Allocate a file buffer, fill it with data at sector address @sa
     and insert it into hash queue with key @ma
 */
@@ -1808,10 +1762,56 @@ fbuf_flush(struct _fbuf *buf)
 
 /*
 Description:
+    Use the second chance algorithm to allocate a file buffer
+*/
+static struct _fbuf *
+fbuf_alloc(void)
+{
+	struct _fbuf *pbuf;	// parent buffer
+	struct _fbuf *buf;
+#if defined(FBUF_DEBUG)
+	unsigned pindex;
+#endif
+
+	buf = sc.fbuf_cir_head;
+	do {
+		MY_ASSERT(buf->on_cir_queue);
+		if (!buf->accessed)
+			break;
+		buf->accessed = false;	// give this buffer a second chance
+		buf = buf->cir_queue.next;
+	} while (buf != sc.fbuf_cir_head);
+	sc.fbuf_cir_head = buf->cir_queue.next;
+
+	LIST_REMOVE(buf, buffer_bucket_queue);
+	fbuf_flush(buf);
+
+	// set buf's parent to NULL
+	pbuf = buf->parent;
+	if (pbuf != NULL) {
+		MY_ASSERT(pbuf->on_cir_queue == false);
+		buf->parent = NULL;
+		if (--pbuf->indir_queue.ref_cnt == 0) {
+			// move it from indirect queue to circular queue
+			LIST_REMOVE(pbuf, indir_queue.entry);
+			fbuf_cir_queue_insert_tail(pbuf);
+			// set @accessed to false so that it will be reclaimed
+			// next time by the second chance algorithm
+			pbuf->accessed = false;
+		}
+#if defined(FBUF_DEBUG)
+		pindex = ma_index_get(buf->ma, buf->ma.depth - 1);
+		pbuf->child[pindex] = NULL;
+#endif
+	}
+	return buf;
+}
+
+/*
+Description:
     Search the file buffer with the tag value of @ma. Return NULL if not found
 */
-static struct
-_fbuf *
+static struct _fbuf *
 fbuf_search(union meta_addr ma)
 {
 	unsigned	hash;	// hash value
