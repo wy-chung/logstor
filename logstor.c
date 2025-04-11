@@ -160,11 +160,14 @@ _Static_assert(offsetof(struct _seg_sum, sega) == SECTOR_SIZE,
 union meta_addr { // metadata address for file data and its indirect blocks
 	uint32_t	uint32;
 	struct {
-		uint32_t index1 :10;	// index for indirect block
-		uint32_t index0 :10;	// index for indirect block
+		uint32_t index1 :10;	// index for indirect block of depth 1
+		uint32_t index0 :10;	// index for indirect block of depth 0
 		uint32_t depth	:2;	// depth of the node
 		uint32_t fd	:2;	// file descriptor
 		uint32_t meta	:8;	// 0xFF for metadata address
+	};
+	struct {
+		uint32_t index :20;	// index for indirect blocks
 	};
 };
 
@@ -263,7 +266,7 @@ static struct g_logstor_softc sc;
 static int _logstor_read(unsigned ba, char *data, int size);
 static int _logstor_read_one(unsigned ba, char *data);
 static int _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum);
-static int _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum, uint32_t *sa_out);
+static int _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum);
 
 static void seg_alloc(struct _seg_sum *seg_sum);
 static void seg_reclaim_init(struct _seg_sum *seg_sum);
@@ -493,7 +496,7 @@ logstor_write(off_t offset, void *data, off_t length)
 	size = length / SECTOR_SIZE;
 
 	if (size == 1) {
-		error = _logstor_write_one(ba, data, &sc.seg_sum_hot, NULL);
+		error = _logstor_write_one(ba, data, &sc.seg_sum_hot);
 	} else {
 		error = _logstor_write(ba, data, size, &sc.seg_sum_hot);
 	}
@@ -543,7 +546,7 @@ int
 logstor_write_test(uint32_t ba, void *data)
 {
 	//wyctest return _logstor_write(ba, data, 1, &sc.seg_sum_hot);
-	return _logstor_write_one(ba, data, &sc.seg_sum_hot, NULL);
+	return _logstor_write_one(ba, data, &sc.seg_sum_hot);
 }
 
 /*
@@ -555,6 +558,7 @@ Parameters:
   @data: data buffer
   @size: size in unit of block
 */
+// called by ggate
 static int
 _logstor_read(unsigned ba, char *data, int size)
 {
@@ -595,27 +599,6 @@ _logstor_read(unsigned ba, char *data, int size)
 	return 0;
 }
 
-static int
-_logstor_read_one(unsigned ba, char *data)
-{
-	uint32_t start_sa;	// sector address
-
-	MY_ASSERT(ba < sc.superblock.max_block_cnt);
-
-	start_sa = file_read_4byte(sc.superblock.fd_cur, ba);
-	if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
-		bzero(data, SECTOR_SIZE);
-	else {
-		my_read(start_sa, data, 1);
-	}
-	// file_read_4byte/file_write_4byte might trigger fbuf_write and
-	// clean check cannot be done in fbuf_write
-	// so need to do a clean check here
-	clean_check();
-
-	return 0;
-}
-
 /*
 Description:
   Write blocks to logstor
@@ -626,6 +609,7 @@ Parameters:
   @size: size in unit of block
 
 */
+// called by ggate
 static int
 _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 {
@@ -670,6 +654,27 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 	return 0;
 }
 
+static int
+_logstor_read_one(unsigned ba, char *data)
+{
+	uint32_t sa;	// sector address
+
+	MY_ASSERT(ba < sc.superblock.max_block_cnt);
+
+	sa = file_read_4byte(sc.superblock.fd_cur, ba);
+	if (sa == SECTOR_NULL || sa == SECTOR_DELETE)
+		bzero(data, SECTOR_SIZE);
+	else {
+		my_read(sa, data, 1);
+	}
+	// file_read_4byte/file_write_4byte might trigger fbuf_write and
+	// clean check cannot be done in fbuf_write
+	// so need to do a clean check here
+	clean_check();
+
+	return 0;
+}
+
 /*
 Note:
   sa_out is not NULL only when called from clean_metadata
@@ -677,7 +682,7 @@ Note:
   write only data block
 */
 static int
-_logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum, uint32_t *sa_out)
+_logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
 {
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 	MY_ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFFSET);
@@ -709,18 +714,13 @@ again:
 		seg_alloc(seg_sum);
 		clean_check();
 	}
-	if (IS_META_ADDR(ba)) {
-		// the forwarding mapping is returned to the caller
-		MY_ASSERT(sa_out != NULL);
-		*sa_out = sa;
-	} else {
+	if (!IS_META_ADDR(ba)) {
 		// record the forward mapping
 		// the forward mapping must be recorded after
 		// the segment summary block write
-		MY_ASSERT(sa_out == NULL);
 		file_write_4byte(sc.superblock.fd_cur, ba, sa);
 	}
-	return 0;
+	return sa;
 #endif
 }
 
@@ -1051,8 +1051,8 @@ clean_metadata(uint32_t cur_sa, union meta_addr cur_ma)
 		buf = fbuf_search(cur_ma);
 		if (buf == NULL) {
 			my_read(cur_sa, sec_buf, 1);
-			_logstor_write_one(cur_ma.uint32, (char *)sec_buf,
-			    &sc.seg_sum_cold, &new_sa);
+			new_sa = _logstor_write_one(cur_ma.uint32,
+			    (char *)sec_buf, &sc.seg_sum_cold);
 			if (cur_ma.depth != 0) {
 				pma = ma2pma(cur_ma, &pindex);
 				pbuf = fbuf_get(pma);
@@ -1080,7 +1080,7 @@ clean_data(uint32_t cur_sa, uint32_t cur_ba)
 	mapped_sa = file_read_4byte(sc.superblock.fd_cur, cur_ba);
 	if (cur_sa == mapped_sa) { // live data
 		my_read(cur_sa, sec_buf, 1);
-		_logstor_write_one(cur_ba, (char *)sec_buf, &sc.seg_sum_cold, NULL);
+		_logstor_write_one(cur_ba, (char *)sec_buf, &sc.seg_sum_cold);
 	}
 }
 
@@ -1447,8 +1447,7 @@ ma2pma(union meta_addr ma, unsigned *pindex_out)
 	{
 	case 1:
 		*pindex_out = ma.index0;
-		ma.index1 = 0;
-		ma.index0 = 0;
+		ma.index = 0;
 		ma.depth = 0; // i.e. ma.depth - 1
 		break;
 	case 2:
