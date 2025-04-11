@@ -87,7 +87,7 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 
 #define FILE_BUCKET_COUNT	4099
 
-#define	FD_CUR	2
+#define	FD_CUR	1
 #define FD_COUNT	4	// max number of metadata files supported
 
 struct _superblock {
@@ -118,6 +118,10 @@ struct _superblock {
 	   The first mapping that is not empty is used.
 	*/
 	uint32_t ftab[FD_COUNT]; 	// file handles table
+	uint8_t fd_cur;
+	uint8_t fd_snap;
+	uint8_t fd_new;
+	uint8_t fd_new_snap;
 	uint8_t sb_seg_age[];	// the starting address to store seg_age in superblock
 };
 
@@ -270,8 +274,8 @@ static void clean_check(void);
 static void clean_metadata(uint32_t cur_sa, union meta_addr cur_ma);
 static void clean_data(uint32_t cur_sa, uint32_t cur_ba);
 
-static int superblock_init_read(void);
-static void superblock_init_write(int fd);
+static void superblock_init(int fd);
+static int  superblock_read(void);
 static void superblock_write(void);
 
 static uint32_t file_read_4byte(uint8_t fh, uint32_t ba);
@@ -366,7 +370,7 @@ void logstor_superblock_init(const char *disk_file)
 
 	disk_fd = open(disk_file, O_WRONLY);
 	MY_ASSERT(disk_fd > 0);
-	superblock_init_write(disk_fd);
+	superblock_init(disk_fd);
 }
 
 void logstor_init(void)
@@ -381,7 +385,7 @@ void logstor_init(void)
 	disk_fd = open(disk_file, O_WRONLY);
 	MY_ASSERT(disk_fd > 0);
 #endif
-	superblock_init_write(disk_fd);
+	superblock_init(disk_fd);
 }
 
 void
@@ -404,7 +408,7 @@ logstor_open(const char *disk_file)
   #endif
 	MY_ASSERT(sc.disk_fd > 0);
 #endif
-	int error __attribute__((unused)) = superblock_init_read();
+	int error __attribute__((unused)) = superblock_read();
 	MY_ASSERT(error == 0);
 	// the order of the two statements below is important
 	seg_alloc(&sc.seg_sum_cold);
@@ -513,10 +517,10 @@ int logstor_delete(off_t offset, void *data, off_t length)
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	if (size == 1) {
-		file_write_4byte(FD_CUR, ba, SECTOR_DELETE);
+		file_write_4byte(sc.superblock.fd_cur, ba, SECTOR_DELETE);
 	} else {
 		for (i = 0; i<size; i++)
-			file_write_4byte(FD_CUR, ba + i, SECTOR_DELETE);
+			file_write_4byte(sc.superblock.fd_cur, ba + i, SECTOR_DELETE);
 	}
 	// file_read_4byte/file_write_4byte might trigger fbuf_write and
 	// clean check cannot be done in fbuf_write
@@ -557,10 +561,10 @@ _logstor_read(unsigned ba, char *data, int size)
 
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
-	start_sa = pre_sa = file_read_4byte(FD_CUR, ba);
+	start_sa = pre_sa = file_read_4byte(sc.superblock.fd_cur, ba);
 	count = 1;
 	for (i = 1; i < size; i++) {
-		sa = file_read_4byte(FD_CUR, ba + i);
+		sa = file_read_4byte(sc.superblock.fd_cur, ba + i);
 		if (sa == pre_sa + 1) {
 			count++;
 			pre_sa = sa;
@@ -596,7 +600,7 @@ _logstor_read_one(unsigned ba, char *data)
 
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
-	start_sa = file_read_4byte(FD_CUR, ba);
+	start_sa = file_read_4byte(sc.superblock.fd_cur, ba);
 	if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
 		bzero(data, SECTOR_SIZE);
 	else {
@@ -655,7 +659,7 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 		// the segment summary block write
 		// lock
 		for (i = 0; i < count; i++)
-			file_write_4byte(FD_CUR, ba++, sa++);
+			file_write_4byte(sc.superblock.fd_cur, ba++, sa++);
 		// unlock
 
 		sec_remain -= count;
@@ -681,10 +685,10 @@ again:
 	for (int i = seg_sum->ss_alloc_p; i < SEG_SUM_OFFSET; ++i)
 	{
 		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
-		uint32_t sa_rev = file_read_4byte(FD_CUR, ba_rev);
+		uint32_t sa_rev = file_read_4byte(sc.superblock.fd_cur, ba_rev);
 		if (sa_rev != seg_sa + i) { // stale block
 			my_write(seg_sa + i, data, 1);
-			file_write_4byte(FD_CUR, ba, seg_sa + i);
+			file_write_4byte(sc.superblock.fd_cur, ba, seg_sa + i);
 			return 0;
 		}
 	}
@@ -712,7 +716,7 @@ again:
 		// the forward mapping must be recorded after
 		// the segment summary block write
 		MY_ASSERT(sa_out == NULL);
-		file_write_4byte(FD_CUR, ba, sa);
+		file_write_4byte(sc.superblock.fd_cur, ba, sa);
 	}
 	return 0;
 #endif
@@ -780,7 +784,7 @@ seg_sum_write(struct _seg_sum *seg_sum)
   to sector 0.
 */
 static int
-superblock_init_read(void)
+superblock_read(void)
 {
 	int	i;
 	uint16_t sb_gen;
@@ -835,7 +839,7 @@ Description:
     Write the initialized supeblock to the downstream disk
 */
 static void
-superblock_init_write(int fd)
+superblock_init(int fd)
 {
 	uint32_t sector_cnt;
 	struct _superblock *sb_out;
@@ -849,12 +853,12 @@ superblock_init_write(int fd)
 	sb_out->sig = SIG_LOGSTOR;
 	sb_out->ver_major = VER_MAJOR;
 	sb_out->ver_minor = VER_MINOR;
-
 #if __BSD_VISIBLE
 	sb_out->sb_gen = arc4random();
 #else
 	sb_out->sb_gen = random();
 #endif	
+	sb_out->fd_cur = FD_CUR;
 	sb_out->seg_cnt = sector_cnt / SECTORS_PER_SEG;
 	if (sizeof(struct _superblock) + sb_out->seg_cnt > SECTOR_SIZE) {
 		printf("%s: size of superblock %d seg_cnt %d\n",
@@ -1071,7 +1075,7 @@ clean_data(uint32_t cur_sa, uint32_t cur_ba)
 	uint32_t mapped_sa;
 	uint32_t sec_buf[SECTOR_SIZE/4];
 
-	mapped_sa = file_read_4byte(FD_CUR, cur_ba);
+	mapped_sa = file_read_4byte(sc.superblock.fd_cur, cur_ba);
 	if (cur_sa == mapped_sa) { // live data
 		my_read(cur_sa, sec_buf, 1);
 		_logstor_write_one(cur_ba, (char *)sec_buf, &sc.seg_sum_cold, NULL);
@@ -1104,7 +1108,7 @@ seg_live_count(struct _seg_sum *seg_sum)
 					live_count++;
 			}
 		} else {
-			mapped_sa = file_read_4byte(FD_CUR, cur_ba); 
+			mapped_sa = file_read_4byte(sc.superblock.fd_cur, cur_ba);
 			if (cur_sa == mapped_sa) // live data
 				live_count++;
 		}
@@ -1896,7 +1900,7 @@ logstor_ba2sa(uint32_t ba)
 	if (IS_META_ADDR(ba))
 		sa = ma2sa((union meta_addr)ba);
 	else {
-		sa = file_read_4byte(FD_CUR, ba);
+		sa = file_read_4byte(sc.superblock.fd_cur, ba);
 	}
 
 	return sa;
