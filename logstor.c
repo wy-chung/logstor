@@ -289,11 +289,10 @@ static void fbuf_mod_init(void);
 static void fbuf_mod_fini(void);
 static void fbuf_mod_flush(void);
 static struct _fbuf *fbuf_get(union meta_addr ma);
-static struct _fbuf *fbuf_read_and_hash(uint32_t sa, union meta_addr ma);
 static struct _fbuf *fbuf_alloc(void);
 static struct _fbuf *fbuf_search(union meta_addr ma);
 static void fbuf_flush(struct _fbuf *buf);
-static void fbuf_hash_insert(struct _fbuf *buf, unsigned key);
+static void fbuf_hash_insert(struct _fbuf *buf);
 
 static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
 static uint32_t ma2sa(union meta_addr ma);
@@ -1440,19 +1439,20 @@ fbuf_mod_init(void)
 	sc.cir_queue_cnt = sc.fbuf_count;
 #endif
 	for (int i = 0; i < sc.fbuf_count; i++) {
+		struct _fbuf *fbuf = &sc.fbuf[i];
 #if defined(FBUF_DEBUG)
-		sc.fbuf[i].index = i;
+		fbuf->index = i;
 #endif
-		sc.fbuf[i].ma.uint32 = META_INVALID;
-		sc.fbuf[i].cir_queue.prev = &sc.fbuf[i-1];
-		sc.fbuf[i].cir_queue.next = &sc.fbuf[i+1];
-		sc.fbuf[i].parent = NULL;
-		sc.fbuf[i].on_cir_queue = true;
-		sc.fbuf[i].accessed = false;
-		sc.fbuf[i].modified = false;
+		fbuf->cir_queue.prev = &sc.fbuf[i-1];
+		fbuf->cir_queue.next = &sc.fbuf[i+1];
+		fbuf->parent = NULL;
+		fbuf->on_cir_queue = true;
+		fbuf->accessed = false;
+		fbuf->modified = false;
 		// to distribute the file buffer to buckets evenly
 		// use @i as the key when the metadata address is META_INVALID
-		fbuf_hash_insert(&sc.fbuf[i], i);
+		fbuf->ma.uint32 = i; // %i is invalid meta address since ma.meta will not be 0xFF
+		fbuf_hash_insert(fbuf);
 	}
 	// fix the circular queue for the first and last buffer
 	sc.fbuf[0].cir_queue.prev = &sc.fbuf[sc.fbuf_count-1];
@@ -1492,12 +1492,12 @@ fbuf_mod_flush(void)
 }
 
 static void
-fbuf_hash_insert(struct _fbuf *buf, unsigned key)
+fbuf_hash_insert(struct _fbuf *buf)
 {
 	unsigned hash;
 	struct _fbuf_bucket *bucket;
 
-	hash = key % FILE_BUCKET_COUNT;
+	hash = buf->ma.uint32 % FILE_BUCKET_COUNT;
 	bucket = &sc.fbuf_bucket[hash];
 	LIST_INSERT_HEAD(bucket, buf, buffer_bucket_queue);
 }
@@ -1615,15 +1615,26 @@ fbuf_get(union meta_addr ma)
 		tma.depth = i;
 		buf = fbuf_search(tma);
 		if (buf == NULL) {
-			buf = fbuf_read_and_hash(sa, tma);
+			buf = fbuf_alloc();	// allocate a fbuf from circular queue
 			buf->parent = pbuf;
 			/*
 			  Theoretically the parent's reference count should be
 			  incremented here. But if imcremented here, the parent
-			  might be reclaimed in the call fbuf_read_and_hash, so
+			  might be reclaimed in the call fbuf_alloc, so
 			  it is actually incremented in the previous loop to
-			  prevent it from being reclaimed by fbuf_read_and_hash.
+			  prevent it from being reclaimed by fbuf_alloc.
 			*/
+			if (sa == SECTOR_NULL)	// the metadata block does not exist
+				bzero(buf->data, sizeof(buf->data));
+			else {
+				my_read(sa, buf->data, 1);
+				//sc.other_write_count++;
+			}
+			buf->ma = tma;
+			fbuf_hash_insert(buf);
+#if defined(MY_DEBUG)
+			buf->sa = sa;
+#endif
 #if defined(FBUF_DEBUG)
 			if (pbuf)
 				pbuf->child[index] = buf;
@@ -1653,7 +1664,7 @@ fbuf_get(union meta_addr ma)
 		}
 		/*
 		  Increment the reference count of this buffer to prevent it
-		  from being reclaimed by the call to function fbuf_read_and_hash.
+		  from being reclaimed by the call to function fbuf_alloc.
 		*/
 		buf->indir_queue.ref_cnt++;
 
@@ -1665,34 +1676,6 @@ fbuf_get(union meta_addr ma)
 #if defined(MY_DEBUG)
 	fbuf_queue_check();
 #endif
-	return buf;
-}
-
-/*
-Description:
-    Allocate a file buffer, fill it with data at sector address @sa
-    and insert it into hash queue with key @ma
-*/
-static struct _fbuf *
-fbuf_read_and_hash(uint32_t sa, union meta_addr ma)
-{
-	struct _fbuf *buf;
-
-	buf = fbuf_alloc();	// allocate a fbuf from circular queue
-
-	if (sa == SECTOR_NULL)	// the metadata block does not exist
-		bzero(buf->data, sizeof(buf->data));
-	else {
-		my_read(sa, buf->data, 1);
-		//sc.other_write_count++;
-	}
-
-	buf->ma = ma;
-	fbuf_hash_insert(buf, ma.uint32);
-#if defined(MY_DEBUG)
-	buf->sa = sa;
-#endif
-
 	return buf;
 }
 

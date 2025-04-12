@@ -47,7 +47,6 @@ static uint32_t *i2ba;	// ba for iteration i
 static uint32_t *ba2i;	// stored value for ba
 static uint8_t *ba_write_count;	// write count for each block
 
-static uint32_t buf[SECTOR_SIZE/4];
 static unsigned loop_count;
 
 static void
@@ -62,6 +61,8 @@ test_write(unsigned max_block)
 	uint64_t start_time = rdtsc();
 	for (unsigned i = 0 ; i < loop_count ; ++i)
 	{
+		uint32_t buf[SECTOR_SIZE/4];
+
 		gdb_cond1 = i;
 		if ( (i % 0x10000) == 0)
 			printf("w %7d/%7d\n", i, loop_count);
@@ -151,6 +152,8 @@ test_read(unsigned max_block)
 	start_time = rdtsc();
 	i_max = 0;
 	for (ba = 0 ; ba < max_block; ba += 1) {
+		uint32_t buf[SECTOR_SIZE/4];
+
 		if ( (ba % 0x10000) == 0)
 			printf("r %7d/%7d\n", ba, max_block);
 		if (ba_write_count[ba] > 0) {
