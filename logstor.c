@@ -76,14 +76,13 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 #define SA2SEGA_SHIFT	10
 #define BLOCKS_PER_SEG	(SEG_SIZE/SECTOR_SIZE - 1)
 
-#define	META_START	0xFF000000u	// metadata block address start
-#define	META_INVALID	0		// invalid metadata address
-
-#define	SECTOR_NULL	0	// this sector address can not map to any block address
-#define SECTOR_DELETE	1	// delete marker for a block
-
+#define	META_START	(((union meta_addr){.meta = 0xFF}).uint32)	// metadata block address start
+#define BLOCK_INVALID	(((union meta_addr){.meta = 0xFF, .depth = 3}).uint32) // depth can never be 3
 #define	IS_META_ADDR(x)	((x) >= META_START)
 #define META_LEAF_DEPTH 2
+
+#define	SECTOR_INVALID	0	// this sector address can not map to any block address
+#define SECTOR_DELETE	1	// delete marker for a block
 
 #define FILE_BUCKET_COUNT	4099
 
@@ -140,7 +139,7 @@ struct _seg_sum {
 
 	// below are not stored on disk
 	uint32_t sega; // the segment address of the segment summary
-	unsigned live_count;		
+	//unsigned live_count;
 	//LIST_ENTRY(_seg_sum) queue;
 };
 
@@ -263,21 +262,21 @@ static char *ram_disk;
 #endif
 static struct g_logstor_softc sc;
 
-static int _logstor_read(unsigned ba, char *data, int size);
+//static int _logstor_read(unsigned ba, char *data, int size);
+//static int _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum);
 static int _logstor_read_one(unsigned ba, char *data);
-static int _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum);
 static int _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum);
 
 static void seg_alloc(struct _seg_sum *seg_sum);
-static void seg_reclaim_init(struct _seg_sum *seg_sum);
 static void seg_sum_write(struct _seg_sum *seg_sum);
-static void seg_clean(struct _seg_sum *seg_sum);
-static void seg_live_count(struct _seg_sum *seg_sum);
-static void clean_check(void);
-static void clean_metadata(uint32_t cur_sa, union meta_addr cur_ma);
-static void clean_data(uint32_t cur_sa, uint32_t cur_ba);
+//static void seg_reclaim_init(struct _seg_sum *seg_sum);
+//static void seg_clean(struct _seg_sum *seg_sum);
+//static void seg_live_count(struct _seg_sum *seg_sum);
+//static void clean_check(void);
+//static void clean_metadata(uint32_t cur_sa, union meta_addr cur_ma);
+//static void clean_data(uint32_t cur_sa, uint32_t cur_ba);
 
-static void superblock_init(int fd);
+static void disk_init(int fd);
 static int  superblock_read(void);
 static void superblock_write(void);
 
@@ -375,7 +374,7 @@ void logstor_superblock_init(const char *disk_file)
 
 	disk_fd = open(disk_file, O_WRONLY);
 	MY_ASSERT(disk_fd > 0);
-	superblock_init(disk_fd);
+	disk_init(disk_fd);
 }
 
 void logstor_init(void)
@@ -390,7 +389,7 @@ void logstor_init(void)
 	disk_fd = open(disk_file, O_WRONLY);
 	MY_ASSERT(disk_fd > 0);
 #endif
-	superblock_init(disk_fd);
+	disk_init(disk_fd);
 }
 
 void
@@ -413,7 +412,9 @@ logstor_open(const char *disk_file)
   #endif
 	MY_ASSERT(sc.disk_fd > 0);
 #endif
-	int error __attribute__((unused)) = superblock_read();
+	int error __attribute__((unused));
+
+	error = superblock_read();
 	MY_ASSERT(error == 0);
 	// the order of the two statements below is important
 	seg_alloc(&sc.seg_sum_cold);
@@ -444,7 +445,7 @@ logstor_close(void)
 	close(sc.disk_fd);
 #endif
 }
-
+#if 0
 /*
 Description:
   Read blocks from logstor
@@ -454,6 +455,7 @@ Parameters:
   @data: data buffer
   @length: data length
 */
+// called by ggate
 int
 logstor_read(off_t offset, void *data, off_t length)
 {
@@ -503,7 +505,7 @@ logstor_write(off_t offset, void *data, off_t length)
 	}
 	return error;
 }
-
+#endif
 // To enable TRIM, the following statement must be added
 // in "case BIO_GETATTR" of g_gate_start() of g_gate.c
 //	if (g_handleattr_int(pbp, "GEOM::candelete", 1))
@@ -531,7 +533,7 @@ int logstor_delete(off_t offset, void *data, off_t length)
 	// file_read_4byte/file_write_4byte might trigger fbuf_write and
 	// clean check cannot be done in fbuf_write
 	// so need to do a clean check here
-	clean_check();
+	//clean_check();
 
 	return (0);
 }
@@ -539,17 +541,15 @@ int logstor_delete(off_t offset, void *data, off_t length)
 int
 logstor_read_test(uint32_t ba, void *data)
 {
-	//wyctest return _logstor_read(ba, data, 1);
 	return _logstor_read_one(ba, data);
 }
 
 int
 logstor_write_test(uint32_t ba, void *data)
 {
-	//wyctest return _logstor_write(ba, data, 1, &sc.seg_sum_hot);
 	return _logstor_write_one(ba, data, &sc.seg_sum_hot);
 }
-
+#if 0
 /*
 Description:
   Read blocks from the logstor
@@ -559,7 +559,7 @@ Parameters:
   @data: data buffer
   @size: size in unit of block
 */
-// called by ggate
+// called indirectly by ggate
 static int
 _logstor_read(unsigned ba, char *data, int size)
 {
@@ -576,7 +576,7 @@ _logstor_read(unsigned ba, char *data, int size)
 			count++;
 			pre_sa = sa;
 		} else {
-			if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
+			if (start_sa == SECTOR_INVALID || start_sa == SECTOR_DELETE)
 				bzero(data, SECTOR_SIZE);
 			else {
 				my_read(start_sa, data, count);
@@ -587,7 +587,7 @@ _logstor_read(unsigned ba, char *data, int size)
 			count = 1;
 		}
 	}
-	if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
+	if (start_sa == SECTOR_INVALID || start_sa == SECTOR_DELETE)
 		bzero(data, SECTOR_SIZE);
 	else {
 		my_read(start_sa, data, count);
@@ -595,7 +595,7 @@ _logstor_read(unsigned ba, char *data, int size)
 	// file_read_4byte/file_write_4byte might trigger fbuf_write and
 	// clean check cannot be done in fbuf_write
 	// so need to do a clean check here
-	clean_check();
+	//clean_check();
 
 	return 0;
 }
@@ -639,7 +639,7 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 		{	// current segment is full
 			seg_sum_write(seg_sum);
 			seg_alloc(seg_sum);
-			clean_check();
+			//clean_check();
 		}
 		// record the forward mapping
 		// the forward mapping must be recorded after
@@ -654,7 +654,7 @@ _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
 
 	return 0;
 }
-
+#endif
 static int
 _logstor_read_one(unsigned ba, char *data)
 {
@@ -663,7 +663,7 @@ _logstor_read_one(unsigned ba, char *data)
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	sa = file_read_4byte(sc.superblock.fd_cur, ba);
-	if (sa == SECTOR_NULL || sa == SECTOR_DELETE)
+	if (sa == SECTOR_INVALID || sa == SECTOR_DELETE)
 		bzero(data, SECTOR_SIZE);
 	else {
 		my_read(sa, data, 1);
@@ -671,9 +671,28 @@ _logstor_read_one(unsigned ba, char *data)
 	// file_read_4byte/file_write_4byte might trigger fbuf_write and
 	// clean check cannot be done in fbuf_write
 	// so need to do a clean check here
-	clean_check();
+	//clean_check();
 
 	return 0;
+}
+
+bool
+is_sec_valid(uint32_t ba, uint32_t sa_exp)
+{
+	uint32_t sa;
+
+	if (ba == BLOCK_INVALID)
+		return false;
+
+	if (IS_META_ADDR(ba)) {
+		sa = ma2sa(ba);
+	} else {
+		sa = file_read_4byte(sc.superblock.fd_cur, ba);
+	}
+	if (sa == sa_exp)
+		return true;
+
+	return false;
 }
 
 /*
@@ -687,19 +706,18 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
 {
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 	MY_ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFFSET);
-#if 0
-again:
+#if 1
 	uint32_t seg_sa = sega2sa(seg_sum->sega);
 	for (int i = seg_sum->ss_alloc_p; i < SEG_SUM_OFFSET; ++i)
 	{
 		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
-		uint32_t sa_rev = file_read_4byte(sc.superblock.fd_cur, ba_rev);
-		if (sa_rev != seg_sa + i) { // stale block
-			my_write(seg_sa + i, data, 1);
-			file_write_4byte(sc.superblock.fd_cur, ba, seg_sa + i);
-			return 0;
-		}
+		if (is_sec_valid(seg_sa + i, ba_rev))
+			continue;
+		my_write(seg_sa + i, data, 1);
+		file_write_4byte(sc.superblock.fd_cur, ba, seg_sa + i);
+		return 0;
 	}
+	//seg_sa = 
 #else
 	uint32_t sa;	// sector address
 	sa = sega2sa(seg_sum->sega) + seg_sum->ss_alloc_p;
@@ -713,7 +731,7 @@ again:
 	{	// current segment is full
 		seg_sum_write(seg_sum);
 		seg_alloc(seg_sum);
-		clean_check();
+		//clean_check();
 	}
 	if (!IS_META_ADDR(ba)) {
 		// record the forward mapping
@@ -754,7 +772,7 @@ logstor_get_fbuf_miss(void)
 {
 	return sc.fbuf_miss;
 }
-
+#if 0
 static void
 seg_sum_read(struct _seg_sum *seg_sum, uint32_t sega)
 {
@@ -764,7 +782,7 @@ seg_sum_read(struct _seg_sum *seg_sum, uint32_t sega)
 	sa = sega2sa(sega) + SEG_SUM_OFFSET;
 	my_read(sa, seg_sum, 1);
 }
-
+#endif
 /*
   write out the segment summary
 */
@@ -785,7 +803,7 @@ Description:
     Write the initialized supeblock to the downstream disk
 */
 static void
-superblock_init(int fd)
+disk_init(int fd)
 {
 	uint32_t sector_cnt;
 	struct _superblock *sb_out;
@@ -829,7 +847,7 @@ superblock_init(int fd)
 #endif
 	// the root sector address for the files
 	for (int i = 0; i < FD_COUNT; i++) {
-		sb_out->ftab[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
+		sb_out->ftab[i] = SECTOR_INVALID;	// SECTOR_INVALID means not allocated yet
 	}
 	sb_out->sega_alloc = SEG_DATA_START;	// start allocate from here
 	sb_out->sega_reclaim = SEG_DATA_START + 1;	// start reclaim from here
@@ -1000,7 +1018,7 @@ again:
 	    sc.superblock.seg_free_cnt < sc.superblock.seg_cnt);
 	
 }
-
+#if 0
 /*
 Description:
   This function does the following things:
@@ -1033,11 +1051,12 @@ again:
 	seg_live_count(seg_sum);
 	return;
 }
-
+#endif
 /********************
 * segment cleaning  *
 *********************/
 
+#if 0
 static void
 clean_metadata(uint32_t cur_sa, union meta_addr cur_ma)
 {
@@ -1142,7 +1161,6 @@ seg_clean(struct _seg_sum *seg_sum)
 	sc.superblock.seg_free_cnt++;
 }
 
-#if 1
 static void
 cleaner(void)
 {
@@ -1160,53 +1178,6 @@ cleaner(void)
 	} while (sc.superblock.seg_free_cnt < sc.clean_high_water);
 	//NOTE: need to flush the metadata to disk before erase the reclaimed segments
 }
-#else
-static void
-cleaner(void)
-{
-	struct _seg_sum *seg, *seg_to_clean;
-	unsigned live_count_min;
-	int	i;
-
-//printf("\n%s >>>\n", __func__);
-	do {
-		LIST_INIT(&sc.cc_head);
-		for (i = 0; i < CLEAN_WINDOW; i++) {
-			seg = &sc.clean_candidate[i];
-			seg_reclaim_init(seg);
-			LIST_INSERT_HEAD(&sc.cc_head, seg, queue);
-		}
-		for (i = 0; i < CLEAN_WINDOW; i++) {
-			// find the segment with min live sectors and clean it
-			live_count_min = -1; // the maximum unsigned integer
-			LIST_FOREACH(seg, &sc.cc_head, queue) {
-				if (sc.seg_age[seg->sega] > CLEAN_AGE_LIMIT) {
-					// force to clean this segment
-					seg_to_clean = seg;
-					break;
-				}
-				if (seg->live_count < live_count_min) {
-					live_count_min = seg->live_count;
-					seg_to_clean = seg;
-				}
-			}
-			seg_clean(seg_to_clean);
-
-			// get the next segment and place it at the end of the queue
-			seg_reclaim_init(seg_to_clean);
-			LIST_REMOVE(seg_to_clean, queue);
-			LIST_INSERT_HEAD(&sc.cc_head, seg_to_clean, queue);
-		}
-		LIST_FOREACH(seg, &sc.cc_head, queue) {
-			if (seg->live_count < (SECTORS_PER_SEG - 1) * 0.96)
-				seg_clean(seg);
-			else
-				sc.seg_age[seg->sega]++;
-		}
-	} while (sc.superblock.seg_free_cnt < sc.clean_high_water);
-//printf("%s <<<\n", __func__);
-}
-#endif
 
 static inline void
 cleaner_enable(void)
@@ -1231,6 +1202,7 @@ clean_check(void)
 		cleaner_enable(); // enable gargabe collection
 	} 
 }
+#endif
 
 /*********************************************************
  * The file buffer and indirect block cache              *
@@ -1387,9 +1359,9 @@ ma2pma(union meta_addr ma, unsigned *pindex_out)
 static uint32_t
 ma2sa(union meta_addr ma)
 {
-	struct _fbuf *pbuf;
-	unsigned pindex;	//index in the parent indirect block
+	struct _fbuf *pbuf;	// parent buffer
 	union meta_addr pma;	// parent's metadata address
+	unsigned pindex;	// index in the parent indirect block
 	uint32_t sa;
 
 	switch (ma.depth)
@@ -1628,7 +1600,7 @@ fbuf_get(union meta_addr ma)
 			  it is actually incremented in the previous loop to
 			  prevent it from being reclaimed by fbuf_alloc.
 			*/
-			if (sa == SECTOR_NULL)	// the metadata block does not exist
+			if (sa == SECTOR_INVALID)	// the metadata block does not exist
 				bzero(buf->data, sizeof(buf->data));
 			else {
 				my_read(sa, buf->data, 1);
@@ -1908,7 +1880,7 @@ logstor_check(void)
 	max_block = logstor_get_block_cnt();
 	for (ba = 0; ba < max_block; ba++) {
 		sa = logstor_ba2sa(ba);
-		if (sa != SECTOR_NULL) {
+		if (sa != SECTOR_INVALID) {
 			ba_exp = logstor_sa2ba(sa);
 			if (ba_exp != ba) {
 				if (sa < sa_min)
