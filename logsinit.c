@@ -29,7 +29,7 @@ main_logsinit(int argc, char *argv[])
 	else
 		disk_file = DISK_FILE;
 
-	logstor_superblock_init(disk_file);
+	logstor_disk_init(disk_file);
 
 	return 0;
 }

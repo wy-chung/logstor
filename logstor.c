@@ -81,13 +81,14 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 #define	IS_META_ADDR(x)	((x) >= META_START)
 #define META_LEAF_DEPTH 2
 
-#define	SECTOR_INVALID	0	// this sector address can not map to any block address
+#define	SECTOR_NULL	0	// this sector address can not map to any block address
 #define SECTOR_DELETE	1	// delete marker for a block
 
 #define FILE_BUCKET_COUNT	4099
 
 #define	FD_CUR	1
 #define FD_COUNT	4	// max number of metadata files supported
+#define FD_INVALID	-1
 
 struct _superblock {
 	uint32_t	sig;		// signature
@@ -368,7 +369,7 @@ sega2sa(uint32_t sega)
 
 // called by ggate or logsinit when disk is a file
 // not used when disk is a ram disk
-void logstor_superblock_init(const char *disk_file)
+void logstor_disk_init(const char *disk_file)
 {
 	int disk_fd;
 
@@ -576,7 +577,7 @@ _logstor_read(unsigned ba, char *data, int size)
 			count++;
 			pre_sa = sa;
 		} else {
-			if (start_sa == SECTOR_INVALID || start_sa == SECTOR_DELETE)
+			if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
 				bzero(data, SECTOR_SIZE);
 			else {
 				my_read(start_sa, data, count);
@@ -587,7 +588,7 @@ _logstor_read(unsigned ba, char *data, int size)
 			count = 1;
 		}
 	}
-	if (start_sa == SECTOR_INVALID || start_sa == SECTOR_DELETE)
+	if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
 		bzero(data, SECTOR_SIZE);
 	else {
 		my_read(start_sa, data, count);
@@ -663,7 +664,7 @@ _logstor_read_one(unsigned ba, char *data)
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	sa = file_read_4byte(sc.superblock.fd_cur, ba);
-	if (sa == SECTOR_INVALID || sa == SECTOR_DELETE)
+	if (sa == SECTOR_NULL || sa == SECTOR_DELETE)
 		bzero(data, SECTOR_SIZE);
 	else {
 		my_read(sa, data, 1);
@@ -676,7 +677,7 @@ _logstor_read_one(unsigned ba, char *data)
 	return 0;
 }
 
-bool
+static bool
 is_sec_valid(uint32_t ba, uint32_t sa_exp)
 {
 	uint32_t sa;
@@ -685,7 +686,7 @@ is_sec_valid(uint32_t ba, uint32_t sa_exp)
 		return false;
 
 	if (IS_META_ADDR(ba)) {
-		sa = ma2sa(ba);
+		sa = ma2sa((union meta_addr)ba);
 	} else {
 		sa = file_read_4byte(sc.superblock.fd_cur, ba);
 	}
@@ -823,6 +824,9 @@ disk_init(int fd)
 	sb_out->sb_gen = random();
 #endif	
 	sb_out->fd_cur = FD_CUR;
+	sb_out->fd_snap = FD_INVALID;
+	sb_out->fd_new = FD_INVALID;
+	sb_out->fd_new_snap = FD_INVALID;
 	sb_out->seg_cnt = sector_cnt / SECTORS_PER_SEG;
 	if (sizeof(struct _superblock) + sb_out->seg_cnt > SECTOR_SIZE) {
 		printf("%s: size of superblock %d seg_cnt %d\n",
@@ -847,7 +851,7 @@ disk_init(int fd)
 #endif
 	// the root sector address for the files
 	for (int i = 0; i < FD_COUNT; i++) {
-		sb_out->ftab[i] = SECTOR_INVALID;	// SECTOR_INVALID means not allocated yet
+		sb_out->ftab[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
 	}
 	sb_out->sega_alloc = SEG_DATA_START;	// start allocate from here
 	sb_out->sega_reclaim = SEG_DATA_START + 1;	// start reclaim from here
@@ -868,6 +872,15 @@ disk_init(int fd)
 #else
 		MY_ASSERT(pwrite(fd, buf, SECTOR_SIZE, i * SECTOR_SIZE) == SECTOR_SIZE);
 #endif
+	}
+	// initialize all segment summary blocks
+	struct _seg_sum ss;
+	for (int i = 0; i < SECTORS_PER_SEG - 1; ++i)
+		ss.ss_rm[i] = BLOCK_INVALID;
+	ss.ss_alloc_p = 0;
+	for (int i = SEG_DATA_START; i < sb_out->seg_cnt; ++i)
+	{
+		my_write(sega2sa(i) + SEG_SUM_OFFSET, &ss, 1);
 	}
 }
 
@@ -1600,7 +1613,7 @@ fbuf_get(union meta_addr ma)
 			  it is actually incremented in the previous loop to
 			  prevent it from being reclaimed by fbuf_alloc.
 			*/
-			if (sa == SECTOR_INVALID)	// the metadata block does not exist
+			if (sa == SECTOR_NULL)	// the metadata block does not exist
 				bzero(buf->data, sizeof(buf->data));
 			else {
 				my_read(sa, buf->data, 1);
@@ -1880,7 +1893,7 @@ logstor_check(void)
 	max_block = logstor_get_block_cnt();
 	for (ba = 0; ba < max_block; ba++) {
 		sa = logstor_ba2sa(ba);
-		if (sa != SECTOR_INVALID) {
+		if (sa != SECTOR_NULL) {
 			ba_exp = logstor_sa2ba(sa);
 			if (ba_exp != ba) {
 				if (sa < sa_min)

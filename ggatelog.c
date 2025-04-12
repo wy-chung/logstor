@@ -356,7 +356,7 @@ main_ggate(int argc, char *argv[])
 		g_gate_list(log_unit, g_gate_verbose);
 		break;
 	case LOG_INIT:
-		logstor_superblock_init(log_path);
+		logstor_disk_init(log_path);
 		break;
 	case LOG_UNSET:
 	default:
