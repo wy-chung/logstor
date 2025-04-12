@@ -689,7 +689,7 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
 	MY_ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFFSET);
 #if 0
 again:
-	uint32_t seg_sa = sega2sa(seg_sum->sega) + seg_sum->ss_alloc_p;
+	uint32_t seg_sa = sega2sa(seg_sum->sega);
 	for (int i = seg_sum->ss_alloc_p; i < SEG_SUM_OFFSET; ++i)
 	{
 		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
