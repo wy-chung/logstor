@@ -483,6 +483,7 @@ Parameters:
   @data: data buffer
   @length: data length
 */
+// called by ggate
 int
 logstor_write(off_t offset, void *data, off_t length)
 {
@@ -1450,8 +1451,9 @@ fbuf_mod_init(void)
 		fbuf->accessed = false;
 		fbuf->modified = false;
 		// to distribute the file buffer to buckets evenly
-		// use @i as the key when the metadata address is META_INVALID
-		fbuf->ma.uint32 = i; // %i is invalid meta address since ma.meta will not be 0xFF
+		// use %i as the key
+		// %i is invalid meta address since ma.meta is not 0xFF
+		fbuf->ma.uint32 = i;
 		fbuf_hash_insert(fbuf);
 	}
 	// fix the circular queue for the first and last buffer
@@ -1616,6 +1618,8 @@ fbuf_get(union meta_addr ma)
 		buf = fbuf_search(tma);
 		if (buf == NULL) {
 			buf = fbuf_alloc();	// allocate a fbuf from circular queue
+			buf->ma = tma;
+			fbuf_hash_insert(buf);
 			buf->parent = pbuf;
 			/*
 			  Theoretically the parent's reference count should be
@@ -1630,8 +1634,6 @@ fbuf_get(union meta_addr ma)
 				my_read(sa, buf->data, 1);
 				//sc.other_write_count++;
 			}
-			buf->ma = tma;
-			fbuf_hash_insert(buf);
 #if defined(MY_DEBUG)
 			buf->sa = sa;
 #endif
@@ -1752,9 +1754,6 @@ fbuf_alloc(void)
 {
 	struct _fbuf *pbuf;	// parent buffer
 	struct _fbuf *buf;
-#if defined(FBUF_DEBUG)
-	unsigned pindex;
-#endif
 
 	buf = sc.fbuf_cir_head;
 	do {
@@ -1783,7 +1782,7 @@ fbuf_alloc(void)
 			pbuf->accessed = false;
 		}
 #if defined(FBUF_DEBUG)
-		pindex = ma_index_get(buf->ma, buf->ma.depth - 1);
+		unsigned pindex = ma_index_get(buf->ma, buf->ma.depth - 1);
 		pbuf->child[pindex] = NULL;
 #endif
 	}
