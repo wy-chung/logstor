@@ -20,7 +20,7 @@ e-mail: wy-chung@outlook.com
 /**************************************
  *           Test function            *
  **************************************/
-#if 1
+#if 0
 	#define	RAND_SEED	time(NULL)
 #else
 	#define	RAND_SEED	0

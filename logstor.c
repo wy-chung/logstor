@@ -59,11 +59,7 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 
 #define __predict_true(exp)     __builtin_expect((exp), 1)
 #define __predict_false(exp)    __builtin_expect((exp), 0)
-
-#define MAX_FBUF_COUNT  4096
-//#define MAX_FBUF_COUNT  500 //wyctest
-#define CLEAN_AGE_LIMIT	3
-//#define CLEAN_WINDOW	4
+#define __unused		__attribute__((unused))
 
 #define	SIG_LOGSTOR	0x4C4F4753	// "LOGS": Log-Structured Storage
 #define	VER_MAJOR	0
@@ -76,19 +72,22 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 #define SA2SEGA_SHIFT	10
 #define BLOCKS_PER_SEG	(SEG_SIZE/SECTOR_SIZE - 1)
 
-#define	META_START	(((union meta_addr){.meta = 0xFF}).uint32)	// metadata block address start
 #define BLOCK_INVALID	(((union meta_addr){.meta = 0xFF, .depth = 3}).uint32) // depth can never be 3
+#define META_INVALID	((union meta_addr){.uint32 = 0})
+#define	META_START	(((union meta_addr){.meta = 0xFF}).uint32)	// metadata block address start
 #define	IS_META_ADDR(x)	((x) >= META_START)
 #define META_LEAF_DEPTH 2
 
 #define	SECTOR_NULL	0	// this sector address can not map to any block address
 #define SECTOR_DELETE	1	// delete marker for a block
 
-#define FILE_BUCKET_COUNT	4099
+//#define FBUF_MAX	500
+#define FBUF_MAX	512
+#define FBUF_BUCKETS	509
 
 #define	FD_CUR	1
 #define FD_COUNT	4	// max number of metadata files supported
-#define FD_INVALID	-1
+#define FD_INVALID	-1	// invalid file
 
 struct _superblock {
 	uint32_t	sig;		// signature
@@ -100,9 +99,7 @@ struct _superblock {
 	   The segments are treated as circular buffer
 	 */
 	int32_t	seg_cnt;	// total number of segments
-	int32_t seg_free_cnt;	// number of free segments
 	int32_t	sega_alloc;	// allocate this segment
-	int32_t	sega_reclaim;	// clean this segment
 	/*
 	   The files for forward mapping file
 
@@ -118,11 +115,10 @@ struct _superblock {
 	   The first mapping that is not empty is used.
 	*/
 	uint32_t ftab[FD_COUNT]; 	// file handles table
-	uint8_t fd_cur;
-	uint8_t fd_snap;
-	uint8_t fd_new;
-	uint8_t fd_new_snap;
-	uint8_t sb_seg_age[];	// the starting address to store seg_age in superblock
+	uint8_t fd_cur;		// the file descriptor for current mapping
+	uint8_t fd_snap;	// the file descriptor for snapshot mapping
+	uint8_t fd_new;		// the file descriptor for new current mapping
+	uint8_t fd_new_snap;	// the file descriptor for new snapshot mapping
 };
 
 #if !defined(WYC)
@@ -136,7 +132,7 @@ struct _seg_sum {
 	uint32_t ss_rm[SECTORS_PER_SEG - 1];	// reverse map
 	// reverse map SECTORS_PER_SEG - 1 is not used so we store something here
 	uint16_t ss_gen;  // sequence number. used for redo after system crash
-	uint16_t ss_alloc_p; // allocate sector at this location
+	uint16_t ss_alloc; // allocate sector at this location
 
 	// below are not stored on disk
 	uint32_t sega; // the segment address of the segment summary
@@ -177,7 +173,20 @@ _Static_assert(sizeof(union meta_addr) == 4, "The size of emta_addr must be 4");
   Metadata is cached in memory. The access unit of metadata is block so each cache line
   stores a block of metadata
 */
+struct _fbuf_sential {
+	union meta_addr	ma;	// the metadata address
+	struct {
+		struct _fbuf *next;
+		struct _fbuf *prev;
+	} cir_queue; // list entry for the circular queue
+	bool accessed;	// only used for fbufs on circular queue
+	bool modified;	// the fbuf is dirty
+	bool on_cir_queue;	// on circular queue
+	bool on_free_queue;
+};
+
 struct _fbuf { // file buffer
+	union meta_addr	ma;	// the metadata address
 	union {
 		struct {
 			LIST_ENTRY(_fbuf) entry; // for the indirect queue
@@ -187,14 +196,16 @@ struct _fbuf { // file buffer
 			struct _fbuf *next;
 			struct _fbuf *prev;
 		} cir_queue; // list entry for the circular queue
+		TAILQ_ENTRY(_fbuf) free_queue;
 	};
-	bool on_cir_queue;	// on circular queue
 	bool accessed;	// only used for fbufs on circular queue
 	bool modified;	// the fbuf is dirty
+	bool on_cir_queue;	// on circular queue
+	bool on_free_queue;
+
 	LIST_ENTRY(_fbuf)	buffer_bucket_queue;// the pointer for bucket chain
 	struct _fbuf	*parent;
 
-	union meta_addr	ma;	// the metadata address
 	// the metadata is cached here
 	uint32_t	data[SECTOR_SIZE/sizeof(uint32_t)];
 #if defined(MY_DEBUG)
@@ -210,27 +221,23 @@ struct _fbuf { // file buffer
 	logstor soft control
 */
 struct g_logstor_softc {
-	struct _seg_sum seg_sum_cold;// segment summary for the cold segment
-	struct _seg_sum seg_sum_hot;// segment summary for the hot segment
+	struct _seg_sum seg_sum;// segment summary for the hot segment
 	
-	//struct _seg_sum clean_candidate[CLEAN_WINDOW];
-	//LIST_HEAD(, _seg_sum) cc_head; // clean candidate
-	unsigned char cleaner_disabled;
-	uint32_t clean_low_water;
-	uint32_t clean_high_water;
-	
-	struct _fbuf *fbuf;
 	int fbuf_count;
+	struct _fbuf *fbuf;
+	struct _fbuf *fbuf_cir_head;	// head of the circular queue
+	struct _fbuf_sential fbuf_cir_sential;	// head of the circular queue
 #if 0 // the accessed, modified and flag bits should be moved out of struct _fbuf
 	unsigned *fbuf_accessed;
 	unsigned *fbuf_modified;
 	unsigned *fbuf_on_cir_queue;
 #endif	
 	// buffer hash queue
-	LIST_HEAD(_fbuf_bucket, _fbuf)	fbuf_bucket[FILE_BUCKET_COUNT];
+	LIST_HEAD(_fbuf_bucket, _fbuf)	fbuf_bucket[FBUF_BUCKETS];
 	
-	struct _fbuf *fbuf_cir_head;	// head of the circular queue
 	LIST_HEAD(, _fbuf) fbuf_ind_head[META_LEAF_DEPTH]; // indirect queue
+	TAILQ_HEAD(, _fbuf) fbuf_free_head;
+	uint32_t	fbuf_free_cnt;
 	
 #if defined(MY_DEBUG)
 	int cir_queue_cnt;
@@ -251,7 +258,6 @@ struct g_logstor_softc {
 #if !defined(RAM_DISK_SIZE)
 	int disk_fd;
 #endif
-	uint8_t *seg_age;
 	struct _superblock superblock;
 };
 
@@ -263,19 +269,11 @@ static char *ram_disk;
 #endif
 static struct g_logstor_softc sc;
 
-//static int _logstor_read(unsigned ba, char *data, int size);
-//static int _logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum);
 static int _logstor_read_one(unsigned ba, char *data);
 static int _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum);
 
-static void seg_alloc(struct _seg_sum *seg_sum);
-static void seg_sum_write(struct _seg_sum *seg_sum);
-//static void seg_reclaim_init(struct _seg_sum *seg_sum);
-//static void seg_clean(struct _seg_sum *seg_sum);
-//static void seg_live_count(struct _seg_sum *seg_sum);
-//static void clean_check(void);
-//static void clean_metadata(uint32_t cur_sa, union meta_addr cur_ma);
-//static void clean_data(uint32_t cur_sa, uint32_t cur_ba);
+static void seg_alloc(void);
+static void seg_sum_write(void);
 
 static void disk_init(int fd);
 static int  superblock_read(void);
@@ -293,6 +291,9 @@ static struct _fbuf *fbuf_alloc(void);
 static struct _fbuf *fbuf_search(union meta_addr ma);
 static void fbuf_flush(struct _fbuf *buf);
 static void fbuf_hash_insert(struct _fbuf *buf);
+static void fbuf_write(struct _fbuf *buf);
+static void fbuf_cir_queue_remove(struct _fbuf *buf);
+static void fbuf_cir_queue_insert(struct _fbuf *buf);
 
 static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
 static uint32_t ma2sa(union meta_addr ma);
@@ -413,20 +414,16 @@ logstor_open(const char *disk_file)
   #endif
 	MY_ASSERT(sc.disk_fd > 0);
 #endif
-	int error __attribute__((unused));
+	int error __unused;
 
 	error = superblock_read();
 	MY_ASSERT(error == 0);
 	// the order of the two statements below is important
-	seg_alloc(&sc.seg_sum_cold);
-	seg_alloc(&sc.seg_sum_hot);
+	seg_alloc();
 
 	sc.data_write_count = sc.other_write_count = 0;
-	sc.clean_low_water = 8;
-	sc.clean_high_water = sc.clean_low_water + 4;
 
 	fbuf_mod_init();
-	//clean_check();
 
 	return 0;
 }
@@ -437,76 +434,14 @@ logstor_close(void)
 
 	fbuf_mod_fini();
 
-	seg_sum_write(&sc.seg_sum_cold);
-	seg_sum_write(&sc.seg_sum_hot);
+	seg_sum_write();
 
 	superblock_write();
 #if !defined(RAM_DISK_SIZE)
-	free(sc.seg_age);
 	close(sc.disk_fd);
 #endif
 }
-#if 0
-/*
-Description:
-  Read blocks from logstor
 
-Parameters:
-  @offset: disk offset
-  @data: data buffer
-  @length: data length
-*/
-// called by ggate
-int
-logstor_read(off_t offset, void *data, off_t length)
-{
-	unsigned size;
-	uint32_t ba;
-	int error;
-
-	MY_ASSERT((offset & (SECTOR_SIZE - 1)) == 0);
-	MY_ASSERT((length & (SECTOR_SIZE - 1)) == 0);
-	ba = offset / SECTOR_SIZE;
-	size = length / SECTOR_SIZE;
-
-	if (size == 1) {
-		error = _logstor_read_one(ba, data);
-	} else {
-		error = _logstor_read(ba, data, size);
-	}
-	return error;
-}
-
-/*
-Description:
-  Write blocks to logstor
-
-Parameters:
-  @offset: disk offset
-  @data: data buffer
-  @length: data length
-*/
-// called by ggate
-int
-logstor_write(off_t offset, void *data, off_t length)
-{
-	uint32_t ba;	// block address
-	int size;	// number of remaining sectors to process
-	int error;
-
-	MY_ASSERT((offset & (SECTOR_SIZE - 1)) == 0);
-	MY_ASSERT((length & (SECTOR_SIZE - 1)) == 0);
-	ba = offset / SECTOR_SIZE;
-	size = length / SECTOR_SIZE;
-
-	if (size == 1) {
-		error = _logstor_write_one(ba, data, &sc.seg_sum_hot);
-	} else {
-		error = _logstor_write(ba, data, size, &sc.seg_sum_hot);
-	}
-	return error;
-}
-#endif
 // To enable TRIM, the following statement must be added
 // in "case BIO_GETATTR" of g_gate_start() of g_gate.c
 //	if (g_handleattr_int(pbp, "GEOM::candelete", 1))
@@ -531,131 +466,66 @@ int logstor_delete(off_t offset, void *data, off_t length)
 		for (i = 0; i<size; i++)
 			file_write_4byte(sc.superblock.fd_cur, ba + i, SECTOR_DELETE);
 	}
-	// file_read_4byte/file_write_4byte might trigger fbuf_write and
-	// clean check cannot be done in fbuf_write
-	// so need to do a clean check here
-	//clean_check();
 
 	return (0);
+}
+
+struct _fbuf *
+fbuf_get_replacement(void)
+{
+	struct _fbuf *buf;
+
+again:
+	buf = sc.fbuf_cir_head;
+	do {
+		MY_ASSERT(buf->on_cir_queue);
+		if (!buf->accessed)
+			break;
+		buf->accessed = false;	// give this buffer a second chance
+		buf = buf->cir_queue.next;
+	} while (buf != sc.fbuf_cir_head);
+
+	if ((struct _fbuf_sential *)buf == &sc.fbuf_cir_sential) {
+		buf = buf->cir_queue.next;
+		goto again;
+	}
+	sc.fbuf_cir_head = buf->cir_queue.next;
+
+	return buf;
+}
+
+static void
+check_free_queue(void)
+{
+	struct _fbuf *buf;
+
+	while (sc.fbuf_free_cnt < 4) {
+		buf = fbuf_get_replacement();
+		if (buf->modified) {
+			fbuf_write(buf);
+		}
+		fbuf_cir_queue_remove(buf);
+		TAILQ_INSERT_TAIL(&sc.fbuf_free_head, buf, free_queue);
+		sc.fbuf_free_cnt++;
+	}
 }
 
 int
 logstor_read_test(uint32_t ba, void *data)
 {
-	return _logstor_read_one(ba, data);
+	_logstor_read_one(ba, data);
+	check_free_queue();
+	return 0;
 }
 
 int
 logstor_write_test(uint32_t ba, void *data)
 {
-	return _logstor_write_one(ba, data, &sc.seg_sum_hot);
-}
-#if 0
-/*
-Description:
-  Read blocks from the logstor
-
-Parameters:
-  @ba: block address
-  @data: data buffer
-  @size: size in unit of block
-*/
-// called indirectly by ggate
-static int
-_logstor_read(unsigned ba, char *data, int size)
-{
-	unsigned i, count;
-	uint32_t start_sa, pre_sa, sa;	// sector address
-
-	MY_ASSERT(ba < sc.superblock.max_block_cnt);
-
-	start_sa = pre_sa = file_read_4byte(sc.superblock.fd_cur, ba);
-	count = 1;
-	for (i = 1; i < size; i++) {
-		sa = file_read_4byte(sc.superblock.fd_cur, ba + i);
-		if (sa == pre_sa + 1) {
-			count++;
-			pre_sa = sa;
-		} else {
-			if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
-				bzero(data, SECTOR_SIZE);
-			else {
-				my_read(start_sa, data, count);
-			}
-			// set the values for the next write
-			data += count * SECTOR_SIZE;
-			start_sa = pre_sa = sa;
-			count = 1;
-		}
-	}
-	if (start_sa == SECTOR_NULL || start_sa == SECTOR_DELETE)
-		bzero(data, SECTOR_SIZE);
-	else {
-		my_read(start_sa, data, count);
-	}
-	// file_read_4byte/file_write_4byte might trigger fbuf_write and
-	// clean check cannot be done in fbuf_write
-	// so need to do a clean check here
-	//clean_check();
-
+	_logstor_write_one(ba, data, &sc.seg_sum);
+	check_free_queue();
 	return 0;
 }
 
-/*
-Description:
-  Write blocks to logstor
-
-Parameters:
-  @ba: block address
-  @data: data buffer
-  @size: size in unit of block
-
-*/
-// called by ggate
-static int
-_logstor_write(uint32_t ba, char *data, int size, struct _seg_sum *seg_sum)
-{
-	uint32_t sa;	// sector address
-	int sec_remain;	// number of remaining sectors to process
-	int sec_free;	// number of free sectors in current segment
-	int i, count;
-
-	MY_ASSERT(ba < sc.superblock.max_block_cnt);
-	MY_ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFFSET);
-
-	sec_remain = size;
-	while (sec_remain > 0) {
-		sec_free = SEG_SUM_OFFSET - seg_sum->ss_alloc_p;
-		count = sec_remain <= sec_free? sec_remain: sec_free; // min(sec_remain, sec_free)
-		sa = sega2sa(seg_sum->sega) + seg_sum->ss_alloc_p;
-		MY_ASSERT(sa + count < sc.superblock.seg_cnt * SECTORS_PER_SEG);
-		my_write(sa, data, count);
-		data += count * SECTOR_SIZE;
-
-		// record the reverse mapping immediately after the data have been written
-		for (i = 0; i < count; i++)
-			seg_sum->ss_rm[seg_sum->ss_alloc_p++] = ba + i;
-
-		if (seg_sum->ss_alloc_p == SEG_SUM_OFFSET)
-		{	// current segment is full
-			seg_sum_write(seg_sum);
-			seg_alloc(seg_sum);
-			//clean_check();
-		}
-		// record the forward mapping
-		// the forward mapping must be recorded after
-		// the segment summary block write
-		// lock
-		for (i = 0; i < count; i++)
-			file_write_4byte(sc.superblock.fd_cur, ba++, sa++);
-		// unlock
-
-		sec_remain -= count;
-	}
-
-	return 0;
-}
-#endif
 static int
 _logstor_read_one(unsigned ba, char *data)
 {
@@ -669,70 +539,84 @@ _logstor_read_one(unsigned ba, char *data)
 	else {
 		my_read(sa, data, 1);
 	}
-	// file_read_4byte/file_write_4byte might trigger fbuf_write and
-	// clean check cannot be done in fbuf_write
-	// so need to do a clean check here
-	//clean_check();
-
 	return 0;
 }
 
+// is a sector with a reverse ba valid?
 static bool
-is_sec_valid(uint32_t ba, uint32_t sa_exp)
+is_sec_valid(uint32_t sa, uint32_t ba_rev)
 {
-	uint32_t sa;
+	uint32_t sa_rev; // the sector address for ba_rev
 
-	if (ba == BLOCK_INVALID)
-		return false;
-
-	if (IS_META_ADDR(ba)) {
-		sa = ma2sa((union meta_addr)ba);
+	if (IS_META_ADDR(ba_rev)) {
+		sa_rev = ma2sa((union meta_addr)ba_rev);
 	} else {
-		sa = file_read_4byte(sc.superblock.fd_cur, ba);
+		sa_rev = file_read_4byte(sc.superblock.fd_cur, ba_rev);
 	}
-	if (sa == sa_exp)
+	if (sa == sa_rev)
 		return true;
 
 	return false;
 }
 
 /*
-Note:
-  sa_out is not NULL only when called from clean_metadata
+Description:
+  write one data block
 
-  write only data block
+Return:
+  the sector address where the data is written
 */
 static int
 _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
 {
-	MY_ASSERT(ba < sc.superblock.max_block_cnt);
-	MY_ASSERT(seg_sum->ss_alloc_p < SEG_SUM_OFFSET);
+	static uint8_t recursive;
+
+	MY_BREAK(++recursive >= 3);
+	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.max_block_cnt);
+	MY_ASSERT(seg_sum->ss_alloc < SEG_SUM_OFFSET);
 #if 1
+again:
 	uint32_t seg_sa = sega2sa(seg_sum->sega);
-	for (int i = seg_sum->ss_alloc_p; i < SEG_SUM_OFFSET; ++i)
+	for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
 	{
-		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
-		if (is_sec_valid(seg_sa + i, ba_rev))
+		uint32_t ba_rev; // ba from the reverse map
+		uint32_t sa = seg_sa + i;
+
+		ba_rev = seg_sum->ss_rm[i];
+		if (is_sec_valid(sa, ba_rev))
 			continue;
-		my_write(seg_sa + i, data, 1);
-		file_write_4byte(sc.superblock.fd_cur, ba, seg_sa + i);
-		return 0;
+		my_write(sa, data, 1);
+		seg_sum->ss_rm[i] = ba; // record reverse mapping
+		seg_sum->ss_alloc = i + 1;
+		if (seg_sum->ss_alloc == SEG_SUM_OFFSET) {
+			seg_sum_write();
+			seg_alloc();
+		}
+		if (!IS_META_ADDR(ba)) {
+			// record the forward mapping
+			// the forward mapping must be recorded after
+			// the segment summary block write
+			file_write_4byte(sc.superblock.fd_cur, ba, sa);
+		}
+		--recursive;
+		return sa;
 	}
-	//seg_sa = 
+	// no free sector in current segment
+	seg_alloc();
+	goto again;
 #else
 	uint32_t sa;	// sector address
-	sa = sega2sa(seg_sum->sega) + seg_sum->ss_alloc_p;
+	sa = sega2sa(seg_sum->sega) + seg_sum->ss_alloc;
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	my_write(sa, data, 1);
 
 	// record the reverse mapping
-	seg_sum->ss_rm[seg_sum->ss_alloc_p++] = ba;
+	seg_sum->ss_rm[seg_sum->ss_alloc++] = ba;
 
-	if (seg_sum->ss_alloc_p == SEG_SUM_OFFSET)
+	if (seg_sum->ss_alloc == SEG_SUM_OFFSET)
 	{	// current segment is full
 		seg_sum_write(seg_sum);
 		seg_alloc(seg_sum);
-		//clean_check();
 	}
 	if (!IS_META_ADDR(ba)) {
 		// record the forward mapping
@@ -806,6 +690,7 @@ Description:
 static void
 disk_init(int fd)
 {
+	int32_t seg_free_cnt;
 	uint32_t sector_cnt;
 	struct _superblock *sb_out;
 	off_t media_size;
@@ -835,14 +720,14 @@ disk_init(int fd)
 		    (SECTOR_SIZE - sizeof(struct _superblock)) * (long long)SEG_SIZE);
 		MY_PANIC();
 	}
-	sb_out->seg_free_cnt = sb_out->seg_cnt - SEG_DATA_START;
+	seg_free_cnt = sb_out->seg_cnt - SEG_DATA_START;
 
 	// the physical disk must have at least the space for the metadata
-	MY_ASSERT(sb_out->seg_free_cnt * BLOCKS_PER_SEG >
+	MY_ASSERT(seg_free_cnt * BLOCKS_PER_SEG >
 	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT);
 
 	sb_out->max_block_cnt =
-	    sb_out->seg_free_cnt * BLOCKS_PER_SEG -
+	    seg_free_cnt * BLOCKS_PER_SEG -
 	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT;
 	sb_out->max_block_cnt *= 0.9;
 #if defined(MY_DEBUG)
@@ -854,8 +739,6 @@ disk_init(int fd)
 		sb_out->ftab[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
 	}
 	sb_out->sega_alloc = SEG_DATA_START;	// start allocate from here
-	sb_out->sega_reclaim = SEG_DATA_START + 1;	// start reclaim from here
-	bzero(sb_out->sb_seg_age, SECTOR_SIZE - sizeof(struct _superblock));
 
 	// write out super block
 #if defined(RAM_DISK_SIZE)
@@ -873,11 +756,11 @@ disk_init(int fd)
 		MY_ASSERT(pwrite(fd, buf, SECTOR_SIZE, i * SECTOR_SIZE) == SECTOR_SIZE);
 #endif
 	}
-	// initialize all segment summary blocks
 	struct _seg_sum ss;
 	for (int i = 0; i < SECTORS_PER_SEG - 1; ++i)
 		ss.ss_rm[i] = BLOCK_INVALID;
-	ss.ss_alloc_p = 0;
+	ss.ss_alloc = 0;
+	// initialize all segment summary blocks
 	for (int i = SEG_DATA_START; i < sb_out->seg_cnt; ++i)
 	{
 		my_write(sega2sa(i) + SEG_SUM_OFFSET, &ss, 1);
@@ -908,8 +791,7 @@ superblock_read(void)
 	MY_ASSERT(pread(sc.disk_fd, sb_in, SECTOR_SIZE, 0) == SECTOR_SIZE);
 #endif
 	if (sb_in->sig != SIG_LOGSTOR ||
-	    sb_in->sega_alloc >= sb_in->seg_cnt ||
-	    sb_in->sega_reclaim >= sb_in->seg_cnt)
+	    sb_in->sega_alloc >= sb_in->seg_cnt)
 		return EINVAL;
 
 	sb_gen = sb_in->sb_gen;
@@ -928,13 +810,9 @@ superblock_read(void)
 	}
 	sc.sb_sa = (i - 1);
 	sb_in = (struct _superblock *)buf[(i-1)%2];
-	if (sb_in->sega_alloc >= sb_in->seg_cnt ||
-	    sb_in->sega_reclaim >= sb_in->seg_cnt)
+	if (sb_in->sega_alloc >= sb_in->seg_cnt)
 		return EINVAL;
 
-	sc.seg_age = malloc(sb_in->seg_cnt);
-	MY_ASSERT(sc.seg_age != NULL);
-	memcpy(sc.seg_age, sb_in->sb_seg_age, sb_in->seg_cnt);
 	memcpy(&sc.superblock, sb_in, sizeof(sc.superblock));
 	sc.sb_modified = false;
 
@@ -952,7 +830,6 @@ superblock_write(void)
 		sc.sb_sa = 0;
 	sb_out = (struct _superblock *)buf;
 	memcpy(sb_out, &sc.superblock, sizeof(sc.superblock));
-	memcpy(sb_out->sb_seg_age, sc.seg_age, sb_out->seg_cnt);
 	
 	my_write(sc.sb_sa, sb_out, 1);
 	sc.other_write_count++;
@@ -1003,219 +880,18 @@ Output:
   Initialize @seg_sum->sum.alloc_p to 0
 */
 static void
-seg_alloc(struct _seg_sum *seg_sum)
+seg_alloc(void)
 {
 	uint32_t sega;
-#if defined(MY_DEBUG)
-	uint32_t sega_cold = sc.seg_sum_cold.sega;
-	uint32_t sega_hot = sc.seg_sum_hot.sega;
-#endif
-again:
+
 	sega = sc.superblock.sega_alloc;
 	if (++sc.superblock.sega_alloc == sc.superblock.seg_cnt)
 		sc.superblock.sega_alloc = SEG_DATA_START;
 	MY_ASSERT(sc.superblock.sega_alloc < sc.superblock.seg_cnt);
-	MY_ASSERT(sc.superblock.sega_alloc + 1 != sc.superblock.sega_reclaim);
-	MY_ASSERT(sega != sega_hot);
-
-	if (sc.seg_age[sega] != 0)	// this segment is not free
-		goto again;
-
-	MY_ASSERT(sega != sega_cold);
-	sc.seg_age[sega] = 1;	
-	seg_sum->sega = sega;
-	seg_sum->ss_alloc_p = 0;
-
-	sc.superblock.seg_free_cnt--;
-	MY_ASSERT(sc.superblock.seg_free_cnt > 0 &&
-	    sc.superblock.seg_free_cnt < sc.superblock.seg_cnt);
-	
+	my_read(sega2sa(sega), &sc.seg_sum, 1);
+	sc.seg_sum.sega = sega;
+	sc.seg_sum.ss_alloc = 0;
 }
-#if 0
-/*
-Description:
-  This function does the following things:
-  1. Get the segment address of the segment to reclaim
-  2. Read the contents of the segment summary of the reclaimed segment
-  3. Count the live blocks in this segment
-*/
-static void
-seg_reclaim_init(struct _seg_sum *seg_sum)
-{
-	uint32_t sega;
-	uint32_t sega_cold;
-	uint32_t sega_hot __attribute__((unused));
-
-	sega_cold = sc.seg_sum_cold.sega;
-	sega_hot = sc.seg_sum_hot.sega;
-again:
-	sega = sc.superblock.sega_reclaim;
-	if (++sc.superblock.sega_reclaim == sc.superblock.seg_cnt)
-		sc.superblock.sega_reclaim = SEG_DATA_START;
-	MY_ASSERT(sc.superblock.sega_reclaim < sc.superblock.seg_cnt);
-	MY_ASSERT(sega != sega_hot);
-#if 0
-	MY_ASSERT(sega != sega_cold);
-#else
-	if (sega == sega_cold)
-		goto again;
-#endif
-	seg_sum_read(seg_sum, sega);
-	seg_live_count(seg_sum);
-	return;
-}
-#endif
-/********************
-* segment cleaning  *
-*********************/
-
-#if 0
-static void
-clean_metadata(uint32_t cur_sa, union meta_addr cur_ma)
-{
-	struct _fbuf *buf, *pbuf;
-	unsigned pindex;
-	uint32_t mapped_sa, new_sa;
-	union meta_addr pma;
-	uint32_t sec_buf[SECTOR_SIZE/4];
-
-	mapped_sa = ma2sa(cur_ma);
-	if (cur_sa == mapped_sa) { // metadata might be live
-		buf = fbuf_search(cur_ma);
-		if (buf == NULL) {
-			my_read(cur_sa, sec_buf, 1);
-			new_sa = _logstor_write_one(cur_ma.uint32,
-			    (char *)sec_buf, &sc.seg_sum_cold);
-			if (cur_ma.depth != 0) {
-				pma = ma2pma(cur_ma, &pindex);
-				pbuf = fbuf_get(pma);
-				pbuf->data[pindex] = new_sa;
-				if (!pbuf->modified) {
-					pbuf->modified = true;
-				}
-			} else {
-				sc.superblock.ftab[cur_ma.fd] = new_sa;
-				sc.sb_modified = true;
-			}
-		} else if (__predict_false(!buf->modified)) {
-			// set modified to true so it will eventually be written out
-			buf->modified = true;
-		}
-	}
-}
-
-static void
-clean_data(uint32_t cur_sa, uint32_t cur_ba)
-{
-	uint32_t mapped_sa;
-	uint32_t sec_buf[SECTOR_SIZE/4];
-
-	mapped_sa = file_read_4byte(sc.superblock.fd_cur, cur_ba);
-	if (cur_sa == mapped_sa) { // live data
-		my_read(cur_sa, sec_buf, 1);
-		_logstor_write_one(cur_ba, (char *)sec_buf, &sc.seg_sum_cold);
-	}
-}
-
-/*
-  Input:  seg_sum->seg_sa, segment's sector address
-  Output: seg_sum->live_count
-*/
-static void
-seg_live_count(struct _seg_sum *seg_sum)
-{
-	uint32_t cur_ba;
-	uint32_t cur_sa, mapped_sa;
-	uint32_t seg_sa;
-	unsigned live_count = 0;
-	struct _fbuf *buf;
-
-	seg_sa = sega2sa(seg_sum->sega);
-	for (int i = 0; i < seg_sum->ss_alloc_p; i++)
-	{
-		cur_sa = seg_sa + i;
-		cur_ba = seg_sum->ss_rm[i];	// get the block address from reverse map
-		if (IS_META_ADDR(cur_ba)) {
-			mapped_sa = ma2sa((union meta_addr)cur_ba); 
-			if (cur_sa == mapped_sa) { // metadata might be live
-				buf = fbuf_search((union meta_addr)cur_ba);
-				if (buf == NULL)
-					live_count++;
-			}
-		} else {
-			mapped_sa = file_read_4byte(sc.superblock.fd_cur, cur_ba);
-			if (cur_sa == mapped_sa) // live data
-				live_count++;
-		}
-	}
-	seg_sum->live_count = live_count;
-}
-
-static void
-seg_clean(struct _seg_sum *seg_sum)
-{
-	uint32_t seg_sa;	// the sector address of the cleaning segment
-	uint32_t cur_sa, cur_ba;
-	uint32_t sega;
-	int	i;
-
-	seg_sa = sega2sa(seg_sum->sega);
-	for (i = 0; i < seg_sum->ss_alloc_p; i++) {
-		cur_sa = seg_sa + i;
-		cur_ba = seg_sum->ss_rm[i];	// get the block address from reverse map
-		if (IS_META_ADDR(cur_ba)) {
-			clean_metadata(cur_sa, (union meta_addr)cur_ba);
-		} else {
-			clean_data(cur_sa, cur_ba);
-		}
-	}
-	sega = seg_sum->sega;
-	sc.seg_age[sega] = 0; // It's cleaned
-	sc.superblock.seg_free_cnt++;
-}
-
-static void
-cleaner(void)
-{
-	struct _seg_sum seg;
-
-	do {
-		seg_reclaim_init(&seg);
-		if (seg.live_count < (SECTORS_PER_SEG - 1) * 0.95)
-			seg_clean(&seg);
-		else if (sc.seg_age[seg.sega] > CLEAN_AGE_LIMIT)
-			// For wearleveling, if it is old enough clean it.
-			seg_clean(&seg);
-		else
-			sc.seg_age[seg.sega]++;
-	} while (sc.superblock.seg_free_cnt < sc.clean_high_water);
-	//NOTE: need to flush the metadata to disk before erase the reclaimed segments
-}
-
-static inline void
-cleaner_enable(void)
-{
-	MY_ASSERT(sc.cleaner_disabled != 0);
-	sc.cleaner_disabled--;
-}
-
-static inline void
-cleaner_disable(void)
-{
-	MY_ASSERT(sc.cleaner_disabled <= 2);
-	sc.cleaner_disabled++;
-}
-
-static void
-clean_check(void)
-{
-	if (sc.superblock.seg_free_cnt <= sc.clean_low_water && !sc.cleaner_disabled) {
-		cleaner_disable();	// disable gargabe collection
-		cleaner();
-		cleaner_enable(); // enable gargabe collection
-	} 
-}
-#endif
 
 /*********************************************************
  * The file buffer and indirect block cache              *
@@ -1239,6 +915,8 @@ file_read_4byte(uint8_t fd, uint32_t ba)
 	struct _fbuf *buf;
 	uint32_t offset;	// the offset within the file buffer data
 
+	if (((union meta_addr)ba).depth == 3) // invalid block address
+		return SECTOR_NULL;
 	MY_ASSERT(ba < META_START);
 	buf = file_access_4byte(fd, ba, &offset, false);
 	return *((uint32_t *)((uint8_t *)buf->data + offset));
@@ -1388,9 +1066,8 @@ ma2sa(union meta_addr ma)
 		pbuf = fbuf_get(pma);
 		sa = pbuf->data[pindex];
 		break;
-	default:
-		MY_PANIC();
-		sa = 0;
+	case 3: // it is an invalid block/metadata address
+		sa = SECTOR_NULL;
 		break;
 	}
 	return sa;
@@ -1405,13 +1082,13 @@ fbuf_mod_init(void)
 
 	sc.fbuf_hit = sc.fbuf_miss = 0;
 	sc.fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4);
-	if (sc.fbuf_count > MAX_FBUF_COUNT)
-		sc.fbuf_count = MAX_FBUF_COUNT;
+	if (sc.fbuf_count > FBUF_MAX)
+		sc.fbuf_count = FBUF_MAX;
 	size_t fbuf_size = sizeof(*sc.fbuf) * sc.fbuf_count;
 	sc.fbuf = malloc(fbuf_size);
 	MY_ASSERT(sc.fbuf != NULL);
 
-	for (int i = 0; i < FILE_BUCKET_COUNT; i++)
+	for (int i = 0; i < FBUF_BUCKETS; i++)
 		LIST_INIT(&sc.fbuf_bucket[i]);
 #if 0
 	sc.fbuf_accessed = malloc(sc.fbuf_count/8);
@@ -1424,27 +1101,27 @@ fbuf_mod_init(void)
 #if defined(MY_DEBUG)
 	sc.cir_queue_cnt = sc.fbuf_count;
 #endif
+	TAILQ_INIT(&sc.fbuf_free_head);
 	for (int i = 0; i < sc.fbuf_count; i++) {
 		struct _fbuf *fbuf = &sc.fbuf[i];
 #if defined(FBUF_DEBUG)
 		fbuf->index = i;
 #endif
-		fbuf->cir_queue.prev = &sc.fbuf[i-1];
-		fbuf->cir_queue.next = &sc.fbuf[i+1];
 		fbuf->parent = NULL;
-		fbuf->on_cir_queue = true;
+		TAILQ_INSERT_TAIL(&sc.fbuf_free_head, &fbuf[i], free_queue);
+		fbuf->on_free_queue = true;
+		fbuf->on_cir_queue = false;
 		fbuf->accessed = false;
 		fbuf->modified = false;
-		// to distribute the file buffer to buckets evenly
-		// use %i as the key
-		// %i is invalid meta address since ma.meta is not 0xFF
-		fbuf->ma.uint32 = i;
-		fbuf_hash_insert(fbuf);
 	}
-	// fix the circular queue for the first and last buffer
-	sc.fbuf[0].cir_queue.prev = &sc.fbuf[sc.fbuf_count-1];
-	sc.fbuf[sc.fbuf_count-1].cir_queue.next = &sc.fbuf[0];
-	sc.fbuf_cir_head = &sc.fbuf[0]; // point to the circular queue
+	sc.fbuf_free_cnt = sc.fbuf_count;
+	sc.fbuf_cir_sential.ma = META_INVALID;
+	sc.fbuf_cir_sential.cir_queue.next = (struct _fbuf *)&sc.fbuf_cir_sential;
+	sc.fbuf_cir_sential.cir_queue.prev = (struct _fbuf *)&sc.fbuf_cir_sential;
+	sc.fbuf_cir_sential.accessed = false;
+	sc.fbuf_cir_sential.modified = false;
+	sc.fbuf_cir_sential.on_cir_queue = true;
+	sc.fbuf_cir_head = (struct _fbuf *)&sc.fbuf_cir_sential;
 
 	for (int i = 0; i < META_LEAF_DEPTH; i++)
 		LIST_INIT(&sc.fbuf_ind_head[i]); // point to active indirect blocks with depth i
@@ -1463,12 +1140,12 @@ fbuf_mod_flush(void)
 	struct _fbuf	*buf;
 	int	i;
 
-	buf = sc.fbuf_cir_head;
-	do {
+	buf = sc.fbuf_cir_head->cir_queue.next;
+	while (buf != (struct _fbuf *)&sc.fbuf_cir_head) {
 		MY_ASSERT(buf->on_cir_queue);
 		fbuf_flush(buf);
 		buf = buf->cir_queue.next;
-	} while (buf != sc.fbuf_cir_head);
+	}
 
 	// process active indirect blocks
 	for (i = META_LEAF_DEPTH - 1; i >= 0; i--)
@@ -1484,7 +1161,7 @@ fbuf_hash_insert(struct _fbuf *buf)
 	unsigned hash;
 	struct _fbuf_bucket *bucket;
 
-	hash = buf->ma.uint32 % FILE_BUCKET_COUNT;
+	hash = buf->ma.uint32 % FBUF_BUCKETS;
 	bucket = &sc.fbuf_bucket[hash];
 	LIST_INSERT_HEAD(bucket, buf, buffer_bucket_queue);
 }
@@ -1494,23 +1171,21 @@ static void
 fbuf_queue_check(void)
 {
 	struct _fbuf *buf;
-	unsigned i;
 	unsigned total, indir_cnt[META_LEAF_DEPTH];
 
-	buf = sc.fbuf_cir_head;
-	MY_ASSERT(buf != NULL);
+	buf = sc.fbuf_cir_head->cir_queue.next;
 	total = 0;
-	do  {
+	while (buf != (struct _fbuf *)&sc.fbuf_cir_head) {
 		++total;
 		MY_ASSERT(total <= sc.fbuf_count);
 		MY_ASSERT(buf->on_cir_queue);
 		buf = buf->cir_queue.next;
-	} while (buf != sc.fbuf_cir_head);
+	}
 
-	for (i = 0; i < META_LEAF_DEPTH; i++)
+	for (int i = 0; i < META_LEAF_DEPTH; i++)
 		indir_cnt[i] = 0;
 
-	for (i = 0; i < META_LEAF_DEPTH ; ++i) {
+	for (int i = 0; i < META_LEAF_DEPTH ; ++i) {
 		buf = LIST_FIRST(&sc.fbuf_ind_head[i]);
 		while (buf != NULL) {
 			++indir_cnt[0];
@@ -1521,10 +1196,10 @@ fbuf_queue_check(void)
 		}
 	}
 
-	for (i = 0; i < META_LEAF_DEPTH; i++)
+	for (int i = 0; i < META_LEAF_DEPTH; i++)
 		total += indir_cnt[i];
 	
-	MY_ASSERT(total == sc.fbuf_count);
+	MY_ASSERT(total + sc.fbuf_free_cnt == sc.fbuf_count);
 }
 #endif
 
@@ -1532,13 +1207,13 @@ fbuf_queue_check(void)
     Circular queue insert before
 */
 static void
-fbuf_cir_queue_insert_tail(struct _fbuf *buf)
+fbuf_cir_queue_insert(struct _fbuf *buf)
 {
 	struct _fbuf *prev;
 
 	prev = sc.fbuf_cir_head->cir_queue.prev;
 	sc.fbuf_cir_head->cir_queue.prev = buf;
-	buf->cir_queue.next = sc.fbuf_cir_head;
+	buf->cir_queue.next = (struct _fbuf *)&sc.fbuf_cir_head;
 	buf->cir_queue.prev = prev;
 	prev->cir_queue.next = buf;
 	buf->on_cir_queue = true;
@@ -1557,11 +1232,9 @@ fbuf_cir_queue_remove(struct _fbuf *buf)
 	struct _fbuf *prev;
 	struct _fbuf *next;
 
+	MY_ASSERT(buf != (struct _fbuf *)&sc.fbuf_cir_sential);
 	MY_ASSERT(buf->on_cir_queue);
-	MY_ASSERT(sc.fbuf_cir_head->cir_queue.next != sc.fbuf_cir_head);
-	MY_ASSERT(sc.fbuf_cir_head->cir_queue.prev != sc.fbuf_cir_head);
-	if (buf == sc.fbuf_cir_head)
-		sc.fbuf_cir_head = sc.fbuf_cir_head->cir_queue.next;
+	MY_ASSERT(buf->ma.uint32 != META_INVALID.uint32);
 	prev = buf->cir_queue.prev;
 	next = buf->cir_queue.next;
 	prev->cir_queue.next = next;
@@ -1602,7 +1275,8 @@ fbuf_get(union meta_addr ma)
 		tma.depth = i;
 		buf = fbuf_search(tma);
 		if (buf == NULL) {
-			buf = fbuf_alloc();	// allocate a fbuf from circular queue
+			buf = fbuf_alloc();	// allocate a fbuf from free queue
+			fbuf_cir_queue_insert(buf);
 			buf->ma = tma;
 			fbuf_hash_insert(buf);
 			buf->parent = pbuf;
@@ -1672,14 +1346,9 @@ fbuf_write(struct _fbuf *buf)
 	struct _fbuf *pbuf;	// buffer parent
 	unsigned pindex;	// the index in parent indirect block
 	uint32_t sa;		// sector address
-	struct _seg_sum *seg_hot = &sc.seg_sum_hot;
+	struct _seg_sum *seg_hot = &sc.seg_sum;
 
-	// get the sector address where the block will be written
-	MY_ASSERT(seg_hot->ss_alloc_p < SEG_SUM_OFFSET);
-	sa = sega2sa(seg_hot->sega) + seg_hot->ss_alloc_p;
-	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG - 1);
-
-	my_write(sa, buf->data, 1);
+	sa = _logstor_write_one(buf->ma.uint32, (char *)buf->data, seg_hot);
 #if defined(MY_DEBUG)
 	buf->sa = sa;
 #endif
@@ -1693,7 +1362,7 @@ fbuf_write(struct _fbuf *buf)
 		MY_ASSERT(pbuf->ma.depth == buf->ma.depth - 1);
 		pindex = ma_index_get(buf->ma, buf->ma.depth - 1);
 		pbuf->data[pindex] = sa;
-		if (!pbuf->modified) {
+		if (__predict_false(!pbuf->modified)) {
 			pbuf->modified = true;
 		}
 	} else {
@@ -1705,12 +1374,11 @@ fbuf_write(struct _fbuf *buf)
 	}
 
 	// store the reverse mapping in segment summary
-	seg_hot->ss_rm[seg_hot->ss_alloc_p++] = buf->ma.uint32;
+	seg_hot->ss_rm[seg_hot->ss_alloc++] = buf->ma.uint32;
 
-	if (seg_hot->ss_alloc_p == SEG_SUM_OFFSET) { // current segment is full
+	if (seg_hot->ss_alloc == SEG_SUM_OFFSET) { // current segment is full
 		seg_sum_write(seg_hot);
-		seg_alloc(seg_hot);
-		// Cannot do clean_check() here. It will cause recursive call.
+		seg_alloc();
 	}
 }
 
@@ -1737,41 +1405,13 @@ Description:
 static struct _fbuf *
 fbuf_alloc(void)
 {
-	struct _fbuf *pbuf;	// parent buffer
-	struct _fbuf *buf;
+	struct _fbuf *fbuf;
 
-	buf = sc.fbuf_cir_head;
-	do {
-		MY_ASSERT(buf->on_cir_queue);
-		if (!buf->accessed)
-			break;
-		buf->accessed = false;	// give this buffer a second chance
-		buf = buf->cir_queue.next;
-	} while (buf != sc.fbuf_cir_head);
-	sc.fbuf_cir_head = buf->cir_queue.next;
-
-	LIST_REMOVE(buf, buffer_bucket_queue);
-	fbuf_flush(buf);
-
-	// set buf's parent to NULL
-	pbuf = buf->parent;
-	if (pbuf != NULL) {
-		MY_ASSERT(pbuf->on_cir_queue == false);
-		buf->parent = NULL;
-		if (--pbuf->indir_queue.ref_cnt == 0) {
-			// move it from indirect queue to circular queue
-			LIST_REMOVE(pbuf, indir_queue.entry);
-			fbuf_cir_queue_insert_tail(pbuf);
-			// set @accessed to false so that it will be reclaimed
-			// next time by the second chance algorithm
-			pbuf->accessed = false;
-		}
-#if defined(FBUF_DEBUG)
-		unsigned pindex = ma_index_get(buf->ma, buf->ma.depth - 1);
-		pbuf->child[pindex] = NULL;
-#endif
-	}
-	return buf;
+	fbuf = TAILQ_FIRST(&sc.fbuf_free_head);
+	MY_ASSERT(fbuf != NULL);
+	TAILQ_REMOVE(&sc.fbuf_free_head, fbuf, free_queue);
+	sc.fbuf_free_cnt--;
+	return fbuf;
 }
 
 /*
@@ -1785,7 +1425,7 @@ fbuf_search(union meta_addr ma)
 	struct _fbuf_bucket	*bucket;
 	struct _fbuf	*buf;
 
-	hash = ma.uint32 % FILE_BUCKET_COUNT;
+	hash = ma.uint32 % FBUF_BUCKETS;
 	bucket = &sc.fbuf_bucket[hash];
 	LIST_FOREACH(buf, bucket, buffer_bucket_queue) {
 		if (buf->ma.uint32 == ma.uint32) { // cache hit
@@ -1828,11 +1468,11 @@ fbuf_mod_dump(void)
 			fbuf_dump(buf, fh);
 		}
 	}
-	buf = sc.fbuf_cir_head;
-	do {
+	buf = sc.fbuf_cir_head->cir_queue.next;
+	while (buf != (struct _fbuf *)&sc.fbuf_cir_head) {
 		fbuf_dump(buf, fh);
 		buf = buf->cir_queue.next;
-	} while (buf != sc.fbuf_cir_head);
+	}
 
 	fclose(fh);
 }
@@ -1887,8 +1527,8 @@ logstor_check(void)
 
 	printf("%s ...\n", __func__);
 	fbuf_mod_flush();
-	if (sc.seg_sum_hot.ss_alloc_p != 0)
-		seg_sum_write(&sc.seg_sum_hot);
+	if (sc.seg_sum.ss_alloc != 0)
+		seg_sum_write(&sc.seg_sum);
 	sa_min = -1;
 	max_block = logstor_get_block_cnt();
 	for (ba = 0; ba < max_block; ba++) {
