@@ -182,7 +182,7 @@ struct _fbuf_sential {
 	bool accessed;	// only used for fbufs on circular queue
 	bool modified;	// the fbuf is dirty
 	bool on_cir_queue;	// on circular queue
-	bool on_free_queue;
+	bool sential;	// circular queue sential head
 };
 
 struct _fbuf { // file buffer
@@ -201,6 +201,7 @@ struct _fbuf { // file buffer
 	bool accessed;	// only used for fbufs on circular queue
 	bool modified;	// the fbuf is dirty
 	bool on_cir_queue;	// on circular queue
+	bool sential;	// circular queue sential head
 	bool on_free_queue;
 
 	LIST_ENTRY(_fbuf)	buffer_bucket_queue;// the pointer for bucket chain
@@ -418,9 +419,7 @@ logstor_open(const char *disk_file)
 
 	error = superblock_read();
 	MY_ASSERT(error == 0);
-	// the order of the two statements below is important
-	seg_alloc();
-
+	my_read(sega2sa(sc.superblock.sega_alloc), &sc.seg_sum, 1);
 	sc.data_write_count = sc.other_write_count = 0;
 
 	fbuf_mod_init();
@@ -574,7 +573,6 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
 	MY_BREAK(++recursive >= 3);
 	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.max_block_cnt);
 	MY_ASSERT(seg_sum->ss_alloc < SEG_SUM_OFFSET);
-#if 1
 again:
 	uint32_t seg_sa = sega2sa(seg_sum->sega);
 	for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
@@ -604,28 +602,6 @@ again:
 	// no free sector in current segment
 	seg_alloc();
 	goto again;
-#else
-	uint32_t sa;	// sector address
-	sa = sega2sa(seg_sum->sega) + seg_sum->ss_alloc;
-	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
-	my_write(sa, data, 1);
-
-	// record the reverse mapping
-	seg_sum->ss_rm[seg_sum->ss_alloc++] = ba;
-
-	if (seg_sum->ss_alloc == SEG_SUM_OFFSET)
-	{	// current segment is full
-		seg_sum_write(seg_sum);
-		seg_alloc(seg_sum);
-	}
-	if (!IS_META_ADDR(ba)) {
-		// record the forward mapping
-		// the forward mapping must be recorded after
-		// the segment summary block write
-		file_write_4byte(sc.superblock.fd_cur, ba, sa);
-	}
-	return sa;
-#endif
 }
 
 uint32_t
@@ -672,14 +648,14 @@ seg_sum_read(struct _seg_sum *seg_sum, uint32_t sega)
   write out the segment summary
 */
 static void
-seg_sum_write(struct _seg_sum *seg_sum)
+seg_sum_write(void)
 {
 	uint32_t sa;
 
 	// segment summary is at the end of a segment
-	sa = sega2sa(seg_sum->sega) + SEG_SUM_OFFSET;
-	seg_sum->ss_gen = sc.superblock.sb_gen;
-	my_write(sa, (void *)seg_sum, 1);
+	sa = sega2sa(sc.seg_sum.sega) + SEG_SUM_OFFSET;
+	sc.seg_sum.ss_gen = sc.superblock.sb_gen;
+	my_write(sa, (void *)&sc.seg_sum, 1);
 	sc.other_write_count++; // the write for the segment summary
 }
 
@@ -690,7 +666,7 @@ Description:
 static void
 disk_init(int fd)
 {
-	int32_t seg_free_cnt;
+	int32_t seg_cnt;
 	uint32_t sector_cnt;
 	struct _superblock *sb_out;
 	off_t media_size;
@@ -720,14 +696,14 @@ disk_init(int fd)
 		    (SECTOR_SIZE - sizeof(struct _superblock)) * (long long)SEG_SIZE);
 		MY_PANIC();
 	}
-	seg_free_cnt = sb_out->seg_cnt - SEG_DATA_START;
+	seg_cnt = sb_out->seg_cnt;
 
 	// the physical disk must have at least the space for the metadata
-	MY_ASSERT(seg_free_cnt * BLOCKS_PER_SEG >
+	MY_ASSERT((seg_cnt - SEG_DATA_START) * BLOCKS_PER_SEG >
 	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT);
 
 	sb_out->max_block_cnt =
-	    seg_free_cnt * BLOCKS_PER_SEG -
+	    (seg_cnt  - SEG_DATA_START) * BLOCKS_PER_SEG -
 	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT;
 	sb_out->max_block_cnt *= 0.9;
 #if defined(MY_DEBUG)
@@ -760,10 +736,11 @@ disk_init(int fd)
 	for (int i = 0; i < SECTORS_PER_SEG - 1; ++i)
 		ss.ss_rm[i] = BLOCK_INVALID;
 	ss.ss_alloc = 0;
+	sc.superblock.seg_cnt = seg_cnt; // to silence the assert fail in my_write
 	// initialize all segment summary blocks
-	for (int i = SEG_DATA_START; i < sb_out->seg_cnt; ++i)
-	{
-		my_write(sega2sa(i) + SEG_SUM_OFFSET, &ss, 1);
+	for (int i = SEG_DATA_START; i < seg_cnt; ++i)
+	{	uint32_t sa = sega2sa(i) + SEG_SUM_OFFSET;
+		my_write(sa, &ss, 1);
 	}
 }
 
@@ -888,7 +865,7 @@ seg_alloc(void)
 	if (++sc.superblock.sega_alloc == sc.superblock.seg_cnt)
 		sc.superblock.sega_alloc = SEG_DATA_START;
 	MY_ASSERT(sc.superblock.sega_alloc < sc.superblock.seg_cnt);
-	my_read(sega2sa(sega), &sc.seg_sum, 1);
+	my_read(sega2sa(sega) + SEG_SUM_OFFSET, &sc.seg_sum, 1);
 	sc.seg_sum.sega = sega;
 	sc.seg_sum.ss_alloc = 0;
 }
@@ -1090,16 +1067,9 @@ fbuf_mod_init(void)
 
 	for (int i = 0; i < FBUF_BUCKETS; i++)
 		LIST_INIT(&sc.fbuf_bucket[i]);
-#if 0
-	sc.fbuf_accessed = malloc(sc.fbuf_count/8);
-	MY_ASSERT(sc.fbuf_accessed != NULL);
-	sc.fbuf_modified = malloc(sc.fbuf_count/8);
-	MY_ASSERT(sc.fbuf_modified != NULL);
-	sc.fbuf_on_cir_queue = malloc(sc.fbuf_count/8);
-	MY_ASSERT(sc.fbuf_on_cir_queue != NULL);
-#endif
+
 #if defined(MY_DEBUG)
-	sc.cir_queue_cnt = sc.fbuf_count;
+	sc.cir_queue_cnt = 0;
 #endif
 	TAILQ_INIT(&sc.fbuf_free_head);
 	for (int i = 0; i < sc.fbuf_count; i++) {
@@ -1111,6 +1081,7 @@ fbuf_mod_init(void)
 		TAILQ_INSERT_TAIL(&sc.fbuf_free_head, &fbuf[i], free_queue);
 		fbuf->on_free_queue = true;
 		fbuf->on_cir_queue = false;
+		fbuf->sential = false;
 		fbuf->accessed = false;
 		fbuf->modified = false;
 	}
@@ -1121,6 +1092,7 @@ fbuf_mod_init(void)
 	sc.fbuf_cir_sential.accessed = false;
 	sc.fbuf_cir_sential.modified = false;
 	sc.fbuf_cir_sential.on_cir_queue = true;
+	sc.fbuf_cir_sential.sential = true;
 	sc.fbuf_cir_head = (struct _fbuf *)&sc.fbuf_cir_sential;
 
 	for (int i = 0; i < META_LEAF_DEPTH; i++)
@@ -1346,9 +1318,9 @@ fbuf_write(struct _fbuf *buf)
 	struct _fbuf *pbuf;	// buffer parent
 	unsigned pindex;	// the index in parent indirect block
 	uint32_t sa;		// sector address
-	struct _seg_sum *seg_hot = &sc.seg_sum;
+	struct _seg_sum *seg_sum = &sc.seg_sum;
 
-	sa = _logstor_write_one(buf->ma.uint32, (char *)buf->data, seg_hot);
+	sa = _logstor_write_one(buf->ma.uint32, (char *)buf->data, seg_sum);
 #if defined(MY_DEBUG)
 	buf->sa = sa;
 #endif
@@ -1374,10 +1346,10 @@ fbuf_write(struct _fbuf *buf)
 	}
 
 	// store the reverse mapping in segment summary
-	seg_hot->ss_rm[seg_hot->ss_alloc++] = buf->ma.uint32;
+	seg_sum->ss_rm[seg_sum->ss_alloc++] = buf->ma.uint32;
 
-	if (seg_hot->ss_alloc == SEG_SUM_OFFSET) { // current segment is full
-		seg_sum_write(seg_hot);
+	if (seg_sum->ss_alloc == SEG_SUM_OFFSET) { // current segment is full
+		seg_sum_write();
 		seg_alloc();
 	}
 }

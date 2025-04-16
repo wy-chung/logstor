@@ -5,12 +5,10 @@
     "tasks": [
         {
             "type": "shell",
-            "label": "gcc-5 build active file",
-            "command": "/usr/bin/gcc-5",
+            "label": "gcc build active file",
+            "command": "/usr/bin/gcc",
             "args": [
                 "-g",
-                "-O0",
-                "-DRAM_DISK",
                 "${workspaceFolder}/logstor.c",
                 "${workspaceFolder}/logstest.c",
                 "-o",
