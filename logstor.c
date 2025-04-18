@@ -79,7 +79,7 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 #define META_LEAF_DEPTH 2
 
 #define	SECTOR_NULL	0	// this sector address can not map to any block address
-#define SECTOR_DELETE	1	// delete marker for a block
+#define SECTOR_DEL	1	// delete marker for a block
 
 //#define FBUF_MAX	500
 #define FBUF_MAX	512
@@ -114,7 +114,7 @@ struct _superblock {
 	   So the actual mapping is @FD_CUR || @FD_DELTA || @FD_BASE.
 	   The first mapping that is not empty is used.
 	*/
-	uint32_t ftab[FD_COUNT]; 	// file handles table
+	uint32_t fd_tab[FD_COUNT]; 	// file handles table
 	uint8_t fd_cur;		// the file descriptor for current mapping
 	uint8_t fd_snap;	// the file descriptor for snapshot mapping
 	uint8_t fd_new;		// the file descriptor for new current mapping
@@ -133,14 +133,9 @@ struct _seg_sum {
 	// reverse map SECTORS_PER_SEG - 1 is not used so we store something here
 	uint16_t ss_gen;  // sequence number. used for redo after system crash
 	uint16_t ss_alloc; // allocate sector at this location
-
-	// below are not stored on disk
-	uint32_t sega; // the segment address of the segment summary
-	//unsigned live_count;
-	//LIST_ENTRY(_seg_sum) queue;
 };
 
-_Static_assert(offsetof(struct _seg_sum, sega) == SECTOR_SIZE,
+_Static_assert(sizeof(struct _seg_sum) == SECTOR_SIZE,
     "The size of segment summary must be equal to SECTOR_SIZE");
 
 /*
@@ -169,51 +164,47 @@ union meta_addr { // metadata address for file data and its indirect blocks
 
 _Static_assert(sizeof(union meta_addr) == 4, "The size of emta_addr must be 4");
 
-/*
-  Metadata is cached in memory. The access unit of metadata is block so each cache line
-  stores a block of metadata
-*/
-struct _fbuf_sential {
-	union meta_addr	ma;	// the metadata address
-	struct {
-		struct _fbuf *next;
-		struct _fbuf *prev;
-	} cir_queue; // list entry for the circular queue
-	bool accessed;	// only used for fbufs on circular queue
-	bool modified;	// the fbuf is dirty
-	bool on_cir_queue;	// on circular queue
-	bool sential;	// circular queue sential head
-};
-
-struct _fbuf { // file buffer
-	union meta_addr	ma;	// the metadata address
+struct _fbuf_comm {
 	union {
 		struct {
-			LIST_ENTRY(_fbuf) entry; // for the indirect queue
+			LIST_ENTRY(_fbuf) entry; /* for the indirect queue */
 			unsigned ref_cnt;
 		} indir_queue;
 		struct {
 			struct _fbuf *next;
 			struct _fbuf *prev;
-		} cir_queue; // list entry for the circular queue
+		} cir_queue; /* list entry for the circular queue */
 		TAILQ_ENTRY(_fbuf) free_queue;
 	};
-	bool accessed;	// only used for fbufs on circular queue
-	bool modified;	// the fbuf is dirty
-	bool on_cir_queue;	// on circular queue
-	bool sential;	// circular queue sential head
+	bool accessed;	/* only used for fbufs on circular queue */
+	bool modified;	/* the fbuf is dirty */
+	bool on_cir_queue;	/* on circular queue */
+	bool sential;	/* circular queue sential head */
 	bool on_free_queue;
+};
+
+struct _fbuf_sential {
+	struct _fbuf_comm fc;
+};
+
+/*
+  Metadata is cached in memory. The access unit of metadata is block so each cache line
+  stores a block of metadata
+*/
+struct _fbuf { // file buffer
+	struct _fbuf_comm fc;
 
 	LIST_ENTRY(_fbuf)	buffer_bucket_queue;// the pointer for bucket chain
 	struct _fbuf	*parent;
 
+	union meta_addr	ma;	// the metadata address
 	// the metadata is cached here
 	uint32_t	data[SECTOR_SIZE/sizeof(uint32_t)];
 #if defined(MY_DEBUG)
 	uint32_t	sa;	// the sector address of the @data
 #endif
 #if defined(FBUF_DEBUG)
-	uint16_t	index;
+	uint16_t	index; // the array index for this fbuf
 	struct _fbuf 	*child[SECTOR_SIZE/sizeof(uint32_t)];
 #endif
 };
@@ -282,7 +273,7 @@ static void superblock_write(void);
 
 static uint32_t file_read_4byte(uint8_t fh, uint32_t ba);
 static void file_write_4byte(uint8_t fh, uint32_t ba, uint32_t sa);
-static struct _fbuf *file_access_4byte(uint8_t fd, uint32_t offset, uint32_t *buf_off, bool bl_write);
+static struct _fbuf *file_access_4byte(uint8_t fd, uint32_t offset, uint32_t *buf_off);
 
 static void fbuf_mod_init(void);
 static void fbuf_mod_fini(void);
@@ -419,7 +410,10 @@ logstor_open(const char *disk_file)
 
 	error = superblock_read();
 	MY_ASSERT(error == 0);
-	my_read(sega2sa(sc.superblock.sega_alloc), &sc.seg_sum, 1);
+
+	// read the segment summary block
+	uint32_t sa = sega2sa(sc.superblock.sega_alloc) + SEG_SUM_OFFSET;
+	my_read(sa, &sc.seg_sum, 1);
 	sc.data_write_count = sc.other_write_count = 0;
 
 	fbuf_mod_init();
@@ -460,52 +454,52 @@ int logstor_delete(off_t offset, void *data, off_t length)
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	if (size == 1) {
-		file_write_4byte(sc.superblock.fd_cur, ba, SECTOR_DELETE);
+		file_write_4byte(sc.superblock.fd_cur, ba, SECTOR_DEL);
 	} else {
 		for (i = 0; i<size; i++)
-			file_write_4byte(sc.superblock.fd_cur, ba + i, SECTOR_DELETE);
+			file_write_4byte(sc.superblock.fd_cur, ba + i, SECTOR_DEL);
 	}
 
 	return (0);
 }
 
+// using the second chance replace policy
 struct _fbuf *
 fbuf_get_replacement(void)
 {
 	struct _fbuf *buf;
 
-again:
 	buf = sc.fbuf_cir_head;
-	do {
-		MY_ASSERT(buf->on_cir_queue);
-		if (!buf->accessed)
+again:
+	while (true) {
+		MY_ASSERT(buf->fc.on_cir_queue);
+		if (!buf->fc.accessed)
 			break;
-		buf->accessed = false;	// give this buffer a second chance
-		buf = buf->cir_queue.next;
-	} while (buf != sc.fbuf_cir_head);
-
+		buf->fc.accessed = false;	// give this buffer a second chance
+		buf = buf->fc.cir_queue.next;
+	}
 	if ((struct _fbuf_sential *)buf == &sc.fbuf_cir_sential) {
-		buf = buf->cir_queue.next;
+		buf->fc.accessed = true;
+		buf = buf->fc.cir_queue.next;
 		goto again;
 	}
-	sc.fbuf_cir_head = buf->cir_queue.next;
+	sc.fbuf_cir_head = buf->fc.cir_queue.next;
 
 	return buf;
 }
 
 static void
-check_free_queue(void)
+fbuf_check_free_queue(void)
 {
 	struct _fbuf *buf;
 
 	while (sc.fbuf_free_cnt < 4) {
 		buf = fbuf_get_replacement();
-		if (buf->modified) {
-			fbuf_write(buf);
-		}
 		fbuf_cir_queue_remove(buf);
-		TAILQ_INSERT_TAIL(&sc.fbuf_free_head, buf, free_queue);
+		TAILQ_INSERT_TAIL(&sc.fbuf_free_head, buf, fc.free_queue);
 		sc.fbuf_free_cnt++;
+		if (buf->fc.modified)
+			fbuf_write(buf);
 	}
 }
 
@@ -513,7 +507,7 @@ int
 logstor_read_test(uint32_t ba, void *data)
 {
 	_logstor_read_one(ba, data);
-	check_free_queue();
+	fbuf_check_free_queue();
 	return 0;
 }
 
@@ -521,7 +515,7 @@ int
 logstor_write_test(uint32_t ba, void *data)
 {
 	_logstor_write_one(ba, data, &sc.seg_sum);
-	check_free_queue();
+	fbuf_check_free_queue();
 	return 0;
 }
 
@@ -533,7 +527,7 @@ _logstor_read_one(unsigned ba, char *data)
 	MY_ASSERT(ba < sc.superblock.max_block_cnt);
 
 	sa = file_read_4byte(sc.superblock.fd_cur, ba);
-	if (sa == SECTOR_NULL || sa == SECTOR_DELETE)
+	if (sa == SECTOR_NULL || sa == SECTOR_DEL)
 		bzero(data, SECTOR_SIZE);
 	else {
 		my_read(sa, data, 1);
@@ -549,12 +543,16 @@ is_sec_valid(uint32_t sa, uint32_t ba_rev)
 
 	if (IS_META_ADDR(ba_rev)) {
 		sa_rev = ma2sa((union meta_addr)ba_rev);
+		if (sa == sa_rev)
+			return true;
 	} else {
 		sa_rev = file_read_4byte(sc.superblock.fd_cur, ba_rev);
+		if (sa == sa_rev)
+			return true;
+		sa_rev = file_read_4byte(sc.superblock.fd_snap, ba_rev);
+		if (sa == sa_rev)
+			return true;
 	}
-	if (sa == sa_rev)
-		return true;
-
 	return false;
 }
 
@@ -574,7 +572,7 @@ _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
 	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.max_block_cnt);
 	MY_ASSERT(seg_sum->ss_alloc < SEG_SUM_OFFSET);
 again:
-	uint32_t seg_sa = sega2sa(seg_sum->sega);
+	uint32_t seg_sa = sega2sa(sc.superblock.sega_alloc);
 	for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
 	{
 		uint32_t ba_rev; // ba from the reverse map
@@ -584,8 +582,8 @@ again:
 		if (is_sec_valid(sa, ba_rev))
 			continue;
 		my_write(sa, data, 1);
-		seg_sum->ss_rm[i] = ba; // record reverse mapping
-		seg_sum->ss_alloc = i + 1;
+		seg_sum->ss_rm[i] = ba;	// record reverse mapping
+		seg_sum->ss_alloc = i + 1;	// advnace the alloc pointer
 		if (seg_sum->ss_alloc == SEG_SUM_OFFSET) {
 			seg_sum_write();
 			seg_alloc();
@@ -653,7 +651,7 @@ seg_sum_write(void)
 	uint32_t sa;
 
 	// segment summary is at the end of a segment
-	sa = sega2sa(sc.seg_sum.sega) + SEG_SUM_OFFSET;
+	sa = sega2sa(sc.superblock.sega_alloc) + SEG_SUM_OFFSET;
 	sc.seg_sum.ss_gen = sc.superblock.sb_gen;
 	my_write(sa, (void *)&sc.seg_sum, 1);
 	sc.other_write_count++; // the write for the segment summary
@@ -712,7 +710,7 @@ disk_init(int fd)
 #endif
 	// the root sector address for the files
 	for (int i = 0; i < FD_COUNT; i++) {
-		sb_out->ftab[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
+		sb_out->fd_tab[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
 	}
 	sb_out->sega_alloc = SEG_DATA_START;	// start allocate from here
 
@@ -755,42 +753,42 @@ superblock_read(void)
 {
 	int	i;
 	uint16_t sb_gen;
-	struct _superblock *sb_in;
+	struct _superblock *sb;
 	char buf[2][SECTOR_SIZE];
 
 	_Static_assert(sizeof(sb_gen) == sizeof(sc.superblock.sb_gen), "sb_gen");
 
 	// get the superblock
-	sb_in = (struct _superblock *)buf[0];
+	sb = (struct _superblock *)buf[0];
 #if defined(RAM_DISK_SIZE)
-	memcpy(sb_in, ram_disk, SECTOR_SIZE);
+	memcpy(sb, ram_disk, SECTOR_SIZE);
 #else
-	MY_ASSERT(pread(sc.disk_fd, sb_in, SECTOR_SIZE, 0) == SECTOR_SIZE);
+	MY_ASSERT(pread(sc.disk_fd, sb, SECTOR_SIZE, 0) == SECTOR_SIZE);
 #endif
-	if (sb_in->sig != SIG_LOGSTOR ||
-	    sb_in->sega_alloc >= sb_in->seg_cnt)
+	if (sb->sig != SIG_LOGSTOR ||
+	    sb->sega_alloc >= sb->seg_cnt)
 		return EINVAL;
 
-	sb_gen = sb_in->sb_gen;
+	sb_gen = sb->sb_gen;
 	for (i = 1 ; i < SECTORS_PER_SEG; i++) {
-		sb_in = (struct _superblock *)buf[i%2];
+		sb = (struct _superblock *)buf[i%2];
 #if defined(RAM_DISK_SIZE)
-		memcpy(sb_in, ram_disk + i * SECTOR_SIZE, SECTOR_SIZE);
+		memcpy(sb, ram_disk + i * SECTOR_SIZE, SECTOR_SIZE);
 #else
-		MY_ASSERT(pread(sc.disk_fd, sb_in, SECTOR_SIZE, i * SECTOR_SIZE) == SECTOR_SIZE);
+		MY_ASSERT(pread(sc.disk_fd, sb, SECTOR_SIZE, i * SECTOR_SIZE) == SECTOR_SIZE);
 #endif
-		if (sb_in->sig != SIG_LOGSTOR)
+		if (sb->sig != SIG_LOGSTOR)
 			break;
-		if (sb_in->sb_gen != (uint16_t)(sb_gen + 1)) // IMPORTANT type cast
+		if (sb->sb_gen != (uint16_t)(sb_gen + 1)) // IMPORTANT type cast
 			break;
-		sb_gen = sb_in->sb_gen;
+		sb_gen = sb->sb_gen;
 	}
 	sc.sb_sa = (i - 1);
-	sb_in = (struct _superblock *)buf[(i-1)%2];
-	if (sb_in->sega_alloc >= sb_in->seg_cnt)
+	sb = (struct _superblock *)buf[(i-1)%2];
+	if (sb->sega_alloc >= sb->seg_cnt)
 		return EINVAL;
 
-	memcpy(&sc.superblock, sb_in, sizeof(sc.superblock));
+	memcpy(&sc.superblock, sb, sizeof(sc.superblock));
 	sc.sb_modified = false;
 
 	return 0;
@@ -859,14 +857,10 @@ Output:
 static void
 seg_alloc(void)
 {
-	uint32_t sega;
-
-	sega = sc.superblock.sega_alloc;
 	if (++sc.superblock.sega_alloc == sc.superblock.seg_cnt)
 		sc.superblock.sega_alloc = SEG_DATA_START;
 	MY_ASSERT(sc.superblock.sega_alloc < sc.superblock.seg_cnt);
-	my_read(sega2sa(sega) + SEG_SUM_OFFSET, &sc.seg_sum, 1);
-	sc.seg_sum.sega = sega;
+	my_read(sega2sa(sc.superblock.sega_alloc) + SEG_SUM_OFFSET, &sc.seg_sum, 1);
 	sc.seg_sum.ss_alloc = 0;
 }
 
@@ -891,12 +885,14 @@ file_read_4byte(uint8_t fd, uint32_t ba)
 {
 	struct _fbuf *buf;
 	uint32_t offset;	// the offset within the file buffer data
+	uint32_t sa;
 
-	if (((union meta_addr)ba).depth == 3) // invalid block address
-		return SECTOR_NULL;
-	MY_ASSERT(ba < META_START);
-	buf = file_access_4byte(fd, ba, &offset, false);
-	return *((uint32_t *)((uint8_t *)buf->data + offset));
+	buf = file_access_4byte(fd, ba, &offset);
+	if (buf)
+		sa = *((uint32_t *)((uint8_t *)buf->data + offset));
+	else
+		sa = SECTOR_NULL;
+	return sa;
 }
 
 /*
@@ -904,9 +900,9 @@ Description:
  	Set the mapping of @ba to @sa in @file
 
 Parameters:
-	@fd: file descriptor
-	@ba: block address
-	@sa: sector address
+	%fd: file descriptor
+	%ba: block address
+	%sa: sector address
 */
 static void
 file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
@@ -914,8 +910,9 @@ file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
 	struct _fbuf *buf;
 	uint32_t offset;	// the offset within the file buffer data
 
-	MY_ASSERT(ba < META_START);
-	buf = file_access_4byte(fd, ba, &offset, true);
+	buf = file_access_4byte(fd, ba, &offset);
+	MY_ASSERT(buf != NULL);
+	buf->fc.modified = true;
 	*((uint32_t *)((uint8_t*)buf->data + offset)) = sa;
 }
 
@@ -925,33 +922,37 @@ Description:
     of the metadata in memory for the forward mapping of the block @ba
 
 Parameters:
-	@fd: file descriptor
-	@ba: block address
-	@offset: the offset within the file buffer data
-	@bl_write: true for write access, false for read access
+	%fd: file descriptor
+	%ba: block address
+	%offset: the offset within the file buffer data
+	%bl_write: true for write access, false for read access
 
 Return:
 	the address of the file buffer data
 */
 static struct _fbuf *
-file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *buf_off, bool bl_write)
+file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *buf_off)
 {
 	union meta_addr	ma;		// metadata address
 	struct _fbuf *buf;
 
-	// the data stored in file for this ba is 4 bytes
-	*buf_off = (ba * 4) & (SECTOR_SIZE - 1);	// the buffer is 4 KiB
+	MY_ASSERT(ba < META_START);
 
-	// convert to metadata address from (@fd, @ba)
+	// the data stored in file for this ba is 4 bytes
+	*buf_off = (ba * 4) & (SECTOR_SIZE - 1);
+
+	// convert (%fd, %ba) to metadata address
 	ma.index = ba / (SECTOR_SIZE / 4); // (ba * 4) / SECTOR_SIZE
 	ma.depth = META_LEAF_DEPTH;
 	ma.fd = fd;
 	ma.meta = 0xFF;	// for metadata address, bits 31:24 are all 1s
 	buf = fbuf_get(ma);
-	buf->accessed = true;
-	if (__predict_false(!buf->modified) && bl_write) {
-		buf->modified = true;
-	}
+	if (buf == NULL)
+		// no forwarding mapping for this %fd
+		return NULL;
+
+	buf->fc.accessed = true;
+
 	return buf;
 }
 
@@ -1003,7 +1004,6 @@ return:
 static union meta_addr
 ma2pma(union meta_addr ma, unsigned *pindex_out)
 {
-
 	switch (ma.depth)
 	{
 	case 1:
@@ -1023,7 +1023,7 @@ ma2pma(union meta_addr ma, unsigned *pindex_out)
 	return ma;
 }
 
-// metadata address to sector address
+// get the sector address where the metadata is stored on disk
 static uint32_t
 ma2sa(union meta_addr ma)
 {
@@ -1035,13 +1035,16 @@ ma2sa(union meta_addr ma)
 	switch (ma.depth)
 	{
 	case 0:
-		sa = sc.superblock.ftab[ma.fd];
+		sa = sc.superblock.fd_tab[ma.fd];
 		break;
 	case 1:
 	case 2:
 		pma = ma2pma(ma, &pindex);
 		pbuf = fbuf_get(pma);
-		sa = pbuf->data[pindex];
+		if (pbuf != NULL)
+			sa = pbuf->data[pindex];
+		else
+			sa = SECTOR_NULL;
 		break;
 	case 3: // it is an invalid block/metadata address
 		sa = SECTOR_NULL;
@@ -1056,47 +1059,47 @@ ma2sa(union meta_addr ma)
 static void
 fbuf_mod_init(void)
 {
+	int fbuf_count;
 
-	sc.fbuf_hit = sc.fbuf_miss = 0;
-	sc.fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4);
-	if (sc.fbuf_count > FBUF_MAX)
-		sc.fbuf_count = FBUF_MAX;
-	size_t fbuf_size = sizeof(*sc.fbuf) * sc.fbuf_count;
-	sc.fbuf = malloc(fbuf_size);
+	fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4);
+	if (fbuf_count > FBUF_MAX)
+		fbuf_count = FBUF_MAX;
+	sc.fbuf = malloc(fbuf_count * sizeof(*sc.fbuf));
 	MY_ASSERT(sc.fbuf != NULL);
 
-	for (int i = 0; i < FBUF_BUCKETS; i++)
-		LIST_INIT(&sc.fbuf_bucket[i]);
-
-#if defined(MY_DEBUG)
-	sc.cir_queue_cnt = 0;
-#endif
 	TAILQ_INIT(&sc.fbuf_free_head);
-	for (int i = 0; i < sc.fbuf_count; i++) {
+	for (int i = 0; i < fbuf_count; i++) {
 		struct _fbuf *fbuf = &sc.fbuf[i];
+		fbuf->fc.accessed = false;
+		fbuf->fc.modified = false;
+		TAILQ_INSERT_TAIL(&sc.fbuf_free_head, fbuf, fc.free_queue);
+		fbuf->fc.on_cir_queue = false;
+		fbuf->fc.sential = false;
+		fbuf->fc.on_free_queue = true;
 #if defined(FBUF_DEBUG)
 		fbuf->index = i;
 #endif
-		fbuf->parent = NULL;
-		TAILQ_INSERT_TAIL(&sc.fbuf_free_head, &fbuf[i], free_queue);
-		fbuf->on_free_queue = true;
-		fbuf->on_cir_queue = false;
-		fbuf->sential = false;
-		fbuf->accessed = false;
-		fbuf->modified = false;
 	}
-	sc.fbuf_free_cnt = sc.fbuf_count;
-	sc.fbuf_cir_sential.ma = META_INVALID;
-	sc.fbuf_cir_sential.cir_queue.next = (struct _fbuf *)&sc.fbuf_cir_sential;
-	sc.fbuf_cir_sential.cir_queue.prev = (struct _fbuf *)&sc.fbuf_cir_sential;
-	sc.fbuf_cir_sential.accessed = false;
-	sc.fbuf_cir_sential.modified = false;
-	sc.fbuf_cir_sential.on_cir_queue = true;
-	sc.fbuf_cir_sential.sential = true;
+	sc.fbuf_free_cnt = fbuf_count;
+#if defined(MY_DEBUG)
+	sc.fbuf_count = fbuf_count;
+	sc.cir_queue_cnt = 0;
+#endif
+	sc.fbuf_cir_sential.fc.cir_queue.next = (struct _fbuf *)&sc.fbuf_cir_sential;
+	sc.fbuf_cir_sential.fc.cir_queue.prev = (struct _fbuf *)&sc.fbuf_cir_sential;
+	sc.fbuf_cir_sential.fc.accessed = false;
+	sc.fbuf_cir_sential.fc.modified = false;
+	sc.fbuf_cir_sential.fc.on_cir_queue = true;
+	sc.fbuf_cir_sential.fc.sential = true;
 	sc.fbuf_cir_head = (struct _fbuf *)&sc.fbuf_cir_sential;
 
 	for (int i = 0; i < META_LEAF_DEPTH; i++)
 		LIST_INIT(&sc.fbuf_ind_head[i]); // point to active indirect blocks with depth i
+
+	for (int i = 0; i < FBUF_BUCKETS; i++)
+		LIST_INIT(&sc.fbuf_bucket[i]);
+
+	sc.fbuf_hit = sc.fbuf_miss = 0;
 }
 
 static void
@@ -1112,17 +1115,17 @@ fbuf_mod_flush(void)
 	struct _fbuf	*buf;
 	int	i;
 
-	buf = sc.fbuf_cir_head->cir_queue.next;
+	buf = sc.fbuf_cir_head->fc.cir_queue.next;
 	while (buf != (struct _fbuf *)&sc.fbuf_cir_head) {
-		MY_ASSERT(buf->on_cir_queue);
+		MY_ASSERT(buf->fc.on_cir_queue);
 		fbuf_flush(buf);
-		buf = buf->cir_queue.next;
+		buf = buf->fc.cir_queue.next;
 	}
 
 	// process active indirect blocks
 	for (i = META_LEAF_DEPTH - 1; i >= 0; i--)
-		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], indir_queue.entry) {
-			MY_ASSERT(buf->on_cir_queue == false);
+		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], fc.indir_queue.entry) {
+			MY_ASSERT(buf->fc.on_cir_queue == false);
 			fbuf_flush(buf);
 		}
 }
@@ -1143,34 +1146,25 @@ static void
 fbuf_queue_check(void)
 {
 	struct _fbuf *buf;
-	unsigned total, indir_cnt[META_LEAF_DEPTH];
+	unsigned total = 0;
 
-	buf = sc.fbuf_cir_head->cir_queue.next;
-	total = 0;
-	while (buf != (struct _fbuf *)&sc.fbuf_cir_head) {
+	buf = sc.fbuf_cir_sential.fc.cir_queue.next;
+	while (buf != (struct _fbuf *)&sc.fbuf_cir_sential) {
 		++total;
-		MY_ASSERT(total <= sc.fbuf_count);
-		MY_ASSERT(buf->on_cir_queue);
-		buf = buf->cir_queue.next;
+		MY_ASSERT(buf->fc.on_cir_queue);
+		buf = buf->fc.cir_queue.next;
 	}
-
-	for (int i = 0; i < META_LEAF_DEPTH; i++)
-		indir_cnt[i] = 0;
-
 	for (int i = 0; i < META_LEAF_DEPTH ; ++i) {
+		unsigned indir_cnt = 0;
 		buf = LIST_FIRST(&sc.fbuf_ind_head[i]);
 		while (buf != NULL) {
-			++indir_cnt[0];
-			MY_ASSERT(indir_cnt[0] <= sc.fbuf_count);
-			MY_ASSERT(buf->on_cir_queue == false);
+			++indir_cnt;
+			MY_ASSERT(buf->fc.on_cir_queue == false);
 			MY_ASSERT(buf->ma.depth == i);
-			buf = LIST_NEXT(buf, indir_queue.entry);
+			buf = LIST_NEXT(buf, fc.indir_queue.entry);
 		}
+		total += indir_cnt;
 	}
-
-	for (int i = 0; i < META_LEAF_DEPTH; i++)
-		total += indir_cnt[i];
-	
 	MY_ASSERT(total + sc.fbuf_free_cnt == sc.fbuf_count);
 }
 #endif
@@ -1183,12 +1177,12 @@ fbuf_cir_queue_insert(struct _fbuf *buf)
 {
 	struct _fbuf *prev;
 
-	prev = sc.fbuf_cir_head->cir_queue.prev;
-	sc.fbuf_cir_head->cir_queue.prev = buf;
-	buf->cir_queue.next = (struct _fbuf *)&sc.fbuf_cir_head;
-	buf->cir_queue.prev = prev;
-	prev->cir_queue.next = buf;
-	buf->on_cir_queue = true;
+	prev = sc.fbuf_cir_head->fc.cir_queue.prev;
+	sc.fbuf_cir_head->fc.cir_queue.prev = buf;
+	buf->fc.cir_queue.next = (struct _fbuf *)&sc.fbuf_cir_head;
+	buf->fc.cir_queue.prev = prev;
+	prev->fc.cir_queue.next = buf;
+	buf->fc.on_cir_queue = true;
 #if defined(MY_DEBUG)
 	sc.cir_queue_cnt++;
 #endif
@@ -1205,13 +1199,13 @@ fbuf_cir_queue_remove(struct _fbuf *buf)
 	struct _fbuf *next;
 
 	MY_ASSERT(buf != (struct _fbuf *)&sc.fbuf_cir_sential);
-	MY_ASSERT(buf->on_cir_queue);
+	MY_ASSERT(buf->fc.on_cir_queue);
 	MY_ASSERT(buf->ma.uint32 != META_INVALID.uint32);
-	prev = buf->cir_queue.prev;
-	next = buf->cir_queue.next;
-	prev->cir_queue.next = next;
-	next->cir_queue.prev = prev;
-	buf->on_cir_queue = false;
+	prev = buf->fc.cir_queue.prev;
+	next = buf->fc.cir_queue.next;
+	prev->fc.cir_queue.next = next;
+	next->fc.cir_queue.prev = prev;
+	buf->fc.on_cir_queue = false;
 #if defined(MY_DEBUG)
 	sc.cir_queue_cnt--;
 #endif
@@ -1237,8 +1231,10 @@ fbuf_get(union meta_addr ma)
 
 	// cache miss
 	// get the root sector address of the file @ma.fd
-	MY_ASSERT(ma.fd < FD_COUNT);
-	sa = sc.superblock.ftab[ma.fd];
+	sa = sc.superblock.fd_tab[ma.fd];
+	if (sa == SECTOR_DEL)
+		return NULL;
+
 	pbuf = NULL;	// parent for root is NULL
 	tma.uint32 = META_START; // set .meta to 0xFF and all others to 0
 	tma.fd = ma.fd;
@@ -1248,17 +1244,11 @@ fbuf_get(union meta_addr ma)
 		buf = fbuf_search(tma);
 		if (buf == NULL) {
 			buf = fbuf_alloc();	// allocate a fbuf from free queue
-			fbuf_cir_queue_insert(buf);
 			buf->ma = tma;
 			fbuf_hash_insert(buf);
 			buf->parent = pbuf;
-			/*
-			  Theoretically the parent's reference count should be
-			  incremented here. But if imcremented here, the parent
-			  might be reclaimed in the call fbuf_alloc, so
-			  it is actually incremented in the previous loop to
-			  prevent it from being reclaimed by fbuf_alloc.
-			*/
+			if (pbuf)
+				pbuf->fc.indir_queue.ref_cnt++;
 			if (sa == SECTOR_NULL)	// the metadata block does not exist
 				bzero(buf->data, sizeof(buf->data));
 			else {
@@ -1272,35 +1262,20 @@ fbuf_get(union meta_addr ma)
 			if (pbuf)
 				pbuf->child[index] = buf;
 #endif
+			if (i == ma.depth) {
+				fbuf_cir_queue_insert(buf);
+				break;
+			} else
+				LIST_INSERT_HEAD(&sc.fbuf_ind_head[i], buf, fc.indir_queue.entry);
+
 		} else {
 			MY_ASSERT(buf->parent == pbuf);
+#if defined(MY_DEBUG)
 			MY_ASSERT(buf->sa == sa);
-			if (pbuf) {
-				MY_ASSERT(pbuf->indir_queue.ref_cnt != 1);
-				/*
-				  The reference count of the parent is always
-				  incremented in the previous loop. In this case
-				  we don't need to, so decremented it here to
-				  compensate the increment in the previous loop.
-				*/
-				pbuf->indir_queue.ref_cnt--;
-			}
+#endif
+			if (i == ma.depth) // reach intended depth
+				break;
 		}
-		if (i == ma.depth) // reach intended depth
-			break;
-
-		if (buf->on_cir_queue) {
-			// move it to active indirect block queue
-			fbuf_cir_queue_remove(buf);
-			LIST_INSERT_HEAD(&sc.fbuf_ind_head[i], buf, indir_queue.entry);
-			buf->indir_queue.ref_cnt = 0;
-		}
-		/*
-		  Increment the reference count of this buffer to prevent it
-		  from being reclaimed by the call to function fbuf_alloc.
-		*/
-		buf->indir_queue.ref_cnt++;
-
 		index = ma_index_get(ma, i);// the index to next level's indirect block
 		sa = buf->data[index];	// the sector address of the next level indirect block
 		tma = ma_index_set(tma, i, index); // set the next level's index for @tma
@@ -1324,7 +1299,7 @@ fbuf_write(struct _fbuf *buf)
 #if defined(MY_DEBUG)
 	buf->sa = sa;
 #endif
-	buf->modified = false;
+	buf->fc.modified = false;
 	sc.other_write_count++;
 
 	// store the forward mapping in parent indirect block
@@ -1334,14 +1309,14 @@ fbuf_write(struct _fbuf *buf)
 		MY_ASSERT(pbuf->ma.depth == buf->ma.depth - 1);
 		pindex = ma_index_get(buf->ma, buf->ma.depth - 1);
 		pbuf->data[pindex] = sa;
-		if (__predict_false(!pbuf->modified)) {
-			pbuf->modified = true;
+		if (__predict_false(!pbuf->fc.modified)) {
+			pbuf->fc.modified = true;
 		}
 	} else {
 		MY_ASSERT(buf->ma.depth == 0);
 		MY_ASSERT(buf->ma.fd < FD_COUNT);
 		// store the root sector address to the corresponding file table in super block
-		sc.superblock.ftab[buf->ma.fd] = sa;
+		sc.superblock.fd_tab[buf->ma.fd] = sa;
 		sc.sb_modified = true;
 	}
 
@@ -1362,7 +1337,7 @@ static void
 fbuf_flush(struct _fbuf *buf)
 {
 
-	if (!buf->modified)
+	if (!buf->fc.modified)
 		return;
 
 	MY_ASSERT(IS_META_ADDR(buf->ma.uint32));
@@ -1372,7 +1347,7 @@ fbuf_flush(struct _fbuf *buf)
 
 /*
 Description:
-    Use the second chance algorithm to allocate a file buffer
+    allocate a file buffer from free queue
 */
 static struct _fbuf *
 fbuf_alloc(void)
@@ -1381,7 +1356,9 @@ fbuf_alloc(void)
 
 	fbuf = TAILQ_FIRST(&sc.fbuf_free_head);
 	MY_ASSERT(fbuf != NULL);
-	TAILQ_REMOVE(&sc.fbuf_free_head, fbuf, free_queue);
+	MY_ASSERT(fbuf->fc.on_free_queue);
+	TAILQ_REMOVE(&sc.fbuf_free_head, fbuf, fc.free_queue);
+	fbuf->fc.on_free_queue = false;
 	sc.fbuf_free_cnt--;
 	return fbuf;
 }
@@ -1435,15 +1412,15 @@ fbuf_mod_dump(void)
 	fprintf(fh, "\n\n");
 	for (i = 0; i < META_LEAF_DEPTH; i++) {
 		fprintf(fh, "indir queue %d\n", i);
-		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], indir_queue.entry) {
-			MY_ASSERT(buf->on_cir_queue == false);
+		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], fc.indir_queue.entry) {
+			MY_ASSERT(buf->fc.on_cir_queue == false);
 			fbuf_dump(buf, fh);
 		}
 	}
-	buf = sc.fbuf_cir_head->cir_queue.next;
+	buf = sc.fbuf_cir_head->fc.cir_queue.next;
 	while (buf != (struct _fbuf *)&sc.fbuf_cir_head) {
 		fbuf_dump(buf, fh);
-		buf = buf->cir_queue.next;
+		buf = buf->fc.cir_queue.next;
 	}
 
 	fclose(fh);
