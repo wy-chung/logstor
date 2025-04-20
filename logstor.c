@@ -164,22 +164,24 @@ union meta_addr { // metadata address for file data and its indirect blocks
 
 _Static_assert(sizeof(union meta_addr) == 4, "The size of emta_addr must be 4");
 
+enum {
+	QUEUE_IND0,
+	QUEUE_IND1,
+	QUEUE_LEAF,
+	QUEUE_CLEAN,
+	QUEUE_CNT,
+};
+_Static_assert(QUEUE_IND0 == 0, "QUEUE_IND0 must be 0");
+_Static_assert(QUEUE_IND1 == 1, "QUEUE_IND0 must be 1");
+
 struct _fbuf_comm {
-	union {
-		struct {
-			LIST_ENTRY(_fbuf) entry; /* for the indirect queue */
-			unsigned ref_cnt;
-		} indir_queue;
-		struct {
-			struct _fbuf *next;
-			struct _fbuf *prev;
-		} cir_queue; /* list entry for the circular queue */
-		TAILQ_ENTRY(_fbuf) free_queue;
-	};
+	struct _fbuf *queue_next;
+	struct _fbuf *queue_prev;
+	uint8_t	queue_type;
 	bool accessed;	/* only used for fbufs on circular queue */
 	bool modified;	/* the fbuf is dirty */
-	bool on_cir_queue;	/* on circular queue */
 	bool sential;	/* circular queue sential head */
+	bool on_cir_queue;	/* on circular queue */
 	bool on_free_queue;
 };
 
@@ -196,6 +198,7 @@ struct _fbuf { // file buffer
 
 	LIST_ENTRY(_fbuf)	buffer_bucket_queue;// the pointer for bucket chain
 	struct _fbuf	*parent;
+	unsigned ref_cnt;
 
 	union meta_addr	ma;	// the metadata address
 	// the metadata is cached here
@@ -217,19 +220,15 @@ struct g_logstor_softc {
 	
 	int fbuf_count;
 	struct _fbuf *fbuf;
-	struct _fbuf *fbuf_cir_head;	// head of the circular queue
-	struct _fbuf_sential fbuf_cir_sential;	// head of the circular queue
-#if 0 // the accessed, modified and flag bits should be moved out of struct _fbuf
-	unsigned *fbuf_accessed;
-	unsigned *fbuf_modified;
-	unsigned *fbuf_on_cir_queue;
-#endif	
+	struct _fbuf *fbuf_replace;	// start of the replacement fbuf
+	struct {
+		struct _fbuf_sential sential;	// head of the queues
+		int	count;
+	} fbuf_queue[QUEUE_CNT];
+
+	//uint32_t	fbuf_free_cnt;
 	// buffer hash queue
 	LIST_HEAD(_fbuf_bucket, _fbuf)	fbuf_bucket[FBUF_BUCKETS];
-	
-	LIST_HEAD(, _fbuf) fbuf_ind_head[META_LEAF_DEPTH]; // indirect queue
-	TAILQ_HEAD(, _fbuf) fbuf_free_head;
-	uint32_t	fbuf_free_cnt;
 	
 #if defined(MY_DEBUG)
 	int cir_queue_cnt;
@@ -281,11 +280,11 @@ static void fbuf_mod_flush(void);
 static struct _fbuf *fbuf_get(union meta_addr ma);
 static struct _fbuf *fbuf_alloc(void);
 static struct _fbuf *fbuf_search(union meta_addr ma);
-static void fbuf_flush(struct _fbuf *buf);
-static void fbuf_hash_insert(struct _fbuf *buf);
-static void fbuf_write(struct _fbuf *buf);
-static void fbuf_cir_queue_remove(struct _fbuf *buf);
-static void fbuf_cir_queue_insert(struct _fbuf *buf);
+static void fbuf_flush(struct _fbuf *fbuf);
+static void fbuf_hash_insert(struct _fbuf *fbuf);
+static void fbuf_write(struct _fbuf *fbuf);
+static void fbuf_queue_insert(int which, struct _fbuf *fbuf);
+static void fbuf_queue_remove(int which, struct _fbuf *fbuf);
 
 static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
 static uint32_t ma2sa(union meta_addr ma);
@@ -467,39 +466,47 @@ int logstor_delete(off_t offset, void *data, off_t length)
 struct _fbuf *
 fbuf_get_replacement(void)
 {
-	struct _fbuf *buf;
+	struct _fbuf *fbuf;
 
-	buf = sc.fbuf_cir_head;
+	fbuf = sc.fbuf_queue[QUEUE_LEAF].sential.fc.queue_next;
 again:
 	while (true) {
-		MY_ASSERT(buf->fc.on_cir_queue);
-		if (!buf->fc.accessed)
+		MY_ASSERT(fbuf->fc.queue_type == QUEUE_LEAF);
+		if (!fbuf->fc.accessed)
 			break;
-		buf->fc.accessed = false;	// give this buffer a second chance
-		buf = buf->fc.cir_queue.next;
+		fbuf->fc.accessed = false;	// give this buffer a second chance
+		fbuf = fbuf->fc.queue_next;
 	}
-	if ((struct _fbuf_sential *)buf == &sc.fbuf_cir_sential) {
-		buf->fc.accessed = true;
-		buf = buf->fc.cir_queue.next;
+	if ((struct _fbuf_sential *)fbuf == &sc.fbuf_queue[QUEUE_LEAF].sential) {
+		fbuf->fc.accessed = true;
+		fbuf = fbuf->fc.queue_next;
 		goto again;
 	}
-	sc.fbuf_cir_head = buf->fc.cir_queue.next;
+	sc.fbuf_replace = fbuf->fc.queue_next;
 
-	return buf;
+	return fbuf;
 }
 
 static void
 fbuf_check_free_queue(void)
 {
-	struct _fbuf *buf;
+	struct _fbuf *fbuf;
+	struct _fbuf *pbuf;
 
-	while (sc.fbuf_free_cnt < 4) {
-		buf = fbuf_get_replacement();
-		fbuf_cir_queue_remove(buf);
-		TAILQ_INSERT_TAIL(&sc.fbuf_free_head, buf, fc.free_queue);
-		sc.fbuf_free_cnt++;
-		if (buf->fc.modified)
-			fbuf_write(buf);
+	while (sc.fbuf_queue[QUEUE_CLEAN].count < 4) {
+		fbuf = fbuf_get_replacement();
+		MY_ASSERT(fbuf != NULL);
+		fbuf_queue_remove(QUEUE_LEAF, fbuf);
+		pbuf = fbuf->parent;
+		while (pbuf)
+			if (--pbuf->ref_cnt == 0) {
+				fbuf_queue_remove(pbuf->ma.depth, pbuf);
+				fbuf_queue_insert(QUEUE_LEAF, pbuf);
+				pbuf = pbuf->parent;
+			}
+		fbuf_queue_insert(QUEUE_CLEAN, fbuf);
+		if (fbuf->fc.modified)
+			fbuf_write(fbuf);
 	}
 }
 
@@ -883,13 +890,13 @@ Return:
 static uint32_t
 file_read_4byte(uint8_t fd, uint32_t ba)
 {
-	struct _fbuf *buf;
+	struct _fbuf *fbuf;
 	uint32_t offset;	// the offset within the file buffer data
 	uint32_t sa;
 
-	buf = file_access_4byte(fd, ba, &offset);
-	if (buf)
-		sa = *((uint32_t *)((uint8_t *)buf->data + offset));
+	fbuf = file_access_4byte(fd, ba, &offset);
+	if (fbuf)
+		sa = *((uint32_t *)((uint8_t *)fbuf->data + offset));
 	else
 		sa = SECTOR_NULL;
 	return sa;
@@ -907,13 +914,13 @@ Parameters:
 static void
 file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
 {
-	struct _fbuf *buf;
+	struct _fbuf *fbuf;
 	uint32_t offset;	// the offset within the file buffer data
 
-	buf = file_access_4byte(fd, ba, &offset);
-	MY_ASSERT(buf != NULL);
-	buf->fc.modified = true;
-	*((uint32_t *)((uint8_t*)buf->data + offset)) = sa;
+	fbuf = file_access_4byte(fd, ba, &offset);
+	MY_ASSERT(fbuf != NULL);
+	fbuf->fc.modified = true;
+	*((uint32_t *)((uint8_t*)fbuf->data + offset)) = sa;
 }
 
 /*
@@ -934,7 +941,7 @@ static struct _fbuf *
 file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *buf_off)
 {
 	union meta_addr	ma;		// metadata address
-	struct _fbuf *buf;
+	struct _fbuf *fbuf;
 
 	MY_ASSERT(ba < META_START);
 
@@ -946,14 +953,14 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *buf_off)
 	ma.depth = META_LEAF_DEPTH;
 	ma.fd = fd;
 	ma.meta = 0xFF;	// for metadata address, bits 31:24 are all 1s
-	buf = fbuf_get(ma);
-	if (buf == NULL)
+	fbuf = fbuf_get(ma);
+	if (fbuf == NULL)
 		// no forwarding mapping for this %fd
 		return NULL;
 
-	buf->fc.accessed = true;
+	fbuf->fc.accessed = true;
 
-	return buf;
+	return fbuf;
 }
 
 static unsigned
@@ -1053,6 +1060,21 @@ ma2sa(union meta_addr ma)
 	return sa;
 }
 
+static void
+fbuf_queue_init(int which)
+{
+	struct _fbuf_sential *fbuf;
+
+	MY_ASSERT(which < QUEUE_CNT);
+	sc.fbuf_queue[which].count= 0;
+	fbuf = &sc.fbuf_queue[which].sential;
+	fbuf->fc.queue_next = (struct _fbuf*)fbuf;
+	fbuf->fc.queue_prev = (struct _fbuf*)fbuf;
+	fbuf->fc.accessed = false;
+	fbuf->fc.modified = false;
+	fbuf->fc.sential = true;
+}
+
 /*
   Initialize metadata file buffer
 */
@@ -1067,34 +1089,27 @@ fbuf_mod_init(void)
 	sc.fbuf = malloc(fbuf_count * sizeof(*sc.fbuf));
 	MY_ASSERT(sc.fbuf != NULL);
 
-	TAILQ_INIT(&sc.fbuf_free_head);
-	for (int i = 0; i < fbuf_count; i++) {
+	for (int i = 0; i < QUEUE_CNT; ++i)
+		fbuf_queue_init(i);
+
+	for (int i = 0; i < fbuf_count; ++i) {
 		struct _fbuf *fbuf = &sc.fbuf[i];
 		fbuf->fc.accessed = false;
 		fbuf->fc.modified = false;
-		TAILQ_INSERT_TAIL(&sc.fbuf_free_head, fbuf, fc.free_queue);
-		fbuf->fc.on_cir_queue = false;
-		fbuf->fc.sential = false;
-		fbuf->fc.on_free_queue = true;
+		fbuf_queue_insert(QUEUE_CLEAN, fbuf);
+		fbuf->ma.uint32 = i; // distribute fbuf evently to hash queues
+		fbuf_hash_insert(fbuf);
+		fbuf->fc.queue_type = QUEUE_CLEAN;
 #if defined(FBUF_DEBUG)
 		fbuf->index = i;
 #endif
 	}
-	sc.fbuf_free_cnt = fbuf_count;
+	sc.fbuf_replace = (struct _fbuf *)&sc.fbuf_queue[QUEUE_LEAF].sential;
+
 #if defined(MY_DEBUG)
 	sc.fbuf_count = fbuf_count;
 	sc.cir_queue_cnt = 0;
 #endif
-	sc.fbuf_cir_sential.fc.cir_queue.next = (struct _fbuf *)&sc.fbuf_cir_sential;
-	sc.fbuf_cir_sential.fc.cir_queue.prev = (struct _fbuf *)&sc.fbuf_cir_sential;
-	sc.fbuf_cir_sential.fc.accessed = false;
-	sc.fbuf_cir_sential.fc.modified = false;
-	sc.fbuf_cir_sential.fc.on_cir_queue = true;
-	sc.fbuf_cir_sential.fc.sential = true;
-	sc.fbuf_cir_head = (struct _fbuf *)&sc.fbuf_cir_sential;
-
-	for (int i = 0; i < META_LEAF_DEPTH; i++)
-		LIST_INIT(&sc.fbuf_ind_head[i]); // point to active indirect blocks with depth i
 
 	for (int i = 0; i < FBUF_BUCKETS; i++)
 		LIST_INIT(&sc.fbuf_bucket[i]);
@@ -1112,103 +1127,106 @@ fbuf_mod_fini(void)
 static void
 fbuf_mod_flush(void)
 {
-	struct _fbuf	*buf;
+	struct _fbuf	*fbuf;
 	int	i;
 
-	buf = sc.fbuf_cir_head->fc.cir_queue.next;
-	while (buf != (struct _fbuf *)&sc.fbuf_cir_head) {
-		MY_ASSERT(buf->fc.on_cir_queue);
-		fbuf_flush(buf);
-		buf = buf->fc.cir_queue.next;
+	fbuf = sc.fbuf_queue[QUEUE_LEAF].sential.fc.queue_next;
+	while (fbuf != (struct _fbuf *)&sc.fbuf_queue[QUEUE_LEAF].sential) {
+		MY_ASSERT(fbuf->fc.queue_type == QUEUE_LEAF);
+		fbuf_flush(fbuf);
+		fbuf = fbuf->fc.queue_next;
 	}
 
 	// process active indirect blocks
-	for (i = META_LEAF_DEPTH - 1; i >= 0; i--)
-		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], fc.indir_queue.entry) {
-			MY_ASSERT(buf->fc.on_cir_queue == false);
-			fbuf_flush(buf);
+	for (i = META_LEAF_DEPTH - 1; i >= 0; i--) {
+		fbuf = sc.fbuf_queue[i].sential.fc.queue_next;
+		while (fbuf != (struct _fbuf *)&sc.fbuf_queue[i].sential) {
+			MY_ASSERT(fbuf->fc.queue_type == i);
+			fbuf_flush(fbuf);
+			fbuf = fbuf->fc.queue_next;
 		}
+	}
 }
 
 static void
-fbuf_hash_insert(struct _fbuf *buf)
+fbuf_hash_insert(struct _fbuf *fbuf)
 {
 	unsigned hash;
 	struct _fbuf_bucket *bucket;
 
-	hash = buf->ma.uint32 % FBUF_BUCKETS;
+	hash = fbuf->ma.uint32 % FBUF_BUCKETS;
 	bucket = &sc.fbuf_bucket[hash];
-	LIST_INSERT_HEAD(bucket, buf, buffer_bucket_queue);
+	LIST_INSERT_HEAD(bucket, fbuf, buffer_bucket_queue);
+}
+
+static void
+fbuf_hash_remove(struct _fbuf *fbuf)
+{
+	LIST_REMOVE(fbuf, buffer_bucket_queue);
 }
 
 #if defined(MY_DEBUG)
 static void
 fbuf_queue_check(void)
 {
-	struct _fbuf *buf;
-	unsigned total = 0;
+	struct _fbuf *fbuf;
+	unsigned total;
 
-	buf = sc.fbuf_cir_sential.fc.cir_queue.next;
-	while (buf != (struct _fbuf *)&sc.fbuf_cir_sential) {
-		++total;
-		MY_ASSERT(buf->fc.on_cir_queue);
-		buf = buf->fc.cir_queue.next;
-	}
-	for (int i = 0; i < META_LEAF_DEPTH ; ++i) {
-		unsigned indir_cnt = 0;
-		buf = LIST_FIRST(&sc.fbuf_ind_head[i]);
-		while (buf != NULL) {
-			++indir_cnt;
-			MY_ASSERT(buf->fc.on_cir_queue == false);
-			MY_ASSERT(buf->ma.depth == i);
-			buf = LIST_NEXT(buf, fc.indir_queue.entry);
+	for (int i = 0; i < QUEUE_CNT ; ++i) {
+		total = 0;
+		fbuf = sc.fbuf_queue[i].sential.fc.queue_next;
+		while (fbuf != (struct _fbuf *)&sc.fbuf_queue[i].sential) {
+			++total;
+			MY_ASSERT(fbuf->fc.queue_type == i);
+			if (i <= META_LEAF_DEPTH)
+				MY_ASSERT(fbuf->ma.depth == i);
+			fbuf = fbuf->fc.queue_next;
 		}
-		total += indir_cnt;
+		MY_ASSERT(sc.fbuf_queue[i].count == total);
 	}
-	MY_ASSERT(total + sc.fbuf_free_cnt == sc.fbuf_count);
+	total = 0;
+	for (int i = 0; i < QUEUE_CNT; ++i)
+		total += sc.fbuf_queue[i].count;
+
+	MY_ASSERT(total == sc.fbuf_count);
 }
 #endif
 
-/*
-    Circular queue insert before
-*/
 static void
-fbuf_cir_queue_insert(struct _fbuf *buf)
+fbuf_queue_insert(int which, struct _fbuf *fbuf)
 {
+	struct _fbuf *queue_head;
 	struct _fbuf *prev;
 
-	prev = sc.fbuf_cir_head->fc.cir_queue.prev;
-	sc.fbuf_cir_head->fc.cir_queue.prev = buf;
-	buf->fc.cir_queue.next = (struct _fbuf *)&sc.fbuf_cir_head;
-	buf->fc.cir_queue.prev = prev;
-	prev->fc.cir_queue.next = buf;
-	buf->fc.on_cir_queue = true;
-#if defined(MY_DEBUG)
-	sc.cir_queue_cnt++;
-#endif
+	MY_ASSERT(which < QUEUE_CNT);
+	fbuf->fc.queue_type = which;
+	queue_head = (struct _fbuf *)&sc.fbuf_queue[which].sential;
+	prev = queue_head->fc.queue_prev;
+	queue_head->fc.queue_prev = fbuf;
+	fbuf->fc.queue_next = queue_head;
+	fbuf->fc.queue_prev = prev;
+	prev->fc.queue_next = fbuf;
+
+	sc.fbuf_queue[which].count++;
 }
 
-/*
-    Circular queue remove
-    Must have at least tow elements on the queue before remove
-*/
 static void
-fbuf_cir_queue_remove(struct _fbuf *buf)
+fbuf_queue_remove(int which, struct _fbuf *fbuf)
 {
 	struct _fbuf *prev;
 	struct _fbuf *next;
 
-	MY_ASSERT(buf != (struct _fbuf *)&sc.fbuf_cir_sential);
-	MY_ASSERT(buf->fc.on_cir_queue);
-	MY_ASSERT(buf->ma.uint32 != META_INVALID.uint32);
-	prev = buf->fc.cir_queue.prev;
-	next = buf->fc.cir_queue.next;
-	prev->fc.cir_queue.next = next;
-	next->fc.cir_queue.prev = prev;
-	buf->fc.on_cir_queue = false;
-#if defined(MY_DEBUG)
-	sc.cir_queue_cnt--;
-#endif
+	MY_ASSERT(which < QUEUE_CNT);
+	MY_ASSERT(fbuf->fc.queue_type == which);
+	MY_ASSERT(fbuf != (struct _fbuf *)&sc.fbuf_queue[which].sential);
+	MY_ASSERT(fbuf->ma.uint32 != META_INVALID.uint32);
+	prev = fbuf->fc.queue_prev;
+	next = fbuf->fc.queue_next;
+	prev->fc.queue_next = next;
+	next->fc.queue_prev = prev;
+	fbuf->fc.queue_type = which;
+
+	sc.fbuf_queue[which].count--;
 }
 
 /*
@@ -1219,15 +1237,15 @@ static struct _fbuf *
 fbuf_get(union meta_addr ma)
 {
 	struct _fbuf *pbuf;	// parent buffer
-	struct _fbuf *buf;
+	struct _fbuf *fbuf;
 	union meta_addr	tma;	// temporary metadata address
 	uint32_t sa;	// sector address where the metadata is stored
 	unsigned index;
 
 	MY_ASSERT(IS_META_ADDR(ma.uint32));
-	buf = fbuf_search(ma);
-	if (buf != NULL) // cache hit
-		return buf;
+	fbuf = fbuf_search(ma);
+	if (fbuf != NULL) // cache hit
+		return fbuf;
 
 	// cache miss
 	// get the root sector address of the file @ma.fd
@@ -1241,87 +1259,84 @@ fbuf_get(union meta_addr ma)
 	// read the metadata from root to leaf node
 	for (int i = 0; ; ++i) {
 		tma.depth = i;
-		buf = fbuf_search(tma);
-		if (buf == NULL) {
-			buf = fbuf_alloc();	// allocate a fbuf from free queue
-			buf->ma = tma;
-			fbuf_hash_insert(buf);
-			buf->parent = pbuf;
+		fbuf = fbuf_search(tma);
+		if (fbuf == NULL) {
+			fbuf = fbuf_alloc();	// allocate a fbuf from free queue
+			fbuf->ma = tma;
+			fbuf_hash_insert(fbuf);
+			fbuf->parent = pbuf;
 			if (pbuf)
-				pbuf->fc.indir_queue.ref_cnt++;
+				pbuf->ref_cnt++;
 			if (sa == SECTOR_NULL)	// the metadata block does not exist
-				bzero(buf->data, sizeof(buf->data));
+				bzero(fbuf->data, sizeof(fbuf->data));
 			else {
-				my_read(sa, buf->data, 1);
+				my_read(sa, fbuf->data, 1);
 				//sc.other_write_count++;
 			}
 #if defined(MY_DEBUG)
-			buf->sa = sa;
+			fbuf->sa = sa;
 #endif
 #if defined(FBUF_DEBUG)
 			if (pbuf)
-				pbuf->child[index] = buf;
+				pbuf->child[index] = fbuf;
 #endif
 			if (i == ma.depth) {
-				fbuf_cir_queue_insert(buf);
+				fbuf_queue_insert(QUEUE_LEAF, fbuf);
 				break;
 			} else
-				LIST_INSERT_HEAD(&sc.fbuf_ind_head[i], buf, fc.indir_queue.entry);
+				fbuf_queue_insert(i, fbuf);
 
 		} else {
-			MY_ASSERT(buf->parent == pbuf);
+			MY_ASSERT(fbuf->parent == pbuf);
 #if defined(MY_DEBUG)
-			MY_ASSERT(buf->sa == sa);
+			MY_ASSERT(fbuf->sa == sa);
 #endif
 			if (i == ma.depth) // reach intended depth
 				break;
 		}
 		index = ma_index_get(ma, i);// the index to next level's indirect block
-		sa = buf->data[index];	// the sector address of the next level indirect block
+		sa = fbuf->data[index];	// the sector address of the next level indirect block
 		tma = ma_index_set(tma, i, index); // set the next level's index for @tma
-		pbuf = buf;		// @buf is the parent of next level indirect block
+		pbuf = fbuf;		// @fbuf is the parent of next level indirect block
 	}
 #if defined(MY_DEBUG)
 	fbuf_queue_check();
 #endif
-	return buf;
+	return fbuf;
 }
 
 static void
-fbuf_write(struct _fbuf *buf)
+fbuf_write(struct _fbuf *fbuf)
 {
 	struct _fbuf *pbuf;	// buffer parent
 	unsigned pindex;	// the index in parent indirect block
 	uint32_t sa;		// sector address
 	struct _seg_sum *seg_sum = &sc.seg_sum;
 
-	sa = _logstor_write_one(buf->ma.uint32, (char *)buf->data, seg_sum);
+	sa = _logstor_write_one(fbuf->ma.uint32, (char *)fbuf->data, seg_sum);
 #if defined(MY_DEBUG)
-	buf->sa = sa;
+	fbuf->sa = sa;
 #endif
-	buf->fc.modified = false;
+	fbuf->fc.modified = false;
 	sc.other_write_count++;
 
-	// store the forward mapping in parent indirect block
-	pbuf = buf->parent;
+	// update the forward mapping in parent indirect block
+	pbuf = fbuf->parent;
 	if (pbuf) {
-		MY_ASSERT(buf->ma.depth != 0);
-		MY_ASSERT(pbuf->ma.depth == buf->ma.depth - 1);
-		pindex = ma_index_get(buf->ma, buf->ma.depth - 1);
+		MY_ASSERT(fbuf->ma.depth != 0);
+		MY_ASSERT(pbuf->ma.depth == fbuf->ma.depth - 1);
+		pindex = ma_index_get(fbuf->ma, fbuf->ma.depth - 1);
 		pbuf->data[pindex] = sa;
-		if (__predict_false(!pbuf->fc.modified)) {
 			pbuf->fc.modified = true;
-		}
 	} else {
-		MY_ASSERT(buf->ma.depth == 0);
-		MY_ASSERT(buf->ma.fd < FD_COUNT);
+		MY_ASSERT(fbuf->ma.depth == 0);
 		// store the root sector address to the corresponding file table in super block
-		sc.superblock.fd_tab[buf->ma.fd] = sa;
+		sc.superblock.fd_tab[fbuf->ma.fd] = sa;
 		sc.sb_modified = true;
 	}
 
 	// store the reverse mapping in segment summary
-	seg_sum->ss_rm[seg_sum->ss_alloc++] = buf->ma.uint32;
+	seg_sum->ss_rm[seg_sum->ss_alloc++] = fbuf->ma.uint32;
 
 	if (seg_sum->ss_alloc == SEG_SUM_OFFSET) { // current segment is full
 		seg_sum_write();
@@ -1334,14 +1349,14 @@ Description:
     Write the dirty data in file buffer to disk
 */
 static void
-fbuf_flush(struct _fbuf *buf)
+fbuf_flush(struct _fbuf *fbuf)
 {
 
-	if (!buf->fc.modified)
+	if (!fbuf->fc.modified)
 		return;
 
-	MY_ASSERT(IS_META_ADDR(buf->ma.uint32));
-	fbuf_write(buf);
+	MY_ASSERT(IS_META_ADDR(fbuf->ma.uint32));
+	fbuf_write(fbuf);
 	return;
 }
 
@@ -1354,12 +1369,10 @@ fbuf_alloc(void)
 {
 	struct _fbuf *fbuf;
 
-	fbuf = TAILQ_FIRST(&sc.fbuf_free_head);
+	fbuf = sc.fbuf_queue[QUEUE_CLEAN].sential.fc.queue_next;
 	MY_ASSERT(fbuf != NULL);
-	MY_ASSERT(fbuf->fc.on_free_queue);
-	TAILQ_REMOVE(&sc.fbuf_free_head, fbuf, fc.free_queue);
-	fbuf->fc.on_free_queue = false;
-	sc.fbuf_free_cnt--;
+	fbuf_queue_remove(QUEUE_CLEAN, fbuf);
+	fbuf_hash_remove(fbuf);
 	return fbuf;
 }
 
@@ -1372,14 +1385,20 @@ fbuf_search(union meta_addr ma)
 {
 	unsigned	hash;	// hash value
 	struct _fbuf_bucket	*bucket;
-	struct _fbuf	*buf;
+	struct _fbuf	*fbuf;
 
 	hash = ma.uint32 % FBUF_BUCKETS;
 	bucket = &sc.fbuf_bucket[hash];
-	LIST_FOREACH(buf, bucket, buffer_bucket_queue) {
-		if (buf->ma.uint32 == ma.uint32) { // cache hit
+	int foreach_cnt = 0; // debug
+	LIST_FOREACH(fbuf, bucket, buffer_bucket_queue) {
+		MY_BREAK(++foreach_cnt > 4);
+		if (fbuf->ma.uint32 == ma.uint32) { // cache hit
 			sc.fbuf_hit++;
-			return buf;
+			if (fbuf->fc.queue_type == QUEUE_CLEAN) {
+				fbuf_queue_remove(QUEUE_CLEAN, fbuf);
+				fbuf_queue_insert(QUEUE_LEAF, fbuf);
+			}
+			return fbuf;
 		}
 	}
 	sc.fbuf_miss++;
@@ -1388,13 +1407,13 @@ fbuf_search(union meta_addr ma)
 
 #if defined(FBUF_DEBUG)
 static void
-fbuf_dump(struct _fbuf *buf, FILE *fh)
+fbuf_dump(struct _fbuf *fbuf, FILE *fh)
 {
 	int i;
 
-	fprintf(fh, "sa %08u depth %d\n", buf->sa, buf->ma.depth);
+	fprintf(fh, "sa %08u depth %d\n", fbuf->sa, fbuf->ma.depth);
 	for (i = 0; i < SECTOR_SIZE/4;  i++)
-		fprintf(fh, "[%04d] %08u\n", i, buf->data[i]);
+		fprintf(fh, "[%04d] %08u\n", i, fbuf->data[i]);
 	fprintf(fh, "======================\n");
 }
 
@@ -1402,7 +1421,7 @@ static void
 fbuf_mod_dump(void)
 {
 	FILE *fh;
-	struct _fbuf *buf;
+	struct _fbuf *fbuf;
 	int i;
 
 	fh = fopen("fbuf.txt", "w");
@@ -1410,17 +1429,13 @@ fbuf_mod_dump(void)
 
 	fbuf_mod_flush();
 	fprintf(fh, "\n\n");
-	for (i = 0; i < META_LEAF_DEPTH; i++) {
-		fprintf(fh, "indir queue %d\n", i);
-		LIST_FOREACH(buf, &sc.fbuf_ind_head[i], fc.indir_queue.entry) {
-			MY_ASSERT(buf->fc.on_cir_queue == false);
-			fbuf_dump(buf, fh);
+	for (i = 0; i < QUEUE_CNT; ++i) {
+		fprintf(fh, "queue %d\n", i);
+		fbuf = sc.fbuf_queue[i].sential.fc.queue_next;
+		while (fbuf != (struct _fbuf *)&sc.fbuf_queue[i].sential) {
+			MY_ASSERT(fbuf->fc.queue_type == i);
+			fbuf_dump(fbuf, fh);
 		}
-	}
-	buf = sc.fbuf_cir_head->fc.cir_queue.next;
-	while (buf != (struct _fbuf *)&sc.fbuf_cir_head) {
-		fbuf_dump(buf, fh);
-		buf = buf->fc.cir_queue.next;
 	}
 
 	fclose(fh);
