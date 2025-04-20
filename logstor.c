@@ -180,6 +180,7 @@ struct _fbuf_comm {
 	uint8_t	queue_which;
 	bool accessed;	/* only used for fbufs on circular queue */
 	bool modified;	/* the fbuf is dirty */
+	bool sential;
 };
 
 struct _fbuf_sential {
@@ -194,6 +195,7 @@ struct _fbuf { // file buffer
 	struct _fbuf_comm fc;
 
 	LIST_ENTRY(_fbuf)	buffer_bucket_queue;// the pointer for bucket chain
+	int bucket_which;
 	struct _fbuf	*parent;
 	unsigned ref_cnt;
 
@@ -223,7 +225,6 @@ struct g_logstor_softc {
 		int	count;
 	} fbuf_queue[QUEUE_CNT];
 
-	//uint32_t	fbuf_free_cnt;
 	// buffer hash queue
 	LIST_HEAD(_fbuf_bucket, _fbuf)	fbuf_bucket[FBUF_BUCKETS];
 	
@@ -1076,13 +1077,17 @@ fbuf_mod_init(void)
 		fbuf_queue_init(i);
 
 	for (int i = 0; i < FBUF_BUCKETS; i++)
-		fbuf_queue_init(QUEUE_CNT + i);
+		LIST_INIT(&sc.fbuf_bucket[i]);
 
+	// insert fbuf to both QUEUE_CLEAN and hash queue
 	for (int i = 0; i < fbuf_count; ++i) {
 		struct _fbuf *fbuf = &sc.fbuf[i];
 		fbuf->fc.accessed = false;
 		fbuf->fc.modified = false;
 		fbuf_queue_insert(QUEUE_CLEAN, fbuf);
+		// distribute fbuf evently to hash buckets
+		fbuf->ma.uint32 = i;
+		fbuf_hash_insert(fbuf);
 #if defined(FBUF_DEBUG)
 		fbuf->index = i;
 #endif
@@ -1135,6 +1140,7 @@ fbuf_hash_insert(struct _fbuf *fbuf)
 	struct _fbuf_bucket *bucket;
 
 	hash = fbuf->ma.uint32 % FBUF_BUCKETS;
+	fbuf->bucket_which = hash;
 	bucket = &sc.fbuf_bucket[hash];
 	LIST_INSERT_HEAD(bucket, fbuf, buffer_bucket_queue);
 }
@@ -1184,6 +1190,7 @@ fbuf_queue_init(int which)
 	fbuf->fc.queue_prev = (struct _fbuf*)fbuf;
 	fbuf->fc.accessed = false;
 	fbuf->fc.modified = false;
+	fbuf->fc.sential = true;
 }
 
 static void
@@ -1359,9 +1366,11 @@ static struct _fbuf *
 fbuf_alloc(void)
 {
 	struct _fbuf *fbuf;
+	struct _fbuf *clean_queue;
 
-	fbuf = sc.fbuf_queue[QUEUE_CLEAN].sential.fc.queue_next;
-	MY_ASSERT(fbuf != NULL);
+	clean_queue = (struct _fbuf *)&sc.fbuf_queue[QUEUE_CLEAN].sential;
+	fbuf = clean_queue->fc.queue_next;
+	MY_ASSERT(fbuf != clean_queue);
 	fbuf_queue_remove(QUEUE_CLEAN, fbuf);
 	fbuf_hash_remove(fbuf);
 	return fbuf;
