@@ -46,6 +46,7 @@ void logstor_init(void);
 void logstor_fini(void);
 int  logstor_open(const char *disk_file);
 void logstor_close(void);
+void fbuf_hash_check(void);
 //int logstor_read  (off_t offset, void *data, off_t length);
 //int logstor_write (off_t offset, void *data, off_t length);
 int logstor_delete(off_t offset, void *data, off_t length);

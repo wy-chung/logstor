@@ -136,6 +136,7 @@ test(int n, unsigned max_block)
 #endif
 	printf("reading %d...\n", n);
 	test_read(max_block);
+	fbuf_hash_check();
 }
 
 static void 
