@@ -75,8 +75,8 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 #define BLOCK_INVALID	(((union meta_addr){.meta = 0xFF, .depth = 3}).uint32) // depth can never be 3
 #define META_INVALID	((union meta_addr){.uint32 = 0})
 #define	META_START	(((union meta_addr){.meta = 0xFF}).uint32)	// metadata block address start
-#define	IS_META_ADDR(x)	((x) >= META_START)
 #define META_LEAF_DEPTH 2
+#define	IS_META_ADDR(x)	((x) >= META_START)
 
 #define	SECTOR_NULL	0	// this sector address can not map to any block address
 #define SECTOR_DEL	1	// delete marker for a block
@@ -131,8 +131,8 @@ _Static_assert(sizeof(struct _superblock) < SECTOR_SIZE, "The size of the super 
 struct _seg_sum {
 	uint32_t ss_rm[SECTORS_PER_SEG - 1];	// reverse map
 	// reverse map SECTORS_PER_SEG - 1 is not used so we store something here
-	//uint16_t ss_gen;  // sequence number. used for redo after system crash
-	uint32_t ss_alloc; // allocate sector at this location
+	uint16_t ss_alloc; // allocate sector at this location
+	uint16_t ss_gen;  // sequence number. used for redo after system crash
 };
 
 _Static_assert(sizeof(struct _seg_sum) == SECTOR_SIZE,
@@ -231,6 +231,9 @@ struct g_logstor_softc {
 	// buffer hash queue
 	struct {
 		struct _fbuf_sential sential;	// head of the queues
+#if defined(MY_DEBUG)
+		int	count;
+#endif
 	} fbuf_bucket[FBUF_BUCKETS];
 	
 	// statistics
@@ -496,7 +499,7 @@ fbuf_check_clean_queue(void)
 	struct _fbuf *fbuf;
 	struct _fbuf *pbuf;
 
-	while (sc.fbuf_clean_cnt < 4) {
+	while (sc.fbuf_clean_cnt < FD_COUNT * (META_LEAF_DEPTH + 1)) {
 		fbuf = fbuf_get_replacement();
 		MY_ASSERT(fbuf != NULL);
 		MY_ASSERT(!fbuf->fc.is_sential);
@@ -664,7 +667,7 @@ seg_sum_write(void)
 
 	// segment summary is at the end of a segment
 	sa = sega2sa(sc.superblock.sega_alloc) + SEG_SUM_OFFSET;
-	//sc.seg_sum.ss_gen = sc.superblock.sb_gen;
+	sc.seg_sum.ss_gen = sc.superblock.sb_gen;
 	my_write(sa, (void *)&sc.seg_sum, 1);
 	sc.other_write_count++; // the write for the segment summary
 }
@@ -1146,6 +1149,7 @@ fbuf_hash_init(int which)
 	struct _fbuf_sential *fbuf;
 
 	MY_ASSERT(which < FBUF_BUCKETS);
+sc.fbuf_bucket[which].count = 0;
 	fbuf = &sc.fbuf_bucket[which].sential;
 	fbuf->fc.queue_next = (struct _fbuf *)fbuf;
 	fbuf->fc.queue_prev = (struct _fbuf *)fbuf;
@@ -1162,6 +1166,7 @@ fbuf_hash_insert_head(struct _fbuf *fbuf)
 
 	which = fbuf->ma.uint32 % FBUF_BUCKETS;
 	fbuf->bucket_which = which;
+sc.fbuf_bucket[which].count++;
 	bucket_head = &sc.fbuf_bucket[which].sential;
 	next = bucket_head->fc.queue_next;
 	bucket_head->fc.queue_next = fbuf;
@@ -1183,6 +1188,7 @@ fbuf_hash_remove(struct _fbuf *fbuf)
 	which = fbuf->bucket_which;
 	MY_ASSERT(which < FBUF_BUCKETS);
 	MY_ASSERT(fbuf != (struct _fbuf *)&sc.fbuf_bucket[which].sential);
+sc.fbuf_bucket[which].count--;
 	prev = fbuf->bucket_prev;
 	next = fbuf->bucket_next;
 	if (prev->fc.is_sential)
@@ -1238,7 +1244,6 @@ fbuf_queue_remove(int which, struct _fbuf *fbuf)
 
 	MY_ASSERT(fbuf->queue_which == which);
 	MY_ASSERT(fbuf != (struct _fbuf *)&sc.fbuf_queue[which].sential);
-	MY_ASSERT(fbuf->ma.uint32 != META_INVALID.uint32);
 	prev = fbuf->fc.queue_prev;
 	next = fbuf->fc.queue_next;
 	prev->fc.queue_next = next;
@@ -1280,7 +1285,7 @@ fbuf_get(union meta_addr ma)
 		tma.depth = i;
 		fbuf = fbuf_search(tma);
 		if (fbuf == NULL) {
-			fbuf = fbuf_alloc();	// allocate a fbuf from free queue
+			fbuf = fbuf_alloc();	// allocate a fbuf from clean queue
 			fbuf->ma = tma;
 			fbuf_hash_insert_head(fbuf);
 			fbuf->parent = pbuf;
@@ -1406,15 +1411,17 @@ static struct _fbuf *
 fbuf_search(union meta_addr ma)
 {
 	unsigned	hash;	// hash value
-	struct _fbuf	*bucket;
 	struct _fbuf	*fbuf;
+	struct _fbuf_sential	*bucket;
 
+	MY_BREAK(gdb_cond1==1483);
 	hash = ma.uint32 % FBUF_BUCKETS;
-	bucket = (struct _fbuf *)&sc.fbuf_bucket[hash];
+	bucket = &sc.fbuf_bucket[hash].sential;
+      int count = sc.fbuf_bucket[hash].count;
 	fbuf = bucket->fc.queue_next;
-	int foreach_cnt = 0; // debug
-	while (fbuf != bucket) {
-		MY_BREAK(++foreach_cnt > 4);
+	int loop_cnt = 0; // debug
+	while (fbuf != (struct _fbuf *)bucket) {
+		MY_BREAK(++loop_cnt > 4);
 		if (fbuf->ma.uint32 == ma.uint32) { // cache hit
 			sc.fbuf_hit++;
 			if (fbuf->queue_which == QUEUE_CLEAN) {
