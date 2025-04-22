@@ -167,8 +167,8 @@ _Static_assert(sizeof(union meta_addr) == 4, "The size of emta_addr must be 4");
 enum {
 	QUEUE_IND0,
 	QUEUE_IND1,
-	QUEUE_LEAF,
-	QUEUE_CLEAN,
+	QUEUE_LEAF,	// only replace buffers from leaf nodes
+	QUEUE_CLEAN,	// leaf node but also guaranteed clean
 	QUEUE_CNT,
 };
 _Static_assert(QUEUE_IND0 == 0, "QUEUE_IND0 must be 0");
@@ -220,12 +220,9 @@ struct g_logstor_softc {
 	int fbuf_count;
 	struct _fbuf *fbuf;
 	struct _fbuf *fbuf_replace;	// start of the replacement fbuf
-	int fbuf_clean_cnt;
 	struct {
 		struct _fbuf_sential sential;	// head of the queues
-#if defined(MY_DEBUG)
 		int	count;
-#endif
 	} fbuf_queue[QUEUE_CNT];
 
 	// buffer hash queue
@@ -286,7 +283,7 @@ static void fbuf_flush(struct _fbuf *fbuf);
 static void fbuf_write(struct _fbuf *fbuf);
 static void fbuf_queue_init(int which);
 static void fbuf_queue_insert_tail(int which, struct _fbuf *fbuf);
-static void fbuf_queue_remove(int which, struct _fbuf *fbuf);
+static void fbuf_queue_remove(struct _fbuf *fbuf);
 static void fbuf_queue_check(void);
 static void fbuf_hash_init(int which);
 static void fbuf_hash_insert_head(struct _fbuf *fbuf);
@@ -474,10 +471,9 @@ fbuf_get_replacement(void)
 {
 	struct _fbuf *fbuf;
 
-	fbuf = sc.fbuf_queue[QUEUE_LEAF].sential.fc.queue_next;
+	fbuf = sc.fbuf_replace;
 again:
 	while (true) {
-		MY_ASSERT(fbuf->queue_which == QUEUE_LEAF);
 		if (!fbuf->fc.accessed)
 			break;
 		fbuf->fc.accessed = false;	// give this buffer a second chance
@@ -489,6 +485,7 @@ again:
 		goto again;
 	}
 	sc.fbuf_replace = fbuf->fc.queue_next;
+	MY_ASSERT(fbuf->queue_which == QUEUE_LEAF);
 
 	return fbuf;
 }
@@ -497,22 +494,14 @@ static void
 fbuf_check_clean_queue(void)
 {
 	struct _fbuf *fbuf;
-	struct _fbuf *pbuf;
+	const int min_clean = FD_COUNT * (META_LEAF_DEPTH + 2);
 
-	while (sc.fbuf_clean_cnt < FD_COUNT * (META_LEAF_DEPTH + 1)) {
+	while (sc.fbuf_queue[QUEUE_CLEAN].count < min_clean) {
 		fbuf = fbuf_get_replacement();
 		MY_ASSERT(fbuf != NULL);
 		MY_ASSERT(!fbuf->fc.is_sential);
-		fbuf_queue_remove(QUEUE_LEAF, fbuf);
-		pbuf = fbuf->parent;
-		while (pbuf)
-			if (--pbuf->child_ref_cnt == 0) {
-				fbuf_queue_remove(pbuf->ma.depth, pbuf);
-				fbuf_queue_insert_tail(QUEUE_LEAF, pbuf);
-				pbuf = pbuf->parent;
-			}
+		fbuf_queue_remove(fbuf);
 		fbuf_queue_insert_tail(QUEUE_CLEAN, fbuf);
-		++sc.fbuf_clean_cnt;
 		if (fbuf->fc.modified)
 			fbuf_write(fbuf);
 	}
@@ -1101,7 +1090,6 @@ fbuf_mod_init(void)
 		fbuf->index = i;
 #endif
 	}
-	sc.fbuf_clean_cnt = fbuf_count;
 	sc.fbuf_replace = (struct _fbuf *)&sc.fbuf_queue[QUEUE_LEAF].sential;
 
 
@@ -1149,7 +1137,7 @@ fbuf_hash_init(int which)
 	struct _fbuf_sential *fbuf;
 
 	MY_ASSERT(which < FBUF_BUCKETS);
-sc.fbuf_bucket[which].count = 0;
+		sc.fbuf_bucket[which].count = 0;
 	fbuf = &sc.fbuf_bucket[which].sential;
 	fbuf->fc.queue_next = (struct _fbuf *)fbuf;
 	fbuf->fc.queue_prev = (struct _fbuf *)fbuf;
@@ -1166,16 +1154,17 @@ fbuf_hash_insert_head(struct _fbuf *fbuf)
 
 	which = fbuf->ma.uint32 % FBUF_BUCKETS;
 	fbuf->bucket_which = which;
-sc.fbuf_bucket[which].count++;
+		       sc.fbuf_bucket[which].count++;
 	bucket_head = &sc.fbuf_bucket[which].sential;
+
 	next = bucket_head->fc.queue_next;
 	bucket_head->fc.queue_next = fbuf;
 	fbuf->bucket_next = next;
 	fbuf->bucket_prev = (struct _fbuf *)bucket_head;
 	if (next->fc.is_sential)
-		next->fc.queue_next = fbuf;
+		next->fc.queue_prev = fbuf;
 	else
-		next->bucket_next = fbuf;
+		next->bucket_prev = fbuf;
 }
 
 static void
@@ -1213,44 +1202,39 @@ fbuf_queue_init(int which)
 	fbuf->fc.accessed = false;
 	fbuf->fc.modified = false;
 	fbuf->fc.is_sential = true;
-#if defined(MY_DEBUG)
 	sc.fbuf_queue[which].count= 0;
-#endif
 }
 
 static void
 fbuf_queue_insert_tail(int which, struct _fbuf *fbuf)
 {
-	struct _fbuf *queue_head;
+	struct _fbuf_sential *queue_sential;
 	struct _fbuf *prev;
 
+	MY_ASSERT(which < QUEUE_CNT);
 	fbuf->queue_which = which;
-	queue_head = (struct _fbuf *)&sc.fbuf_queue[which].sential;
-	prev = queue_head->fc.queue_prev;
-	queue_head->fc.queue_prev = fbuf;
-	fbuf->fc.queue_next = queue_head;
+	queue_sential = &sc.fbuf_queue[which].sential;
+	prev = queue_sential->fc.queue_prev;
+	queue_sential->fc.queue_prev = fbuf;
+	fbuf->fc.queue_next = (struct _fbuf *)queue_sential;
 	fbuf->fc.queue_prev = prev;
 	prev->fc.queue_next = fbuf;
-#if defined(MY_DEBUG)
-	sc.fbuf_queue[which].count++;
-#endif
+	++sc.fbuf_queue[which].count;
 }
 
 static void
-fbuf_queue_remove(int which, struct _fbuf *fbuf)
+fbuf_queue_remove(struct _fbuf *fbuf)
 {
 	struct _fbuf *prev;
 	struct _fbuf *next;
+	int which = fbuf->queue_which;
 
-	MY_ASSERT(fbuf->queue_which == which);
 	MY_ASSERT(fbuf != (struct _fbuf *)&sc.fbuf_queue[which].sential);
 	prev = fbuf->fc.queue_prev;
 	next = fbuf->fc.queue_next;
 	prev->fc.queue_next = next;
 	next->fc.queue_prev = prev;
-#if defined(MY_DEBUG)
-	sc.fbuf_queue[which].count--;
-#endif
+	--sc.fbuf_queue[which].count;
 }
 
 /*
@@ -1391,15 +1375,23 @@ Description:
 static struct _fbuf *
 fbuf_alloc(void)
 {
-	struct _fbuf *fbuf;
-	struct _fbuf *clean_queue;
+	struct _fbuf *fbuf, *pbuf;
+	struct _fbuf_sential *queue_sential;
 
-	clean_queue = (struct _fbuf *)&sc.fbuf_queue[QUEUE_CLEAN].sential;
-	fbuf = clean_queue->fc.queue_next;
-	MY_ASSERT(fbuf != clean_queue);
-	fbuf_queue_remove(QUEUE_CLEAN, fbuf);
-	--sc.fbuf_clean_cnt;
+	queue_sential = &sc.fbuf_queue[QUEUE_CLEAN].sential;
+	fbuf = queue_sential->fc.queue_next;
+	MY_ASSERT(fbuf != (struct _fbuf *)queue_sential);
+	MY_ASSERT(fbuf->queue_which == QUEUE_CLEAN);
+	pbuf = fbuf->parent;
+	fbuf_queue_remove(fbuf);
 	fbuf_hash_remove(fbuf);
+	while (pbuf) {
+		if (--pbuf->child_ref_cnt == 0) {
+			fbuf_queue_remove(pbuf);
+			fbuf_queue_insert_tail(QUEUE_LEAF, pbuf);
+		}
+		pbuf = pbuf->parent;
+	}
 	return fbuf;
 }
 
@@ -1412,21 +1404,19 @@ fbuf_search(union meta_addr ma)
 {
 	unsigned	hash;	// hash value
 	struct _fbuf	*fbuf;
-	struct _fbuf_sential	*bucket;
+	struct _fbuf_sential	*queue_sential;
 
-	MY_BREAK(gdb_cond1==1483);
 	hash = ma.uint32 % FBUF_BUCKETS;
-	bucket = &sc.fbuf_bucket[hash].sential;
-      int count = sc.fbuf_bucket[hash].count;
-	fbuf = bucket->fc.queue_next;
-	int loop_cnt = 0; // debug
-	while (fbuf != (struct _fbuf *)bucket) {
-		MY_BREAK(++loop_cnt > 4);
+      int bucket_count = sc.fbuf_bucket[hash].count;
+	queue_sential = &sc.fbuf_bucket[hash].sential;
+	fbuf = queue_sential->fc.queue_next;
+int loop_cnt = 0; // debug
+	while (fbuf != (struct _fbuf *)queue_sential) {
+MY_BREAK(++loop_cnt > 4);
 		if (fbuf->ma.uint32 == ma.uint32) { // cache hit
 			sc.fbuf_hit++;
 			if (fbuf->queue_which == QUEUE_CLEAN) {
-				fbuf_queue_remove(QUEUE_CLEAN, fbuf);
-				--sc.fbuf_clean_cnt;
+				fbuf_queue_remove(fbuf);
 				fbuf_queue_insert_tail(QUEUE_LEAF, fbuf);
 			}
 			return fbuf;
@@ -1495,15 +1485,17 @@ static void
 fbuf_queue_check(void)
 {
 	struct _fbuf *fbuf;
+	struct _fbuf_sential *queue_sential;
 	unsigned count[QUEUE_CNT];
 
 	for (int i = 0; i < QUEUE_CNT ; ++i) {
 		count[i] = 0;
-		fbuf = sc.fbuf_queue[i].sential.fc.queue_next;
-		while (fbuf != (struct _fbuf *)&sc.fbuf_queue[i].sential) {
+		queue_sential = &sc.fbuf_queue[i].sential;
+		fbuf = queue_sential->fc.queue_next;
+		while (fbuf != (struct _fbuf *)queue_sential) {
 			++count[i];
 			MY_ASSERT(fbuf->queue_which == i);
-			if (i <= META_LEAF_DEPTH)
+			if (i < META_LEAF_DEPTH)
 				MY_ASSERT(fbuf->ma.depth == i);
 			fbuf = fbuf->fc.queue_next;
 		}
