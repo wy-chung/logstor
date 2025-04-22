@@ -260,7 +260,7 @@ static char *ram_disk;
 static struct g_logstor_softc sc;
 
 static int _logstor_read_one(unsigned ba, char *data);
-static int _logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum);
+static int _logstor_write_one(uint32_t ba, char *data);
 
 static void seg_alloc(void);
 static void seg_sum_write(void);
@@ -521,7 +521,7 @@ logstor_read_test(uint32_t ba, void *data)
 int
 logstor_write_test(uint32_t ba, void *data)
 {
-	_logstor_write_one(ba, data, &sc.seg_sum);
+	_logstor_write_one(ba, data);
 	fbuf_check_clean_queue();
 	return 0;
 }
@@ -565,15 +565,16 @@ is_sec_valid(uint32_t sa, uint32_t ba_rev)
 
 /*
 Description:
-  write one data block
+  write data/metadata block to disk
 
 Return:
   the sector address where the data is written
 */
 static int
-_logstor_write_one(uint32_t ba, char *data, struct _seg_sum *seg_sum)
+_logstor_write_one(uint32_t ba, char *data)
 {
 	static uint8_t recursive;
+	struct _seg_sum *seg_sum = &sc.seg_sum;
 
 	MY_BREAK(++recursive >= 3);
 	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.max_block_cnt);
@@ -588,6 +589,7 @@ again:
 		ba_rev = seg_sum->ss_rm[i];
 		if (is_sec_valid(sa, ba_rev))
 			continue;
+
 		my_write(sa, data, 1);
 		seg_sum->ss_rm[i] = ba;	// record reverse mapping
 		seg_sum->ss_alloc = i + 1;	// advnace the alloc pointer
@@ -596,7 +598,7 @@ again:
 			seg_alloc();
 		}
 		if (!IS_META_ADDR(ba)) {
-			// record the forward mapping
+			// record the forward mapping for the %ba
 			// the forward mapping must be recorded after
 			// the segment summary block write
 			file_write_4byte(sc.superblock.fd_cur, ba, sa);
@@ -1024,7 +1026,7 @@ ma2pma(union meta_addr ma, unsigned *pindex_out)
 		ma.depth = 1; // i.e. ma.depth - 1
 		break;
 	default:
-		MY_PANIC();
+		ma = META_INVALID;
 		break;
 	}
 	return ma;
@@ -1272,8 +1274,10 @@ fbuf_get(union meta_addr ma)
 			fbuf->ma = tma;
 			fbuf_hash_insert_head(fbuf);
 			fbuf->parent = pbuf;
-			if (pbuf)
-				pbuf->child_ref_cnt++;
+			if (pbuf) {
+				++pbuf->child_ref_cnt;
+				MY_ASSERT(pbuf->child_ref_cnt <= SECTOR_SIZE/4);
+			}
 			if (sa == SECTOR_NULL)	// the metadata block does not exist
 				bzero(fbuf->data, sizeof(fbuf->data));
 			else {
@@ -1318,16 +1322,15 @@ fbuf_write(struct _fbuf *fbuf)
 	struct _fbuf *pbuf;	// buffer parent
 	unsigned pindex;	// the index in parent indirect block
 	uint32_t sa;		// sector address
-	struct _seg_sum *seg_sum = &sc.seg_sum;
 
-	sa = _logstor_write_one(fbuf->ma.uint32, (char *)fbuf->data, seg_sum);
+	sa = _logstor_write_one(fbuf->ma.uint32, (char *)fbuf->data);
 #if defined(MY_DEBUG)
 	fbuf->sa = sa;
 #endif
 	fbuf->fc.modified = false;
 	sc.other_write_count++;
 
-	// update the forward mapping in parent indirect block
+	// update the sector address of this fbuf in its parent fbuf
 	pbuf = fbuf->parent;
 	if (pbuf) {
 		MY_ASSERT(fbuf->ma.depth != 0);
@@ -1340,14 +1343,6 @@ fbuf_write(struct _fbuf *fbuf)
 		// store the root sector address to the corresponding file table in super block
 		sc.superblock.fd_tab[fbuf->ma.fd] = sa;
 		sc.sb_modified = true;
-	}
-
-	// store the reverse mapping in segment summary
-	seg_sum->ss_rm[seg_sum->ss_alloc++] = fbuf->ma.uint32;
-
-	if (seg_sum->ss_alloc == SEG_SUM_OFFSET) { // current segment is full
-		seg_sum_write();
-		seg_alloc();
 	}
 }
 
@@ -1381,9 +1376,9 @@ fbuf_alloc(void)
 	fbuf = queue_sentinel->fc.queue_next;
 	MY_ASSERT(fbuf != (struct _fbuf *)queue_sentinel);
 	MY_ASSERT(fbuf->queue_which == QUEUE_CLEAN);
-	pbuf = fbuf->parent;
 	fbuf_queue_remove(fbuf);
 	fbuf_hash_remove(fbuf);
+	pbuf = fbuf->parent;
 	while (pbuf) {
 		if (--pbuf->child_ref_cnt == 0) {
 			fbuf_queue_remove(pbuf);
@@ -1406,7 +1401,7 @@ fbuf_search(union meta_addr ma)
 	struct _fbuf_sentinel	*queue_sentinel;
 
 	hash = ma.uint32 % FBUF_BUCKETS;
-      int bucket_count = sc.fbuf_bucket[hash].count;
+int bucket_count __unused = sc.fbuf_bucket[hash].count;
 	queue_sentinel = &sc.fbuf_bucket[hash].sentinel;
 	fbuf = queue_sentinel->fc.queue_next;
 int loop_cnt = 0; // debug
