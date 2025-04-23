@@ -82,36 +82,42 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 #define SECTOR_DEL	1	// delete marker for a block
 
 //#define FBUF_MAX	500
-#define FBUF_MAX	1024
-#define FBUF_BUCKETS	1021
+#define FBUF_CLEAN_THRESHOLD	12
+#define FBUF_MIN	(1032 + FBUF_CLEAN_THRESHOLD)
+#define FBUF_MAX	(FBUF_MIN * 2)
+#define FBUF_BUCKETS	1097	// this should be a prime number
 
 #define	FD_CUR	1
 #define FD_COUNT	4	// max number of metadata files supported
 #define FD_INVALID	-1	// invalid file
 
 struct _superblock {
-	uint32_t	sig;		// signature
-	uint8_t		ver_major;
-	uint8_t		ver_minor;
-	uint16_t	sb_gen;		// the generation number. Used for redo after system crash
-	uint32_t	max_block_cnt;	// max number of blocks supported
+	uint32_t sig;		// signature
+	uint8_t  ver_major;
+	uint8_t  ver_minor;
+	uint16_t sb_gen;	// the generation number. Used for redo after system crash
 	/*
 	   The segments are treated as circular buffer
 	 */
-	int32_t	seg_cnt;	// total number of segments
-	int32_t	sega_alloc;	// allocate this segment
+	uint32_t seg_cnt;	// total number of segments
+	uint32_t seg_alloc;	// allocate this segment
+	uint32_t block_cnt_max;	// max number of blocks supported
+	uint32_t block_cnt_free;
 	/*
 	   The files for forward mapping file
 
-	   Mapping is always updated in @FD_CUR. When snapshot command is issued
-	   @FD_CUR is copied to @FD_DELTA and then cleaned.
-	   Backup program then backs up the delta by reading @FD_DELTA.
-	   After backup is finished, @FD_DELTA is merged into @FD_BASE and then cleaned.
+	   Normally mapping is written to %fd_cur. When commit command is issued
+	   %fd_cur and %fd_snap are merged to %fd_snap_new and new mappings are temporarily
+	   written to %fd_new.
+	   After the commit command is complete, %fd_new will become %fd_cur
+	   %fd_new_snap will become %fd_snap and the old %fd_cur and %fd_snap
+	   will be deleted.
 
-	   If reduced to reboot restore usage, only @FD_CUR and @FD_BASE are needed.
-	   Each time a PC is rebooted @FD_CUR is cleaned so all data are restored.
+	   So the actual mapping in normal state is
+	       %fd_cur || %fd_snap
+	   and during commit it is
+	       %fd_new_cur || %fd_cur || %fd_snap
 
-	   So the actual mapping is @FD_CUR || @FD_DELTA || @FD_BASE.
 	   The first mapping that is not empty is used.
 	*/
 	uint32_t fd_tab[FD_COUNT]; 	// file handles table
@@ -414,7 +420,7 @@ logstor_open(const char *disk_file)
 	MY_ASSERT(error == 0);
 
 	// read the segment summary block
-	uint32_t sa = sega2sa(sc.superblock.sega_alloc) + SEG_SUM_OFFSET;
+	uint32_t sa = sega2sa(sc.superblock.seg_alloc) + SEG_SUM_OFFSET;
 	my_read(sa, &sc.seg_sum, 1);
 	sc.data_write_count = sc.other_write_count = 0;
 
@@ -453,7 +459,7 @@ int logstor_delete(off_t offset, void *data, off_t length)
 	MY_ASSERT((length & (SECTOR_SIZE - 1)) == 0);
 	ba = offset / SECTOR_SIZE;
 	size = length / SECTOR_SIZE;
-	MY_ASSERT(ba < sc.superblock.max_block_cnt);
+	MY_ASSERT(ba < sc.superblock.block_cnt_max);
 
 	if (size == 1) {
 		file_write_4byte(sc.superblock.fd_cur, ba, SECTOR_DEL);
@@ -531,7 +537,7 @@ _logstor_read_one(unsigned ba, char *data)
 {
 	uint32_t sa;	// sector address
 
-	MY_ASSERT(ba < sc.superblock.max_block_cnt);
+	MY_ASSERT(ba < sc.superblock.block_cnt_max);
 
 	sa = file_read_4byte(sc.superblock.fd_cur, ba);
 	if (sa == SECTOR_NULL || sa == SECTOR_DEL)
@@ -577,10 +583,12 @@ _logstor_write_one(uint32_t ba, char *data)
 	struct _seg_sum *seg_sum = &sc.seg_sum;
 
 	MY_BREAK(++recursive >= 3);
-	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.max_block_cnt);
+	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.block_cnt_max);
 	MY_ASSERT(seg_sum->ss_alloc < SEG_SUM_OFFSET);
+	if (sc.superblock.block_cnt_free < 10)
+		return SECTOR_NULL;
 again:
-	uint32_t seg_sa = sega2sa(sc.superblock.sega_alloc);
+	uint32_t seg_sa = sega2sa(sc.superblock.seg_alloc);
 	for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
 	{
 		uint32_t ba_rev; // ba from the reverse map
@@ -614,7 +622,7 @@ again:
 uint32_t
 logstor_get_block_cnt(void)
 {
-	return sc.superblock.max_block_cnt;
+	return sc.superblock.block_cnt_max;
 }
 
 unsigned
@@ -660,7 +668,7 @@ seg_sum_write(void)
 	uint32_t sa;
 
 	// segment summary is at the end of a segment
-	sa = sega2sa(sc.superblock.sega_alloc) + SEG_SUM_OFFSET;
+	sa = sega2sa(sc.superblock.seg_alloc) + SEG_SUM_OFFSET;
 	sc.seg_sum.ss_gen = sc.superblock.sb_gen;
 	my_write(sa, (void *)&sc.seg_sum, 1);
 	sc.other_write_count++; // the write for the segment summary
@@ -709,19 +717,20 @@ disk_init(int fd)
 	MY_ASSERT((seg_cnt - SEG_DATA_START) * BLOCKS_PER_SEG >
 	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT);
 
-	sb_out->max_block_cnt =
+	sb_out->block_cnt_max =
 	    (seg_cnt  - SEG_DATA_START) * BLOCKS_PER_SEG -
 	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT;
-	sb_out->max_block_cnt *= 0.9;
+	sb_out->block_cnt_max *= 0.9;
+	sb_out->block_cnt_free = sb_out->block_cnt_max;
 #if defined(MY_DEBUG)
-	printf("%s: sector_cnt %u max_block_cnt %u\n",
-	    __func__, sector_cnt, sb_out->max_block_cnt);
+	printf("%s: sector_cnt %u block_cnt_max %u\n",
+	    __func__, sector_cnt, sb_out->block_cnt_max);
 #endif
 	// the root sector address for the files
 	for (int i = 0; i < FD_COUNT; i++) {
 		sb_out->fd_tab[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
 	}
-	sb_out->sega_alloc = SEG_DATA_START;	// start allocate from here
+	sb_out->seg_alloc = SEG_DATA_START;	// start allocate from here
 
 	// write out super block
 #if defined(RAM_DISK_SIZE)
@@ -775,7 +784,7 @@ superblock_read(void)
 	MY_ASSERT(pread(sc.disk_fd, sb, SECTOR_SIZE, 0) == SECTOR_SIZE);
 #endif
 	if (sb->sig != SIG_LOGSTOR ||
-	    sb->sega_alloc >= sb->seg_cnt)
+	    sb->seg_alloc >= sb->seg_cnt)
 		return EINVAL;
 
 	sb_gen = sb->sb_gen;
@@ -794,7 +803,7 @@ superblock_read(void)
 	}
 	sc.sb_sa = (i - 1);
 	sb = (struct _superblock *)buf[(i-1)%2];
-	if (sb->sega_alloc >= sb->seg_cnt)
+	if (sb->seg_alloc >= sb->seg_cnt)
 		return EINVAL;
 
 	memcpy(&sc.superblock, sb, sizeof(sc.superblock));
@@ -806,16 +815,16 @@ superblock_read(void)
 static void
 superblock_write(void)
 {
-	struct _superblock *sb_out;
+	struct _superblock *sb;
 	char buf[SECTOR_SIZE];
 
 	sc.superblock.sb_gen++;
 	if (++sc.sb_sa == SECTORS_PER_SEG)
 		sc.sb_sa = 0;
-	sb_out = (struct _superblock *)buf;
-	memcpy(sb_out, &sc.superblock, sizeof(sc.superblock));
+	sb = (struct _superblock *)buf;
+	memcpy(sb, &sc.superblock, sizeof(sc.superblock));
 	
-	my_write(sc.sb_sa, sb_out, 1);
+	my_write(sc.sb_sa, sb, 1);
 	sc.other_write_count++;
 }
 
@@ -866,10 +875,10 @@ Output:
 static void
 seg_alloc(void)
 {
-	if (++sc.superblock.sega_alloc == sc.superblock.seg_cnt)
-		sc.superblock.sega_alloc = SEG_DATA_START;
-	MY_ASSERT(sc.superblock.sega_alloc < sc.superblock.seg_cnt);
-	my_read(sega2sa(sc.superblock.sega_alloc) + SEG_SUM_OFFSET, &sc.seg_sum, 1);
+	if (++sc.superblock.seg_alloc == sc.superblock.seg_cnt)
+		sc.superblock.seg_alloc = SEG_DATA_START;
+	MY_ASSERT(sc.superblock.seg_alloc < sc.superblock.seg_cnt);
+	my_read(sega2sa(sc.superblock.seg_alloc) + SEG_SUM_OFFSET, &sc.seg_sum, 1);
 	sc.seg_sum.ss_alloc = 0;
 }
 
@@ -1071,8 +1080,10 @@ fbuf_mod_init(void)
 	int fbuf_count;
 	struct _fbuf_sentinel *queue_sentinel;
 
-	fbuf_count = sc.superblock.max_block_cnt / (SECTOR_SIZE / 4);
-	//if (fbuf_count > FBUF_MAX)
+	fbuf_count = sc.superblock.block_cnt_max / (SECTOR_SIZE / 4);
+	if (fbuf_count < FBUF_MIN)
+		fbuf_count = FBUF_MIN;
+	if (fbuf_count > FBUF_MAX)
 		fbuf_count = FBUF_MAX;
 	sc.fbuf = malloc(fbuf_count * sizeof(*sc.fbuf));
 	MY_ASSERT(sc.fbuf != NULL);
@@ -1080,7 +1091,7 @@ fbuf_mod_init(void)
 	for (int i = 0; i < QUEUE_CNT; ++i)
 		fbuf_queue_init(i);
 
-	for (int i = 0; i < FBUF_BUCKETS; i++)
+	for (int i = 0; i < FBUF_BUCKETS; ++i)
 		fbuf_hash_init(i);
 
 	// insert fbuf to both QUEUE_CLEAN and hash queue
@@ -1330,7 +1341,7 @@ fbuf_write(struct _fbuf *fbuf)
 	fbuf->fc.modified = false;
 	sc.other_write_count++;
 
-	// update the sector address of this fbuf in its parent fbuf
+	// update the sector address of this fbuf in its parent's fbuf
 	pbuf = fbuf->parent;
 	if (pbuf) {
 		MY_ASSERT(fbuf->ma.depth != 0);
