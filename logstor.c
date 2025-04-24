@@ -292,7 +292,7 @@ static void fbuf_write(struct _fbuf *fbuf);
 static void fbuf_queue_init(int which);
 static void fbuf_queue_insert_tail(int which, struct _fbuf *fbuf);
 static void fbuf_queue_remove(struct _fbuf *fbuf);
-static void fbuf_queue_check(void);
+static void fbuf_clean_queue_check(void);
 static void fbuf_hash_init(int which);
 static void fbuf_hash_insert_head(struct _fbuf *fbuf);
 static void fbuf_hash_remove(struct _fbuf *fbuf);
@@ -302,6 +302,9 @@ static uint32_t ma2sa(union meta_addr ma);
 
 static void my_read (uint32_t sa, void *buf, unsigned size);
 static void my_write(uint32_t sa, const void *buf, unsigned size);
+
+static void logstor_check(void);
+static void fbuf_queue_check(void);
 
 #if defined(RAM_DISK_SIZE)
 static off_t
@@ -427,6 +430,7 @@ logstor_open(const char *disk_file)
 	sc.data_write_count = sc.other_write_count = 0;
 
 	fbuf_mod_init();
+	logstor_check();
 
 	return 0;
 }
@@ -463,13 +467,10 @@ int logstor_delete(off_t offset, void *data, off_t length)
 	size = length / SECTOR_SIZE;
 	MY_ASSERT(ba < sc.superblock.block_cnt_max);
 
-	if (size == 1) {
-		file_write_4byte(sc.superblock.fd_cur, ba, SECTOR_DEL);
-	} else {
-		for (i = 0; i<size; i++)
-			file_write_4byte(sc.superblock.fd_cur, ba + i, SECTOR_DEL);
-	}
+	for (i = 0; i < size; i++)
+		file_write_4byte(sc.superblock.fd_cur, ba + i, SECTOR_DEL);
 
+	fbuf_clean_queue_check();
 	return (0);
 }
 
@@ -501,7 +502,7 @@ again:
 }
 
 static void
-fbuf_check_clean_queue(void)
+fbuf_clean_queue_check(void)
 {
 	struct _fbuf *fbuf;
 	const int min_clean = 24;
@@ -522,7 +523,7 @@ int
 logstor_read_test(uint32_t ba, void *data)
 {
 	_logstor_read_one(ba, data);
-	fbuf_check_clean_queue();
+	fbuf_clean_queue_check();
 	return 0;
 }
 
@@ -530,7 +531,7 @@ int
 logstor_write_test(uint32_t ba, void *data)
 {
 	_logstor_write_one(ba, data);
-	fbuf_check_clean_queue();
+	fbuf_clean_queue_check();
 	return 0;
 }
 
@@ -1536,7 +1537,7 @@ logstor_ba2sa(uint32_t ba)
 	else {
 		sa = file_read_4byte(sc.superblock.fd_cur, ba);
 	}
-
+	fbuf_clean_queue_check();
 	return sa;
 }
 
@@ -1570,14 +1571,11 @@ logstor_check(void)
 	uint32_t sa_min;
 
 	printf("%s ...\n", __func__);
-	fbuf_mod_flush();
-	if (sc.seg_sum.ss_alloc != 0)
-		seg_sum_write();
 	sa_min = -1;
 	max_block = logstor_get_block_cnt();
 	for (ba = 0; ba < max_block; ba++) {
 		sa = logstor_ba2sa(ba);
-		if (sa != SECTOR_NULL) {
+		if (sa != SECTOR_NULL && sa != SECTOR_DEL) {
 			ba_exp = logstor_sa2ba(sa);
 			if (ba_exp != ba) {
 				if (sa < sa_min)

@@ -49,7 +49,6 @@ void fbuf_hash_check(void);
 //int logstor_write (off_t offset, void *data, off_t length);
 int logstor_delete(off_t offset, void *data, off_t length);
 uint32_t logstor_get_block_cnt(void);
-//void logstor_check(void);
 unsigned logstor_get_data_write_count(void);
 unsigned logstor_get_other_write_count(void);
 unsigned logstor_get_fbuf_hit(void);

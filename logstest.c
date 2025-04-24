@@ -154,7 +154,7 @@ test_read(unsigned max_block)
 	i_max = 0;
 	for (ba = 0 ; ba < max_block; ba += 1) {
 		uint32_t buf[SECTOR_SIZE/4];
-
+MY_BREAK(gdb_cond0 == 1 /*&& ba == 2*/);
 		if ( (ba % 0x10000) == 0)
 			printf("r %7d/%7d\n", ba, max_block);
 		if (ba_write_count[ba] > 0) {
