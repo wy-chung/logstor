@@ -42,7 +42,7 @@ static void test_read(unsigned max_block);
 static void arrays_check(void);
 #endif
 
-static arrays_alloc_f *arrays_alloc_once = arrays_alloc;
+static arrays_alloc_f *arrays_alloc_init = arrays_alloc;
 static uint32_t *i2ba;	// ba for iteration i
 static uint32_t *ba2i;	// stored value for ba
 static uint8_t *ba_write_count;	// write count for each block
@@ -154,7 +154,7 @@ test_read(unsigned max_block)
 	i_max = 0;
 	for (ba = 0 ; ba < max_block; ba += 1) {
 		uint32_t buf[SECTOR_SIZE/4];
-MY_BREAK(gdb_cond0 == 1 /*&& ba == 2*/);
+
 		if ( (ba % 0x10000) == 0)
 			printf("r %7d/%7d\n", ba, max_block);
 		if (ba_write_count[ba] > 0) {
@@ -195,10 +195,10 @@ main_logstest(int argc, char *argv[])
 		printf("#### test %d ####\n", i);
 		logstor_open(DISK_FILE);
 		max_block = logstor_get_block_cnt();
-		arrays_alloc_once(max_block); // loop_count is calculated here
+		arrays_alloc_init(max_block); // loop_count is calculated here
 #if defined(WYC)
 		arrays_alloc();
-		arrays_nop();
+		arrays_init();
 #endif
 		test(i, max_block);
 		logstor_close();
@@ -226,8 +226,18 @@ static uint64_t rdtsc(void)
 }
 
 static void
-arrays_nop(unsigned max_block)
+arrays_init(unsigned max_block)
 {
+	size_t size;
+
+	size = loop_count * sizeof(*i2ba);
+	memset(i2ba, -1, size);
+
+	size = max_block * sizeof(*ba2i);
+	memset(ba2i, -1, size);
+
+	size = max_block * sizeof(*ba_write_count);
+	bzero(ba_write_count, size);
 }
 
 static void
@@ -252,7 +262,7 @@ arrays_alloc(unsigned max_block)
 	MY_ASSERT(ba_write_count != NULL);
 	bzero(ba_write_count, size);
 
-	arrays_alloc_once = arrays_nop;	// don't do array alloc any more
+	arrays_alloc_init = arrays_init;	// don't do array alloc any more
 }
 
 static void arrays_free(void)

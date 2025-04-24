@@ -61,7 +61,7 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 #define __predict_false(exp)    __builtin_expect((exp), 0)
 #define __unused		__attribute__((unused))
 
-#define RAM_DISK_SIZE		0x200000000UL // 8G
+#define RAM_DISK_SIZE		0x180000000UL // 6G
 
 #define	SIG_LOGSTOR	0x4C4F4753	// "LOGS": Log-Structured Storage
 #define	VER_MAJOR	0
@@ -1085,7 +1085,8 @@ fbuf_mod_init(void)
 	int fbuf_count;
 	struct _fbuf_sentinel *queue_sentinel;
 
-	fbuf_count = sc.superblock.block_cnt_max / (SECTOR_SIZE / 4);
+	//fbuf_count = sc.superblock.block_cnt_max / (SECTOR_SIZE / 4);
+	fbuf_count = FBUF_MIN;
 	if (fbuf_count < FBUF_MIN)
 		fbuf_count = FBUF_MIN;
 	if (fbuf_count > FBUF_MAX)
