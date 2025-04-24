@@ -185,9 +185,9 @@ _Static_assert(QUEUE_IND1 == 1, "QUEUE_IND1 must be 1");
 struct _fbuf_comm {
 	struct _fbuf *queue_next;
 	struct _fbuf *queue_prev;
+	bool is_sentinel;
 	bool accessed;	/* only used for fbufs on circular queue */
 	bool modified;	/* the fbuf is dirty */
-	bool is_sentinel;
 };
 
 struct _fbuf_sentinel {
@@ -957,6 +957,8 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *buf_off)
 	struct _fbuf *fbuf;
 
 	MY_ASSERT(ba < META_START);
+	if (fd >= FD_COUNT)
+		return NULL;
 
 	// the data stored in file for this ba is 4 bytes
 	*buf_off = (ba * 4) & (SECTOR_SIZE - 1);
@@ -967,10 +969,10 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *buf_off)
 	ma.fd = fd;
 	ma.meta = 0xFF;	// for metadata address, bits 31:24 are all 1s
 	fbuf = fbuf_get(ma);
-	if (fbuf == NULL)
+	if (fbuf == NULL) {
 		// no forwarding mapping for this %fd
 		return NULL;
-
+	}
 	fbuf->fc.accessed = true;
 
 	return fbuf;
@@ -1099,12 +1101,14 @@ fbuf_mod_init(void)
 	// insert fbuf to both QUEUE_CLEAN and hash queue
 	for (int i = 0; i < fbuf_count; ++i) {
 		struct _fbuf *fbuf = &sc.fbuf[i];
+		fbuf->fc.is_sentinel = false;
 		fbuf->fc.accessed = false;
 		fbuf->fc.modified = false;
 		fbuf_queue_insert_tail(QUEUE_CLEAN, fbuf);
 		// distribute fbuf evently to hash buckets
 		fbuf->ma.uint32 = i;
 		fbuf_hash_insert_head(fbuf);
+		fbuf->child_ref_cnt = 0;
 #if defined(FBUF_DEBUG)
 		fbuf->index = i;
 #endif
@@ -1151,7 +1155,7 @@ fbuf_hash_init(int which)
 	struct _fbuf_sentinel *fbuf;
 
 	MY_ASSERT(which < FBUF_BUCKETS);
-		sc.fbuf_bucket[which].count = 0;
+	sc.fbuf_bucket[which].count = 0;
 	fbuf = &sc.fbuf_bucket[which].sentinel;
 	fbuf->fc.queue_next = (struct _fbuf *)fbuf;
 	fbuf->fc.queue_prev = (struct _fbuf *)fbuf;
@@ -1210,13 +1214,13 @@ fbuf_queue_init(int which)
 	struct _fbuf *fbuf;
 
 	MY_ASSERT(which < QUEUE_CNT);
+	sc.fbuf_queue[which].count= 0;
 	fbuf = (struct _fbuf*)&sc.fbuf_queue[which].sentinel;
 	fbuf->fc.queue_next = fbuf;
 	fbuf->fc.queue_prev = fbuf;
+	fbuf->fc.is_sentinel = true;
 	fbuf->fc.accessed = false;
 	fbuf->fc.modified = false;
-	fbuf->fc.is_sentinel = true;
-	sc.fbuf_queue[which].count= 0;
 }
 
 static void
