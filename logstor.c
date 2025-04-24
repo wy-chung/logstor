@@ -61,6 +61,8 @@ void my_debug(const char * fname, int line_num, bool bl_panic)
 #define __predict_false(exp)    __builtin_expect((exp), 0)
 #define __unused		__attribute__((unused))
 
+#define RAM_DISK_SIZE		0x200000000UL // 8G
+
 #define	SIG_LOGSTOR	0x4C4F4753	// "LOGS": Log-Structured Storage
 #define	VER_MAJOR	0
 #define	VER_MINOR	1
@@ -202,8 +204,8 @@ struct _fbuf { // file buffer
 	uint16_t bucket_which;
 	struct _fbuf *bucket_next;
 	struct _fbuf *bucket_prev;
-	struct _fbuf	*parent;
 	unsigned child_ref_cnt; // number of children reference this fbuf
+	struct _fbuf	*parent;
 
 	union meta_addr	ma;	// the metadata address
 	// the metadata is cached here
@@ -550,23 +552,23 @@ _logstor_read_one(unsigned ba, char *data)
 
 // is a sector with a reverse ba valid?
 static bool
-is_sec_valid(uint32_t sa, uint32_t ba_rev)
+is_sec_free(uint32_t sa, uint32_t ba_rev)
 {
 	uint32_t sa_rev; // the sector address for ba_rev
 
 	if (IS_META_ADDR(ba_rev)) {
 		sa_rev = ma2sa((union meta_addr)ba_rev);
 		if (sa == sa_rev)
-			return true;
+			return false;
 	} else {
 		sa_rev = file_read_4byte(sc.superblock.fd_cur, ba_rev);
 		if (sa == sa_rev)
-			return true;
+			return false;
 		sa_rev = file_read_4byte(sc.superblock.fd_snap, ba_rev);
 		if (sa == sa_rev)
-			return true;
+			return false;
 	}
-	return false;
+	return true;
 }
 
 /*
@@ -595,7 +597,7 @@ again:
 		uint32_t sa = seg_sa + i;
 
 		ba_rev = seg_sum->ss_rm[i];
-		if (is_sec_valid(sa, ba_rev))
+		if (!is_sec_free(sa, ba_rev))
 			continue;
 
 		my_write(sa, data, 1);
