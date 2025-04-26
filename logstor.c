@@ -260,8 +260,8 @@ static char *ram_disk;
 #endif
 static struct g_logstor_softc sc;
 
-static int _logstor_read_one(unsigned ba, char *data);
-static int _logstor_write_one(uint32_t ba, char *data);
+static uint32_t _logstor_read_one(unsigned ba, char *data);
+static uint32_t _logstor_write_one(uint32_t ba, char *data);
 
 static void seg_alloc(void);
 static void seg_sum_write(void);
@@ -272,7 +272,7 @@ static void superblock_write(void);
 
 static uint32_t file_read_4byte(uint8_t fh, uint32_t ba);
 static void file_write_4byte(uint8_t fh, uint32_t ba, uint32_t sa);
-static struct _fbuf *file_access_4byte(uint8_t fd, uint32_t offset, uint32_t *buf_off);
+static struct _fbuf *file_access_4byte(uint8_t fd, uint32_t offset, uint32_t *off_4byte);
 
 static void fbuf_mod_init(void);
 static void fbuf_mod_fini(void);
@@ -513,23 +513,23 @@ fbuf_clean_queue_check(void)
 	}
 }
 
-int
+uint32_t
 logstor_read_test(uint32_t ba, void *data)
 {
-	_logstor_read_one(ba, data);
+	uint32_t sa = _logstor_read_one(ba, data);
 	fbuf_clean_queue_check();
-	return 0;
+	return sa;
 }
 
-int
+uint32_t
 logstor_write_test(uint32_t ba, void *data)
 {
-	_logstor_write_one(ba, data);
+	uint32_t sa = _logstor_write_one(ba, data);
 	fbuf_clean_queue_check();
-	return 0;
+	return sa;
 }
 
-static int
+uint32_t
 _logstor_read_one(unsigned ba, char *data)
 {
 	uint32_t sa;	// sector address
@@ -542,28 +542,34 @@ _logstor_read_one(unsigned ba, char *data)
 	else {
 		my_read(sa, data, 1);
 	}
-	return 0;
+	return sa;
 }
 
 // is a sector with a reverse ba valid?
 static bool
-is_sec_free(uint32_t sa, uint32_t ba_rev)
+is_sec_valid(uint32_t sa, uint32_t ba_rev)
 {
 	uint32_t sa_rev; // the sector address for ba_rev
 
 	if (IS_META_ADDR(ba_rev)) {
 		sa_rev = ma2sa((union meta_addr)ba_rev);
 		if (sa == sa_rev)
-			return false;
+			return true;
 	} else {
 		sa_rev = file_read_4byte(sc.superblock.fd_cur, ba_rev);
 		if (sa == sa_rev)
-			return false;
+			return true;
 		sa_rev = file_read_4byte(sc.superblock.fd_snap, ba_rev);
 		if (sa == sa_rev)
-			return false;
+			return true;
 	}
-	return true;
+	return false;
+}
+
+static inline bool
+is_sec_free(uint32_t sa, uint32_t ba_rev)
+{
+	return !is_sec_valid(sa, ba_rev);
 }
 
 /*
@@ -573,13 +579,13 @@ Description:
 Return:
   the sector address where the data is written
 */
-static int
+static uint32_t
 _logstor_write_one(uint32_t ba, char *data)
 {
-	static uint8_t recursive;
+	//static uint8_t recursive;
 	struct _seg_sum *seg_sum = &sc.seg_sum;
 
-	MY_BREAK(++recursive >= 3);
+	//MY_BREAK(++recursive >= 3);
 	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.block_cnt_max);
 	MY_ASSERT(seg_sum->ss_alloc < SEG_SUM_OFFSET);
 	if (sc.superblock.block_cnt_free < 10)
@@ -592,6 +598,7 @@ again:
 		uint32_t sa = seg_sa + i;
 
 		ba_rev = seg_sum->ss_rm[i];
+MY_BREAK(sa == 118309);
 		if (!is_sec_free(sa, ba_rev))
 			continue;
 
@@ -608,7 +615,7 @@ again:
 			// the segment summary block write
 			file_write_4byte(sc.superblock.fd_cur, ba, sa);
 		}
-		--recursive;
+		//--recursive;
 		return sa;
 	}
 	// no free sector in current segment
@@ -899,12 +906,12 @@ static uint32_t
 file_read_4byte(uint8_t fd, uint32_t ba)
 {
 	struct _fbuf *fbuf;
-	uint32_t offset;	// the offset within the file buffer data
+	uint32_t off_4byte;	// the offset in 4 bytes within the file buffer data
 	uint32_t sa;
 
-	fbuf = file_access_4byte(fd, ba, &offset);
+	fbuf = file_access_4byte(fd, ba, &off_4byte);
 	if (fbuf)
-		sa = *((uint32_t *)((uint8_t *)fbuf->data + offset));
+		sa = fbuf->data[off_4byte];
 	else
 		sa = SECTOR_NULL;
 	return sa;
@@ -923,12 +930,12 @@ static void
 file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
 {
 	struct _fbuf *fbuf;
-	uint32_t offset;	// the offset within the file buffer data
+	uint32_t off_4byte;	// the offset in 4 bytes within the file buffer data
 
-	fbuf = file_access_4byte(fd, ba, &offset);
+	fbuf = file_access_4byte(fd, ba, &off_4byte);
 	MY_ASSERT(fbuf != NULL);
 	fbuf->fc.modified = true;
-	*((uint32_t *)((uint8_t*)fbuf->data + offset)) = sa;
+	fbuf->data[off_4byte] = sa;
 }
 
 /*
@@ -939,14 +946,13 @@ Description:
 Parameters:
 	%fd: file descriptor
 	%ba: block address
-	%offset: the offset within the file buffer data
-	%bl_write: true for write access, false for read access
+	%off_4byte: the offset (in unit of 4 bytes) within the file buffer data
 
 Return:
 	the address of the file buffer data
 */
 static struct _fbuf *
-file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *buf_off)
+file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *off_4byte)
 {
 	union meta_addr	ma;		// metadata address
 	struct _fbuf *fbuf;
@@ -956,7 +962,9 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *buf_off)
 		return NULL;
 
 	// the data stored in file for this ba is 4 bytes
-	*buf_off = (ba * 4) & (SECTOR_SIZE - 1);
+	// we want to calculate ((ba * 4) & (SECTOR_SIZE - 1))/4
+	// and it is reduced to the expression below
+	*off_4byte = ba & (SECTOR_SIZE/4 - 1); // ((ba * 4) & (SECTOR_SIZE - 1))/4
 
 	// convert (%fd, %ba) to metadata address
 	ma.index = ba / (SECTOR_SIZE / 4); // (ba * 4) / SECTOR_SIZE

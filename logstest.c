@@ -52,7 +52,7 @@ static unsigned loop_count;
 static void
 test_write(unsigned max_block)
 {
-	uint32_t ba;		// block address
+	uint32_t ba, sa;
 	unsigned data_write_count, other_write_count;
 	unsigned fbuf_hit, fbuf_miss;
 
@@ -87,7 +87,8 @@ test_write(unsigned max_block)
 		buf[5] = i;
 		buf[6] = ba;
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
-		logstor_write_test(ba, buf);
+		sa = logstor_write_test(ba, buf);
+//MY_BREAK(ba == 34);
 	}
 	printf("elapse time %u\n",
 	    (unsigned)(rdtsc() - start_time)/TIME_SCALE);
@@ -146,7 +147,7 @@ test_read(unsigned max_block)
 	int	read_count;
 	uint32_t i_exp, i_get;
 	uint32_t i_max;
-	uint32_t ba;		// block address
+	uint32_t ba, sa;
 
 	// reading data from logstor
 	read_count = 0;
@@ -154,13 +155,13 @@ test_read(unsigned max_block)
 	i_max = 0;
 	for (ba = 0 ; ba < max_block; ba += 1) {
 		uint32_t buf[SECTOR_SIZE/4];
-
+//MY_BREAK(ba == 34);
 		if ( (ba % 0x10000) == 0)
 			printf("r %7d/%7d\n", ba, max_block);
 		if (ba_write_count[ba] > 0) {
 			if (ba_write_count[ba] > i_max)
 				i_max = ba_write_count[ba];
-			logstor_read_test(ba, buf);
+			sa = logstor_read_test(ba, buf);
 			++read_count;
 			i_exp = ba2i[ba];
 			i_get = buf[5];
