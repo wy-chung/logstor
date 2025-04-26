@@ -260,8 +260,8 @@ static char *ram_disk;
 #endif
 static struct g_logstor_softc sc;
 
-static uint32_t _logstor_read_one(unsigned ba, char *data);
-static uint32_t _logstor_write_one(uint32_t ba, char *data);
+static uint32_t _logstor_read_one(unsigned ba, void *data);
+static uint32_t _logstor_write_one(uint32_t ba, void *data);
 
 static void seg_alloc(void);
 static void seg_sum_write(void);
@@ -530,7 +530,7 @@ logstor_write_test(uint32_t ba, void *data)
 }
 
 uint32_t
-_logstor_read_one(unsigned ba, char *data)
+_logstor_read_one(unsigned ba, void *data)
 {
 	uint32_t sa;	// sector address
 
@@ -566,12 +566,6 @@ is_sec_valid(uint32_t sa, uint32_t ba_rev)
 	return false;
 }
 
-static inline bool
-is_sec_free(uint32_t sa, uint32_t ba_rev)
-{
-	return !is_sec_valid(sa, ba_rev);
-}
-
 /*
 Description:
   write data/metadata block to disk
@@ -580,7 +574,7 @@ Return:
   the sector address where the data is written
 */
 static uint32_t
-_logstor_write_one(uint32_t ba, char *data)
+_logstor_write_one(uint32_t ba, void *data)
 {
 	//static uint8_t recursive;
 	struct _seg_sum *seg_sum = &sc.seg_sum;
@@ -599,7 +593,7 @@ again:
 
 		ba_rev = seg_sum->ss_rm[i];
 MY_BREAK(sa == 118309);
-		if (!is_sec_free(sa, ba_rev))
+		if (is_sec_valid(sa, ba_rev))
 			continue;
 
 		my_write(sa, data, 1);
@@ -1385,7 +1379,7 @@ fbuf_write(struct _fbuf *fbuf)
 	unsigned pindex;	// the index in parent indirect block
 	uint32_t sa;		// sector address
 
-	sa = _logstor_write_one(fbuf->ma.uint32, (char *)fbuf->data);
+	sa = _logstor_write_one(fbuf->ma.uint32, fbuf->data);
 #if defined(MY_DEBUG)
 	fbuf->sa = sa;
 #endif
