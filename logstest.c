@@ -64,6 +64,7 @@ test_write(unsigned max_block)
 		uint32_t buf[SECTOR_SIZE/4];
 
 		gdb_cond1 = i;
+MY_BREAK(i==1892433);
 		if ( (i % 0x10000) == 0)
 			printf("w %7d/%7d\n", i, loop_count);
 

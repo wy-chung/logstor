@@ -96,8 +96,8 @@ struct _superblock {
 	 */
 	uint32_t seg_cnt;	// total number of segments
 	uint32_t seg_alloc;	// allocate this segment
+	uint32_t sector_cnt_free;
 	uint32_t block_cnt_max;	// max number of blocks supported
-	uint32_t block_cnt_free;
 	/*
 	   The files for forward mapping file
 
@@ -216,6 +216,7 @@ struct _fbuf { // file buffer
 	logstor soft control
 */
 struct g_logstor_softc {
+	uint32_t seg_alloc_sa;
 	struct _seg_sum seg_sum;// segment summary for the hot segment
 	
 	int fbuf_count;
@@ -418,7 +419,8 @@ logstor_open(const char *disk_file)
 	MY_ASSERT(error == 0);
 
 	// read the segment summary block
-	uint32_t sa = sega2sa(sc.superblock.seg_alloc) + SEG_SUM_OFFSET;
+	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
+	uint32_t sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
 	my_read(sa, &sc.seg_sum, 1);
 	sc.data_write_count = sc.other_write_count = 0;
 
@@ -580,24 +582,19 @@ _logstor_write_one(uint32_t ba, void *data)
 	struct _seg_sum *seg_sum = &sc.seg_sum;
 
 	//MY_BREAK(++recursive >= 3);
-	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.block_cnt_max);
+	MY_ASSERT(ba < sc.superblock.block_cnt_max || IS_META_ADDR(ba));
 	MY_ASSERT(seg_sum->ss_alloc < SEG_SUM_OFFSET);
-	if (sc.superblock.block_cnt_free < 10)
-		return SECTOR_NULL;
 again:
-	uint32_t seg_sa = sega2sa(sc.superblock.seg_alloc);
 	for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
 	{
-		uint32_t ba_rev; // ba from the reverse map
-		uint32_t sa = seg_sa + i;
-
-		ba_rev = seg_sum->ss_rm[i];
-MY_BREAK(sa == 118309);
+		uint32_t sa = sc.seg_alloc_sa + i;
+		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
+//MY_BREAK(sa == 118309);
 		if (is_sec_valid(sa, ba_rev))
 			continue;
 
 		my_write(sa, data, 1);
-		seg_sum->ss_rm[i] = ba;	// record reverse mapping
+		seg_sum->ss_rm[i] = ba;		// record reverse mapping
 		seg_sum->ss_alloc = i + 1;	// advnace the alloc pointer
 		if (seg_sum->ss_alloc == SEG_SUM_OFFSET) {
 			seg_sum_write();
@@ -666,7 +663,7 @@ seg_sum_write(void)
 	uint32_t sa;
 
 	// segment summary is at the end of a segment
-	sa = sega2sa(sc.superblock.seg_alloc) + SEG_SUM_OFFSET;
+	sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
 	sc.seg_sum.ss_gen = sc.superblock.sb_gen;
 	my_write(sa, (void *)&sc.seg_sum, 1);
 	sc.other_write_count++; // the write for the segment summary
@@ -681,60 +678,53 @@ disk_init(int fd)
 {
 	int32_t seg_cnt;
 	uint32_t sector_cnt;
-	struct _superblock *sb_out;
+	struct _superblock *sb;
 	off_t media_size;
 	char buf[SECTOR_SIZE] __attribute__ ((aligned));
 
 	media_size = get_mediasize(fd);
 	sector_cnt = media_size / SECTOR_SIZE;
 
-	sb_out = (struct _superblock *)buf;
-	sb_out->sig = SIG_LOGSTOR;
-	sb_out->ver_major = VER_MAJOR;
-	sb_out->ver_minor = VER_MINOR;
+	sb = (struct _superblock *)buf;
+	sb->sig = SIG_LOGSTOR;
+	sb->ver_major = VER_MAJOR;
+	sb->ver_minor = VER_MINOR;
 #if __BSD_VISIBLE
-	sb_out->sb_gen = arc4random();
+	sb->sb_gen = arc4random();
 #else
-	sb_out->sb_gen = random();
+	sb->sb_gen = random();
 #endif	
-	sb_out->fd_cur = FD_CUR;
-	sb_out->fd_snap = FD_INVALID;
-	sb_out->fd_new = FD_INVALID;
-	sb_out->fd_new_snap = FD_INVALID;
-	sb_out->seg_cnt = sector_cnt / SECTORS_PER_SEG;
-	if (sizeof(struct _superblock) + sb_out->seg_cnt > SECTOR_SIZE) {
+	sb->fd_cur = FD_CUR;
+	sb->fd_snap = FD_INVALID;
+	sb->fd_new = FD_INVALID;
+	sb->fd_new_snap = FD_INVALID;
+	sb->seg_cnt = sector_cnt / SECTORS_PER_SEG;
+	if (sizeof(struct _superblock) + sb->seg_cnt > SECTOR_SIZE) {
 		printf("%s: size of superblock %d seg_cnt %d\n",
-		    __func__, (int)sizeof(struct _superblock), (int)sb_out->seg_cnt);
+		    __func__, (int)sizeof(struct _superblock), (int)sb->seg_cnt);
 		printf("    the size of the disk must be less than %lld\n",
 		    (SECTOR_SIZE - sizeof(struct _superblock)) * (long long)SEG_SIZE);
 		MY_PANIC();
 	}
-	seg_cnt = sb_out->seg_cnt;
-
-	// the physical disk must have at least the space for the metadata
-	MY_ASSERT((seg_cnt - SEG_DATA_START) * BLOCKS_PER_SEG >
-	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT);
-
-	sb_out->block_cnt_max =
-	    (seg_cnt  - SEG_DATA_START) * BLOCKS_PER_SEG -
-	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT;
-	sb_out->block_cnt_max *= 0.9;
-	sb_out->block_cnt_free = sb_out->block_cnt_max;
+	seg_cnt = sb->seg_cnt;
+	sb->block_cnt_max =
+	    (seg_cnt - SEG_DATA_START) * BLOCKS_PER_SEG -
+	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT * 1.02;
 #if defined(MY_DEBUG)
 	printf("%s: sector_cnt %u block_cnt_max %u\n",
-	    __func__, sector_cnt, sb_out->block_cnt_max);
+	    __func__, sector_cnt, sb->block_cnt_max);
 #endif
 	// the root sector address for the files
 	for (int i = 0; i < FD_COUNT; i++) {
-		sb_out->fd_tab[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
+		sb->fd_tab[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
 	}
-	sb_out->seg_alloc = SEG_DATA_START;	// start allocate from here
+	sb->seg_alloc = SEG_DATA_START;	// start allocate from here
 
 	// write out super block
 #if defined(RAM_DISK_SIZE)
-	memcpy(ram_disk, sb_out, SECTOR_SIZE);
+	memcpy(ram_disk, sb, SECTOR_SIZE);
 #else
-	MY_ASSERT(pwrite(fd, sb_out, SECTOR_SIZE, 0) == SECTOR_SIZE);
+	MY_ASSERT(pwrite(fd, sb, SECTOR_SIZE, 0) == SECTOR_SIZE);
 #endif
 
 	// clear the rest of the supeblock's segment
@@ -873,10 +863,11 @@ Output:
 static void
 seg_alloc(void)
 {
+	MY_ASSERT(sc.superblock.seg_alloc < sc.superblock.seg_cnt);
 	if (++sc.superblock.seg_alloc == sc.superblock.seg_cnt)
 		sc.superblock.seg_alloc = SEG_DATA_START;
-	MY_ASSERT(sc.superblock.seg_alloc < sc.superblock.seg_cnt);
-	my_read(sega2sa(sc.superblock.seg_alloc) + SEG_SUM_OFFSET, &sc.seg_sum, 1);
+	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
+	my_read(sc.seg_alloc_sa + SEG_SUM_OFFSET, &sc.seg_sum, 1);
 	sc.seg_sum.ss_alloc = 0;
 }
 
