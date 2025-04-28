@@ -526,8 +526,10 @@ fbuf_clean_queue_check(bool clean_only)
 		MY_ASSERT(!fbuf->fc.is_sentinel);
 		fbuf_queue_remove(fbuf);
 		fbuf_queue_insert_tail(QUEUE_CLEAN, fbuf);
-		if (fbuf->fc.modified)
+		if (fbuf->fc.modified) {
+			MY_ASSERT(!clean_only);
 			fbuf_write(fbuf);
+		}
 	}
 }
 

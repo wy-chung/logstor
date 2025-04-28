@@ -45,6 +45,7 @@ static void arrays_check(void);
 static arrays_alloc_f *arrays_alloc_init = arrays_alloc;
 static uint32_t *i2ba;	// ba for iteration i
 static uint32_t *ba2i;	// stored value for ba
+static uint32_t *ba2sa;	// stored value for ba
 static uint8_t *ba_write_count;	// write count for each block
 
 static unsigned loop_count;
@@ -64,7 +65,6 @@ test_write(unsigned max_block)
 		uint32_t buf[SECTOR_SIZE/4];
 
 		gdb_cond1 = i;
-MY_BREAK(i==1892433);
 		if ( (i % 0x10000) == 0)
 			printf("w %7d/%7d\n", i, loop_count);
 
@@ -88,8 +88,9 @@ MY_BREAK(i==1892433);
 		buf[5] = i;
 		buf[6] = ba;
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
+MY_BREAK(ba==0);
 		sa = logstor_write_test(ba, buf);
-//MY_BREAK(ba == 34);
+		ba2sa[ba] = sa;
 	}
 	printf("elapse time %u\n",
 	    (unsigned)(rdtsc() - start_time)/TIME_SCALE);
@@ -238,6 +239,9 @@ arrays_init(unsigned max_block)
 	size = max_block * sizeof(*ba2i);
 	memset(ba2i, -1, size);
 
+	size = max_block * sizeof(*ba2sa);
+	memset(ba2sa, 0, size);
+
 	size = max_block * sizeof(*ba_write_count);
 	bzero(ba_write_count, size);
 }
@@ -259,6 +263,11 @@ arrays_alloc(unsigned max_block)
 	MY_ASSERT(ba2i != NULL);
 	memset(ba2i, -1, size);
 
+	size = max_block * sizeof(*ba2sa);
+	ba2sa = malloc(size);
+	MY_ASSERT(ba2sa != NULL);
+	memset(ba2sa, 0, size);
+
 	size = max_block * sizeof(*ba_write_count);
 	ba_write_count = malloc(size);
 	MY_ASSERT(ba_write_count != NULL);
@@ -270,6 +279,7 @@ arrays_alloc(unsigned max_block)
 static void arrays_free(void)
 {
 	free(ba_write_count);
+	free(ba2sa);
 	free(ba2i);
 	free(i2ba);
 }
