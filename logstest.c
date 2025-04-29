@@ -45,7 +45,9 @@ static void arrays_check(void);
 static arrays_alloc_f *arrays_alloc_init = arrays_alloc;
 static uint32_t *i2ba;	// ba for iteration i
 static uint32_t *ba2i;	// stored value for ba
-static uint32_t *ba2sa;	// stored value for ba
+static struct {
+	uint32_t sa[2];
+} *ba2sa;	// stored value for ba
 static uint8_t *ba_write_count;	// write count for each block
 
 static unsigned loop_count;
@@ -54,12 +56,9 @@ static void
 test_write(unsigned max_block)
 {
 	uint32_t ba, sa;
-	unsigned data_write_count, other_write_count;
-	unsigned fbuf_hit, fbuf_miss;
 
 	// writing data to logstor
 	int overwrite_count = 0;
-	uint64_t start_time = rdtsc();
 	for (unsigned i = 0 ; i < loop_count ; ++i)
 	{
 		uint32_t buf[SECTOR_SIZE/4];
@@ -90,25 +89,22 @@ test_write(unsigned max_block)
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
 MY_BREAK(ba==0);
 		sa = logstor_write_test(ba, buf);
-		ba2sa[ba] = sa;
+		ba2sa[ba].sa[1] = ba2sa[ba].sa[0];
+		ba2sa[ba].sa[0] = sa;
 	}
-	printf("elapse time %u\n",
-	    (unsigned)(rdtsc() - start_time)/TIME_SCALE);
 	printf("overwrite %d/%d\n", overwrite_count, loop_count);
 	printf("\n");
 
-	fbuf_hit = logstor_get_fbuf_hit();
-	fbuf_miss = logstor_get_fbuf_miss();
+	unsigned fbuf_hit = logstor_get_fbuf_hit();
+	unsigned fbuf_miss = logstor_get_fbuf_miss();
 	printf("file hit %f\n", (double)fbuf_hit / (fbuf_hit + fbuf_miss));
 
-	data_write_count = logstor_get_data_write_count();
-	other_write_count = logstor_get_other_write_count();
+	unsigned data_write_count = logstor_get_data_write_count();
+	unsigned other_write_count = logstor_get_other_write_count();
 	printf("write data %u other %u write amplification %f \n",
 	    data_write_count, other_write_count,
 	    (double)(data_write_count + other_write_count) / data_write_count);
 	printf("\n");
-
-
 }
 
 #if defined(MY_DEBUG)
