@@ -141,16 +141,12 @@ test(int n, unsigned max_block)
 static void 
 test_read(unsigned max_block)
 {
-	uint64_t start_time;
-	int	read_count;
 	uint32_t i_exp, i_get;
-	uint32_t i_max;
 	uint32_t ba, sa;
 
 	// reading data from logstor
-	read_count = 0;
-	start_time = rdtsc();
-	i_max = 0;
+	int read_count = 0;
+	uint32_t i_max = 0;
 	for (ba = 0 ; ba < max_block; ba += 1) {
 		uint32_t buf[SECTOR_SIZE/4];
 //MY_BREAK(ba == 34);
@@ -172,9 +168,11 @@ test_read(unsigned max_block)
 				MY_ASSERT(buf[SECTOR_SIZE/4-4+(ba%4)] == i_get);
 			}
 		}
+		else {
+			sa = logstor_read_test(ba, buf);
+			MY_ASSERT(sa == 0/*SECTOR_NULL*/);
+		}
 	}
-	printf("elapse time %u\n",
-	    (unsigned)(rdtsc() - start_time)/TIME_SCALE);
 	printf("read_count %d i_max %u\n\n", read_count, i_max);
 }
 

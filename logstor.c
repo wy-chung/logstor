@@ -563,7 +563,7 @@ _logstor_read_one(unsigned ba, void *data)
 
 	MY_ASSERT(ba < sc.superblock.block_cnt_max);
 
-	sa = logstor_ba2sa(ba);
+	sa = logstor_ba2sa_normal(ba);
 	if (sa == SECTOR_NULL)
 		bzero(data, SECTOR_SIZE);
 	else {
@@ -894,6 +894,7 @@ superblock_write(void)
 static void
 my_read(uint32_t sa, void *buf, unsigned size)
 {
+MY_BREAK(sa == 261301);
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(buf, ram_disk + (off_t)sa * SECTOR_SIZE, size * SECTOR_SIZE);
 }
@@ -901,6 +902,7 @@ my_read(uint32_t sa, void *buf, unsigned size)
 static void
 my_write(uint32_t sa, const void *buf, unsigned size)
 {
+MY_BREAK(sa == 261301);
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(ram_disk + (off_t)sa * SECTOR_SIZE , buf, size * SECTOR_SIZE);
 }
