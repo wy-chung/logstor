@@ -55,14 +55,13 @@ static unsigned loop_count;
 static void
 test_write(unsigned max_block)
 {
+	uint32_t buf[SECTOR_SIZE/4];
 	uint32_t ba, sa;
 
 	// writing data to logstor
 	int overwrite_count = 0;
 	for (unsigned i = 0 ; i < loop_count ; ++i)
 	{
-		uint32_t buf[SECTOR_SIZE/4];
-
 		gdb_cond1 = i;
 		if ( (i % 0x10000) == 0)
 			printf("w %7d/%7d\n", i, loop_count);
@@ -87,7 +86,7 @@ test_write(unsigned max_block)
 		buf[5] = i;
 		buf[6] = ba;
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
-MY_BREAK(ba==0);
+//MY_BREAK(ba==0);
 		sa = logstor_write_test(ba, buf);
 		ba2sa[ba].sa[1] = ba2sa[ba].sa[0];
 		ba2sa[ba].sa[0] = sa;
@@ -141,6 +140,7 @@ test(int n, unsigned max_block)
 static void 
 test_read(unsigned max_block)
 {
+	uint32_t buf[SECTOR_SIZE/4];
 	uint32_t i_exp, i_get;
 	uint32_t ba, sa;
 
@@ -148,7 +148,6 @@ test_read(unsigned max_block)
 	int read_count = 0;
 	uint32_t i_max = 0;
 	for (ba = 0 ; ba < max_block; ba += 1) {
-		uint32_t buf[SECTOR_SIZE/4];
 //MY_BREAK(ba == 34);
 		if ( (ba % 0x10000) == 0)
 			printf("r %7d/%7d\n", ba, max_block);

@@ -604,10 +604,10 @@ Return:
 static uint32_t
 _logstor_write_one(uint32_t ba, void *data)
 {
-	//static uint8_t recursive;
+	static uint8_t recursive;
 	struct _seg_sum *seg_sum = &sc.seg_sum;
 
-	//MY_BREAK(++recursive >= 3);
+	MY_BREAK(++recursive > 1); // recursive call is not allowed
 	MY_ASSERT(ba < sc.superblock.block_cnt_max || IS_META_ADDR(ba));
 	MY_ASSERT(seg_sum->ss_alloc < SEG_SUM_OFFSET);
 again:
@@ -615,10 +615,10 @@ again:
 	{
 		uint32_t sa = sc.seg_alloc_sa + i;
 		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
-//MY_BREAK(sa == 118309);
+
 		// might running out of clean buffer
 		// move some clean buffer on leaf queue to clean queue
-		fbuf_clean_queue_check(true);
+		fbuf_clean_queue_check(true); // cannot do write again so replace clean_only fbuf
 		if (is_sec_valid(sa, ba_rev))
 			continue;
 
@@ -635,7 +635,7 @@ again:
 			// the segment summary block write
 			file_write_4byte(sc.superblock.fd_cur, ba, sa);
 		}
-		//--recursive;
+		--recursive;
 		return sa;
 	}
 	// no free sector in current segment
