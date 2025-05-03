@@ -62,7 +62,6 @@ test_write(unsigned max_block)
 	int overwrite_count = 0;
 	for (unsigned i = 0 ; i < loop_count ; ++i)
 	{
-		gdb_cond1 = i;
 		if ( (i % 0x10000) == 0)
 			printf("w %7d/%7d\n", i, loop_count);
 
@@ -187,7 +186,6 @@ main_logstest(int argc, char *argv[])
 	//main_loop_count = MUTIPLIER_TO_MAXBLOCK/ratio_to_maxblock + 0.999;
 	main_loop_count = 3;
 	for (int i = 0; i < main_loop_count; i++) {
-		gdb_cond0 = i;
 		printf("#### test %d ####\n", i);
 		logstor_open(DISK_FILE);
 		max_block = logstor_get_block_cnt();

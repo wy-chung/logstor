@@ -204,7 +204,7 @@ struct _fbuf { // file buffer
 	uint16_t bucket_which;
 	struct _fbuf *bucket_next;
 	struct _fbuf *bucket_prev;
-	unsigned child_ref_cnt; // number of children reference this fbuf
+	unsigned child_cnt; // number of children reference this fbuf
 	struct _fbuf	*parent;
 
 	union meta_addr	ma;	// the metadata address
@@ -481,7 +481,7 @@ int logstor_delete(off_t offset, void *data, off_t length)
 
 /*
 Description:
-  using the second chance replace policy
+  using the second chance replace policy to choose a fbuf in QUEUE_LEAF
 
 Parameter:
   clean_only: replace only clean buffer
@@ -527,13 +527,23 @@ again:
 static void
 fbuf_clean_queue_check(bool clean_only)
 {
+	static bool is_called = false;
 	struct _fbuf *fbuf;
-	const int min_clean = 24;
+	/*
+	 will fail at "MY_ASSERT(fbuf != (struct _fbuf *)queue_sentinel);" in fbuf_alloc
+	 if min_clean <= 9
+	*/
+	const int min_clean = 12;
 
+	if (is_called)
+		return;
+	is_called = true;
+	if (gdb_cond0 == 4284482759)
+		my_break();
 	while (sc.fbuf_queue[QUEUE_CLEAN].count < min_clean) {
 		fbuf = fbuf_get_replacement(clean_only);
 		MY_ASSERT(fbuf != NULL);
-		MY_ASSERT(!fbuf->fc.is_sentinel); //MY_ASSERT(fbuf->queue_which)
+		MY_ASSERT(!fbuf->fc.is_sentinel);
 		fbuf_queue_remove(fbuf);
 		fbuf_queue_insert_tail(QUEUE_CLEAN, fbuf);
 		if (fbuf->fc.modified) {
@@ -541,6 +551,7 @@ fbuf_clean_queue_check(bool clean_only)
 			fbuf_write(fbuf);
 		}
 	}
+	is_called = false;
 }
 
 uint32_t
@@ -612,7 +623,7 @@ Return:
 static uint32_t
 _logstor_write_one(uint32_t ba, void *data)
 {
-	static uint8_t recursive;
+	static bool is_called = false;
 	struct _seg_sum *seg_sum = &sc.seg_sum;
 #if defined(MY_DEBUG)
 	union meta_addr ma;
@@ -620,9 +631,11 @@ _logstor_write_one(uint32_t ba, void *data)
 	ma.uint32 = ba;
 #endif
 
-	MY_BREAK(++recursive > 1); // recursive call is not allowed
+	MY_ASSERT(is_called == false); // recursive call is not allowed
 	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.block_cnt_max);
 	MY_ASSERT(seg_sum->ss_alloc < SEG_SUM_OFFSET);
+	gdb_cond0 = ba;
+	is_called = true;
 again:
 	for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
 	{
@@ -631,10 +644,10 @@ again:
 #if defined(MY_DEBUG)
 		ma_rev.uint32 = ba_rev;
 #endif
-MY_BREAK(ba == 0 || ba_rev == 0);
+//MY_BREAK(ba == 0 || ba_rev == 0);
 		// might running out of clean buffer
 		// move some clean buffer on leaf queue to clean queue
-		fbuf_clean_queue_check(true); // cannot do write again so replace clean_only fbuf
+		fbuf_clean_queue_check(true); // cannot do write again so replace only clean fbuf
 		if (is_sec_valid(sa, ba_rev))
 			continue;
 
@@ -651,7 +664,7 @@ MY_BREAK(ba == 0 || ba_rev == 0);
 			// the segment summary block write
 			file_write_4byte(sc.superblock.fd_cur, ba, sa);
 		}
-		--recursive;
+		is_called = false;
 		return sa;
 	}
 	// no free sector in current segment
@@ -911,7 +924,7 @@ superblock_write(void)
 static void
 my_read(uint32_t sa, void *buf, unsigned size)
 {
-MY_BREAK(sa == 261301);
+MY_BREAK(sa == 263525);
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(buf, ram_disk + (off_t)sa * SECTOR_SIZE, size * SECTOR_SIZE);
 }
@@ -919,7 +932,7 @@ MY_BREAK(sa == 261301);
 static void
 my_write(uint32_t sa, const void *buf, unsigned size)
 {
-MY_BREAK(sa == 261301);
+MY_BREAK(sa == 263525);
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(ram_disk + (off_t)sa * SECTOR_SIZE , buf, size * SECTOR_SIZE);
 }
@@ -1192,7 +1205,7 @@ fbuf_mod_init(void)
 		// distribute fbuf evently to hash buckets
 		fbuf->ma.uint32 = i;
 		fbuf_hash_insert_head(fbuf);
-		fbuf->child_ref_cnt = 0;
+		fbuf->child_cnt = 0;
 #if defined(FBUF_DEBUG)
 		fbuf->index = i;
 #endif
@@ -1412,8 +1425,8 @@ fbuf_read(union meta_addr ma)
 			fbuf_hash_insert_head(fbuf);
 			fbuf->parent = parent;
 			if (parent) {
-				++parent->child_ref_cnt;
-				MY_ASSERT(parent->child_ref_cnt <= SECTOR_SIZE/4);
+				++parent->child_cnt;
+				MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
 			}
 			if (sa == SECTOR_NULL)	// the metadata block does not exist
 				bzero(fbuf->data, sizeof(fbuf->data));
@@ -1518,7 +1531,8 @@ fbuf_alloc(void)
 	fbuf_queue_remove(fbuf);
 	fbuf_hash_remove(fbuf);
 	parent = fbuf->parent;
-	if (parent && --parent->child_ref_cnt == 0) {
+	// when parent's child count drops to 0, move it to QUEUE_LEAF
+	if (parent && --parent->child_cnt == 0) {
 		MY_ASSERT(parent->queue_which == parent->ma.depth);
 		fbuf_queue_remove(parent);
 		fbuf_queue_insert_tail(QUEUE_LEAF, parent);
