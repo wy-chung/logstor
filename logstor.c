@@ -102,6 +102,8 @@ struct _superblock {
 	uint32_t seg_cnt;	// total number of segments
 	uint32_t seg_alloc;	// allocate this segment
 	uint32_t sector_cnt_free;
+	// since the max meta file size is 4G (1K*1K*4K) and the entry size is 4
+	// block_cnt_max must be < (4G/4)
 	uint32_t block_cnt_max;	// max number of blocks supported
 	/*
 	   The files for forward mapping file
@@ -151,8 +153,8 @@ _Static_assert(sizeof(struct _seg_sum) == SECTOR_SIZE,
   Each metadata block has a corresponding metadata address.
   Below is the format of the metadata address.
 
-  The metadata address occupies a small part of block address space. For block address
-  that is >= META_START, it is actually a metadata address.
+  The metadata address occupies a small portion of block address space.
+  For block address that is >= META_START, it is actually a metadata address.
 */
 union meta_addr { // metadata address for file data and its indirect blocks
 	uint32_t	uint32;
@@ -266,7 +268,7 @@ static char *ram_disk;
 #endif
 static struct g_logstor_softc sc;
 
-static uint32_t _logstor_read_one(unsigned ba, void *data);
+static uint32_t _logstor_read_one(uint32_t ba, void *data);
 static uint32_t _logstor_write_one(uint32_t ba, void *data);
 
 static void seg_alloc(void);
@@ -283,19 +285,19 @@ static struct _fbuf *file_access_4byte(uint8_t fd, uint32_t offset, uint32_t *of
 static void fbuf_mod_init(void);
 static void fbuf_mod_fini(void);
 static void fbuf_mod_flush(void);
-static void fbuf_flush(struct _fbuf *fbuf);
-static void fbuf_write(struct _fbuf *fbuf);
 static void fbuf_queue_init(int which);
 static void fbuf_queue_insert_tail(int which, struct _fbuf *fbuf);
 static void fbuf_queue_remove(struct _fbuf *fbuf);
-static void fbuf_clean_queue_check(bool clean_only);
+static struct _fbuf *fbuf_search(union meta_addr ma);
 static void fbuf_hash_init(int which);
 static void fbuf_hash_insert_head(struct _fbuf *fbuf);
 static void fbuf_hash_remove(struct _fbuf *fbuf);
-static struct _fbuf *fbuf_search(union meta_addr ma);
-static struct _fbuf *fbuf_get(union meta_addr ma);
+static struct _fbuf *fbuf_read(union meta_addr ma);
+static void fbuf_write(struct _fbuf *fbuf);
+static void fbuf_flush(struct _fbuf *fbuf);
 static struct _fbuf *fbuf_alloc(void);
 static void fbuf_queue_check(void);
+static void fbuf_clean_queue_check(bool clean_only);
 
 static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
 static uint32_t ma2sa(union meta_addr ma);
@@ -500,7 +502,8 @@ again:
 		if (!fbuf->fc.accessed) {
 			if (!clean_only)
 				break;
-			if (clean_only && !fbuf->fc.modified)
+			// clean only the not modified fbuf
+			if (!fbuf->fc.modified)
 				break;
 			}
 		fbuf->fc.accessed = false;	// give this buffer a second chance
@@ -530,7 +533,7 @@ fbuf_clean_queue_check(bool clean_only)
 	while (sc.fbuf_queue[QUEUE_CLEAN].count < min_clean) {
 		fbuf = fbuf_get_replacement(clean_only);
 		MY_ASSERT(fbuf != NULL);
-		MY_ASSERT(!fbuf->fc.is_sentinel);
+		MY_ASSERT(!fbuf->fc.is_sentinel); //MY_ASSERT(fbuf->queue_which)
 		fbuf_queue_remove(fbuf);
 		fbuf_queue_insert_tail(QUEUE_CLEAN, fbuf);
 		if (fbuf->fc.modified) {
@@ -551,6 +554,7 @@ logstor_read_test(uint32_t ba, void *data)
 uint32_t
 logstor_write_test(uint32_t ba, void *data)
 {
+//MY_BREAK(ba==830866);
 	uint32_t sa = _logstor_write_one(ba, data);
 	fbuf_clean_queue_check(false);
 	return sa;
@@ -577,6 +581,10 @@ static bool
 is_sec_valid(uint32_t sa, uint32_t ba_rev)
 {
 	uint32_t sa_rev; // the sector address for ba_rev
+#if defined(MY_DEBUG)
+	union meta_addr ma_rev;
+	ma_rev.uint32 = ba_rev;
+#endif
 
 	if (IS_META_ADDR(ba_rev)) {
 		sa_rev = ma2sa((union meta_addr)ba_rev);
@@ -606,16 +614,24 @@ _logstor_write_one(uint32_t ba, void *data)
 {
 	static uint8_t recursive;
 	struct _seg_sum *seg_sum = &sc.seg_sum;
+#if defined(MY_DEBUG)
+	union meta_addr ma;
+	union meta_addr ma_rev;
+	ma.uint32 = ba;
+#endif
 
 	MY_BREAK(++recursive > 1); // recursive call is not allowed
-	MY_ASSERT(ba < sc.superblock.block_cnt_max || IS_META_ADDR(ba));
+	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.block_cnt_max);
 	MY_ASSERT(seg_sum->ss_alloc < SEG_SUM_OFFSET);
 again:
 	for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
 	{
 		uint32_t sa = sc.seg_alloc_sa + i;
 		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
-
+#if defined(MY_DEBUG)
+		ma_rev.uint32 = ba_rev;
+#endif
+MY_BREAK(ba == 0 || ba_rev == 0);
 		// might running out of clean buffer
 		// move some clean buffer on leaf queue to clean queue
 		fbuf_clean_queue_check(true); // cannot do write again so replace clean_only fbuf
@@ -784,6 +800,7 @@ disk_init(int fd)
 	sb->block_cnt_max =
 	    (seg_cnt - SEG_DATA_START) * BLOCKS_PER_SEG -
 	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT * 1.02;
+	MY_ASSERT(sb->block_cnt_max < 0x40000000); // 1G
 #if defined(MY_DEBUG)
 	printf("%s: sector_cnt %u block_cnt_max %u\n",
 	    __func__, sector_cnt, sb->block_cnt_max);
@@ -1030,7 +1047,7 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *off_4byte)
 	ma.depth = META_LEAF_DEPTH;
 	ma.fd = fd;
 	ma.meta = 0xFF;	// for metadata address, bits 31:24 are all 1s
-	fbuf = fbuf_get(ma);
+	fbuf = fbuf_read(ma);
 	if (fbuf == NULL) {
 		// no forwarding mapping for this %fd
 		return NULL;
@@ -1124,7 +1141,7 @@ ma2sa(union meta_addr ma)
 	case 1:
 	case 2:
 		pma = ma2pma(ma, &pindex);
-		parent = fbuf_get(pma);
+		parent = fbuf_read(pma);
 		if (parent != NULL)
 			sa = parent->data[pindex];
 		else {
@@ -1162,6 +1179,9 @@ fbuf_mod_init(void)
 	for (int i = 0; i < QUEUE_CNT; ++i) {
 		fbuf_queue_init(i);
 	}
+	// set it to true to skip the sentinel from the replacement for clean fbuf
+	sc.fbuf_queue[QUEUE_LEAF].sentinel.fc.modified = true;
+
 	// insert fbuf to both QUEUE_CLEAN and hash queue
 	for (int i = 0; i < fbuf_count; ++i) {
 		struct _fbuf *fbuf = &sc.fbuf[i];
@@ -1359,7 +1379,7 @@ Description:
     Read or write the file buffer with metadata address @ma
 */
 static struct _fbuf *
-fbuf_get(union meta_addr ma)
+fbuf_read(union meta_addr ma)
 {
 	struct _fbuf *parent;	// parent buffer
 	struct _fbuf *fbuf;
