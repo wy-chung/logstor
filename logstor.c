@@ -240,8 +240,8 @@ struct g_logstor_softc {
 	struct _superblock superblock;
 };
 
-uint32_t gdb_cond0;
-uint32_t gdb_cond1;
+uint32_t gdb_cond0 = -1;
+uint32_t gdb_cond1 = -1;
 
 #if defined(RAM_DISK_SIZE)
 static char *ram_disk;
@@ -634,12 +634,9 @@ _logstor_write_one(uint32_t ba, void *data)
 	ma.uint32 = ba;
 #endif
 
-	//MY_ASSERT(is_called == false); // recursive call is not allowed
-if (is_called)
-	my_break();
+	MY_ASSERT(is_called == false); // recursive call is not allowed
 	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.block_cnt_max);
 	MY_ASSERT(seg_sum->ss_alloc < SEG_SUM_OFFSET);
-	gdb_cond0 = ba;
 	is_called = true;
 again:
 	for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
@@ -1160,12 +1157,16 @@ ma2sa(union meta_addr ma)
 	case 2:
 		pma = ma2pma(ma, &pindex);
 		parent = fbuf_read(pma);
+		MY_ASSERT(parent != NULL);
+		sa = parent->data[pindex];
+#if 0
 		if (parent != NULL)
 			sa = parent->data[pindex];
 		else {
 			MY_BREAK(true);
 			sa = SECTOR_NULL;
 		}
+#endif
 		break;
 	case 3: // it is an invalid block/metadata address
 		sa = SECTOR_NULL;
@@ -1275,6 +1276,7 @@ fbuf_queue_insert_tail(int which, struct _fbuf *fbuf)
 	fbuf->queue_which = which;
 	head = sc.fbuf_queue[which].head;
 	prev = head->fc.queue_prev;
+	MY_ASSERT(prev->fc.is_sentinel || prev->queue_which == which);
 	head->fc.queue_prev = fbuf;
 	fbuf->fc.queue_next = head;
 	fbuf->fc.queue_prev = prev;
@@ -1292,6 +1294,8 @@ fbuf_queue_remove(struct _fbuf *fbuf)
 	MY_ASSERT(fbuf != (struct _fbuf *)&sc.fbuf_queue[which].sentinel);
 	prev = fbuf->fc.queue_prev;
 	next = fbuf->fc.queue_next;
+	MY_ASSERT(prev->fc.is_sentinel || prev->queue_which == which);
+	MY_ASSERT(next->fc.is_sentinel || next->queue_which == which);
 	prev->fc.queue_next = next;
 	next->fc.queue_prev = prev;
 	--sc.fbuf_queue[which].count;

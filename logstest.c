@@ -34,7 +34,7 @@ typedef void arrays_alloc_f(unsigned max_block);
 static arrays_alloc_f arrays_alloc;
 static void arrays_free(void);
 
-static uint64_t rdtsc(void);
+//static uint64_t rdtsc(void);
 static void test(int n, unsigned max_block);
 static void test_write(unsigned max_block);
 static void test_read(unsigned max_block);
@@ -208,17 +208,6 @@ int main(int argc, char *argv[]) // main_logstest
 	return main_logstest(argc, argv);
 }
 
-static uint64_t rdtsc(void)
-{
-        uint32_t lo,hi;
-
-        __asm__ __volatile__
-        (
-         "rdtsc":"=a"(lo),"=d"(hi)
-        );
-        return (uint64_t)hi<<32|lo;
-}
-
 static void
 arrays_init(unsigned max_block)
 {
@@ -274,4 +263,16 @@ static void arrays_free(void)
 	free(ba2i);
 	free(i2ba);
 }
+//============================
+#if 0
+static uint64_t rdtsc(void)
+{
+        uint32_t lo,hi;
 
+        __asm__ __volatile__
+        (
+         "rdtsc":"=a"(lo),"=d"(hi)
+        );
+        return (uint64_t)hi<<32|lo;
+}
+#endif
