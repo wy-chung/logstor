@@ -16,7 +16,6 @@ typedef long	int64_t;
 #endif
 
 #define	MY_DEBUG
-#define FBUF_DEBUG
 
 #define DISK_FILE	"logstor.disk"
 //#define DISK_FILE	"/dev/ada1"

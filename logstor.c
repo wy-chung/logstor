@@ -28,31 +28,13 @@ e-mail: wy-chung@outlook.com
 
 #include "logstor.h"
 
-#if defined(MY_DEBUG)
-void my_break(void) {}
-
-void my_debug(const char * fname, int line_num, bool bl_panic)
-{
-	const char *type[] = {"break", "panic"};
-
-	printf("*** %s *** %s %d\n", type[bl_panic], fname, line_num);
-	perror("");
-	my_break();
-  	if (bl_panic)
-  #if defined(EXIT_ON_PANIC)
-		exit(1);
-  #else
-		;
-  #endif
-}
-#endif
-
-#define likely(x)       __builtin_expect(!!(x), 1)
-#define unlikely(x)     __builtin_expect(!!(x), 0)
-
 #define __predict_true(exp)     __builtin_expect((exp), 1)
 #define __predict_false(exp)    __builtin_expect((exp), 0)
 #define __unused		__attribute__((unused))
+
+// convert depth and index to ma
+#define DITOMA(d, i0, i1)\
+	((union meta_addr){.meta=0xFF, .fd=FD_CUR, .depth=d, .index0=i0, .index1=i1}).uint32
 
 #define RAM_DISK_SIZE		0x180000000UL // 6G
 
@@ -208,15 +190,13 @@ struct _fbuf { // file buffer
 	struct _fbuf	*parent;
 
 	union meta_addr	ma;	// the metadata address
-	// the metadata is cached here
-	uint32_t	data[SECTOR_SIZE/sizeof(uint32_t)];
 #if defined(MY_DEBUG)
 	uint32_t	sa;	// the sector address of the @data
-#endif
-#if defined(FBUF_DEBUG)
 	uint16_t	index; // the array index for this fbuf
 	struct _fbuf 	*child[SECTOR_SIZE/sizeof(uint32_t)];
 #endif
+	// the metadata is cached here
+	uint32_t	data[SECTOR_SIZE/sizeof(uint32_t)];
 };
 
 /*
@@ -265,6 +245,14 @@ uint32_t gdb_cond1;
 
 #if defined(RAM_DISK_SIZE)
 static char *ram_disk;
+ #if defined(MY_DEBUG)
+// given a page number and see a 4k page. point to the same address as ram_disk
+static union {
+	uint32_t u32[1024];
+	uint16_t u16[2048];
+	uint8_t  u8[4096];
+} *ram4k;
+ #endif
 #endif
 static struct g_logstor_softc sc;
 
@@ -284,7 +272,6 @@ static struct _fbuf *file_access_4byte(uint8_t fd, uint32_t offset, uint32_t *of
 
 static void fbuf_mod_init(void);
 static void fbuf_mod_fini(void);
-static void fbuf_mod_flush(void);
 static void fbuf_queue_init(int which);
 static void fbuf_queue_insert_tail(int which, struct _fbuf *fbuf);
 static void fbuf_queue_remove(struct _fbuf *fbuf);
@@ -293,8 +280,8 @@ static void fbuf_hash_init(int which);
 static void fbuf_hash_insert_head(struct _fbuf *fbuf);
 static void fbuf_hash_remove(struct _fbuf *fbuf);
 static struct _fbuf *fbuf_read(union meta_addr ma);
-static void fbuf_write(struct _fbuf *fbuf);
-static void fbuf_flush(struct _fbuf *fbuf);
+static void fbuf_write_if_modified(struct _fbuf *fbuf);
+static void fbuf_flush(void);
 static struct _fbuf *fbuf_alloc(void);
 static void fbuf_queue_check(void);
 static void fbuf_clean_queue_check(bool clean_only);
@@ -309,6 +296,24 @@ static uint32_t logstor_ba2sa_normal(uint32_t ba);
 static void logstor_check(void);
 
 static uint32_t (*logstor_ba2sa)(uint32_t ba) = logstor_ba2sa_normal;
+
+#if defined(MY_DEBUG)
+void my_break(void)
+{
+//	fbuf_flush();
+}
+
+void my_debug(const char * fname, int line_num, bool bl_panic)
+{
+	const char *type[] = {"break", "panic"};
+
+	printf("*** %s *** %s %d\n", type[bl_panic], fname, line_num);
+	perror("");
+	my_break();
+	if (bl_panic)
+		exit(1);
+}
+#endif
 
 #if defined(RAM_DISK_SIZE)
 static off_t
@@ -395,6 +400,7 @@ void logstor_init(void)
 #if defined(RAM_DISK_SIZE)
 	ram_disk = malloc(RAM_DISK_SIZE);
 	MY_ASSERT(ram_disk != NULL);
+	ram4k = (void *)ram_disk;
 	disk_fd = -1;
 #else
 	disk_fd = open(disk_file, O_WRONLY);
@@ -538,18 +544,14 @@ fbuf_clean_queue_check(bool clean_only)
 	if (is_called)
 		return;
 	is_called = true;
-	if (gdb_cond0 == 4284482759)
-		my_break();
 	while (sc.fbuf_queue[QUEUE_CLEAN].count < min_clean) {
 		fbuf = fbuf_get_replacement(clean_only);
 		MY_ASSERT(fbuf != NULL);
 		MY_ASSERT(!fbuf->fc.is_sentinel);
+		MY_ASSERT(!clean_only || !fbuf->fc.modified);
 		fbuf_queue_remove(fbuf);
 		fbuf_queue_insert_tail(QUEUE_CLEAN, fbuf);
-		if (fbuf->fc.modified) {
-			MY_ASSERT(!clean_only);
-			fbuf_write(fbuf);
-		}
+		fbuf_write_if_modified(fbuf);
 	}
 	is_called = false;
 }
@@ -593,7 +595,7 @@ is_sec_valid(uint32_t sa, uint32_t ba_rev)
 {
 	uint32_t sa_rev; // the sector address for ba_rev
 #if defined(MY_DEBUG)
-	union meta_addr ma_rev;
+	union meta_addr ma_rev __unused;
 	ma_rev.uint32 = ba_rev;
 #endif
 
@@ -626,12 +628,15 @@ _logstor_write_one(uint32_t ba, void *data)
 	static bool is_called = false;
 	struct _seg_sum *seg_sum = &sc.seg_sum;
 #if defined(MY_DEBUG)
-	union meta_addr ma;
-	union meta_addr ma_rev;
+	union meta_addr ma __unused;
+	union meta_addr ma_rev __unused;
+
 	ma.uint32 = ba;
 #endif
 
-	MY_ASSERT(is_called == false); // recursive call is not allowed
+	//MY_ASSERT(is_called == false); // recursive call is not allowed
+if (is_called)
+	my_break();
 	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.block_cnt_max);
 	MY_ASSERT(seg_sum->ss_alloc < SEG_SUM_OFFSET);
 	gdb_cond0 = ba;
@@ -924,7 +929,7 @@ superblock_write(void)
 static void
 my_read(uint32_t sa, void *buf, unsigned size)
 {
-MY_BREAK(sa == 263525);
+//MY_BREAK(sa == 263525);
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(buf, ram_disk + (off_t)sa * SECTOR_SIZE, size * SECTOR_SIZE);
 }
@@ -932,7 +937,7 @@ MY_BREAK(sa == 263525);
 static void
 my_write(uint32_t sa, const void *buf, unsigned size)
 {
-MY_BREAK(sa == 263525);
+//MY_BREAK(sa == 263525);
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(ram_disk + (off_t)sa * SECTOR_SIZE , buf, size * SECTOR_SIZE);
 }
@@ -1206,38 +1211,37 @@ fbuf_mod_init(void)
 		fbuf->ma.uint32 = i;
 		fbuf_hash_insert_head(fbuf);
 		fbuf->child_cnt = 0;
-#if defined(FBUF_DEBUG)
+#if defined(MY_DEBUG)
 		fbuf->index = i;
 #endif
 	}
-
 #if defined(MY_DEBUG)
 	sc.fbuf_count = fbuf_count;
 #endif
-
 	sc.fbuf_hit = sc.fbuf_miss = 0;
 }
 
 static void
 fbuf_mod_fini(void)
 {
-	fbuf_mod_flush();
+	fbuf_flush();
 	free(sc.fbuf);
 }
 
 static void
-fbuf_mod_flush(void)
+fbuf_flush(void)
 {
 	struct _fbuf_sentinel	*queue_sentinel;
 	struct _fbuf	*fbuf;
 	int	i;
 
-	for (i = META_LEAF_DEPTH; i >= 0; i--) {
+	for (i = META_LEAF_DEPTH; i >= 0; --i) {
 		queue_sentinel = &sc.fbuf_queue[i].sentinel;
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
 			MY_ASSERT(fbuf->queue_which == i);
-			fbuf_flush(fbuf);
+			MY_ASSERT(IS_META_ADDR(fbuf->ma.uint32));
+			fbuf_write_if_modified(fbuf);
 			fbuf = fbuf->fc.queue_next;
 		}
 	}
@@ -1387,6 +1391,9 @@ fbuf_search(union meta_addr ma)
 	return NULL;	// cache miss
 }
 
+#if defined(MY_DEBUG)
+static struct _fbuf *depth[3];
+#endif
 /*
 Description:
     Read or write the file buffer with metadata address @ma
@@ -1411,14 +1418,18 @@ fbuf_read(union meta_addr ma)
 	fbuf = fbuf_search(ma);
 	if (fbuf != NULL) // cache hit
 		return fbuf;
-
+MY_BREAK(ma.uint32 == DITOMA(1, 0, 0));
 	// cache miss
 	parent = NULL;	// parent for root is NULL
 	tma.uint32 = META_START; // set .meta to 0xFF and all others to 0
 	tma.fd = ma.fd;
 	// read the metadata from root to leaf node
 	for (int i = 0; ; ++i) {
+		tma.depth = i;
 		fbuf = fbuf_search(tma);
+#if defined(MY_DEBUG)
+		depth[i] = fbuf;
+#endif
 		if (fbuf == NULL) {
 			fbuf = fbuf_alloc();	// allocate a fbuf from clean queue
 			fbuf->ma = tma;
@@ -1436,31 +1447,25 @@ fbuf_read(union meta_addr ma)
 			}
 #if defined(MY_DEBUG)
 			fbuf->sa = sa;
-#endif
-#if defined(FBUF_DEBUG)
 			if (parent)
 				parent->child[index] = fbuf;
 #endif
-			if (i == ma.depth) {
+			if (i == ma.depth) { // reach the intended depth
 				fbuf_queue_insert_tail(QUEUE_LEAF, fbuf);
-				break;
 			} else
 				fbuf_queue_insert_tail(i, fbuf);
 
 		} else {
 			MY_ASSERT(fbuf->parent == parent);
-#if defined(MY_DEBUG)
 			MY_ASSERT(fbuf->sa == sa);
-#endif
-			if (i == ma.depth) // reach intended depth
-				break;
 		}
-		parent = fbuf;		// @fbuf is the parent of next level indirect block
+		if (i == ma.depth) // reach the intended depth
+			break;
+		parent = fbuf;		// %fbuf is the parent of next level indirect block
 		index = ma_index_get(ma, i);// the index to next level's indirect block
 		sa = parent->data[index];	// the sector address of the next level indirect block
 		tma = ma_index_set(tma, i, index); // set the next level's index for @tma
-		++tma.depth;
-	}
+	} // for
 #if defined(MY_DEBUG)
 	fbuf_queue_check();
 #endif
@@ -1468,12 +1473,15 @@ fbuf_read(union meta_addr ma)
 }
 
 static void
-fbuf_write(struct _fbuf *fbuf)
+fbuf_write_if_modified(struct _fbuf *fbuf)
 {
 	struct _fbuf *parent;	// buffer parent
 	unsigned pindex;	// the index in parent indirect block
 	uint32_t sa;		// sector address
 
+	if (!fbuf->fc.modified)
+		return;
+//MY_BREAK(fbuf->ma.uint32==DITOMA(2,0,0));
 	sa = _logstor_write_one(fbuf->ma.uint32, fbuf->data);
 #if defined(MY_DEBUG)
 	fbuf->sa = sa;
@@ -1495,23 +1503,6 @@ fbuf_write(struct _fbuf *fbuf)
 		sc.superblock.fd_tab[fbuf->ma.fd] = sa;
 		sc.sb_modified = true;
 	}
-}
-
-/*
-Description:
-    Write the dirty data in file buffer to disk
-*/
-static void
-fbuf_flush(struct _fbuf *fbuf)
-{
-
-	MY_ASSERT(IS_META_ADDR(fbuf->ma.uint32));
-
-	if (!fbuf->fc.modified)
-		return;
-
-	fbuf_write(fbuf);
-	return;
 }
 
 /*
