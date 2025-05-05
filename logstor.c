@@ -53,9 +53,9 @@ e-mail: wy-chung@outlook.com
   The max file size is 1K*1K*4K=4G, each entry is 4 bytes
   so the max block number is 4G/4 = 1G
 */
-#define BLOCK_MAX	0x40000000
-#define BLOCK_INVALID	(((union meta_addr){.meta = 0xFF, .depth = 3}).uint32) // depth can never be 3
-#define META_INVALID	((union meta_addr){.uint32 = 0})
+#define BLOCK_MAX	0x40000000	// 1G
+#define BLOCK_INVALID	BLOCK_MAX
+#define META_INVALID	(((union meta_addr){.meta = 0xFF, .depth = 3}).uint32) // depth can never be 3
 #define	META_START	(((union meta_addr){.meta = 0xFF}).uint32)	// metadata block address start
 #define META_LEAF_DEPTH 2
 #define	IS_META_ADDR(x)	((x) >= META_START)
@@ -69,7 +69,7 @@ e-mail: wy-chung@outlook.com
 #define FBUF_MAX	(FBUF_MIN * 2)
 #define FBUF_BUCKETS	1097	// this should be a prime number
 
-#define	FD_CUR	1
+#define	FD_CUR	2
 #define FD_COUNT	4	// max number of metadata files supported
 #define FD_INVALID	-1	// invalid file
 
@@ -106,8 +106,8 @@ struct _superblock {
 	*/
 	uint32_t fd_tab[FD_COUNT]; 	// file handles table
 	uint8_t fd_cur;		// the file descriptor for current mapping
-	uint8_t fd_prev;		// the file descriptor for previous current mapping
 	uint8_t fd_snap;	// the file descriptor for snapshot mapping
+	uint8_t fd_prev;	// the file descriptor for previous current mapping
 	uint8_t fd_new_snap;	// the file descriptor for new snapshot mapping
 };
 
@@ -121,8 +121,7 @@ _Static_assert(sizeof(struct _superblock) < SECTOR_SIZE, "The size of the super 
 struct _seg_sum {
 	uint32_t ss_rm[SECTORS_PER_SEG - 1];	// reverse map
 	// reverse map SECTORS_PER_SEG - 1 is not used so we store something here
-	uint16_t ss_alloc; // allocate sector at this location
-	uint16_t ss_gen;  // sequence number. used for redo after system crash
+	uint32_t ss_gen;  // sequence number. used for redo after system crash
 };
 
 _Static_assert(sizeof(struct _seg_sum) == SECTOR_SIZE,
@@ -204,6 +203,7 @@ struct _fbuf { // file buffer
 */
 struct g_logstor_softc {
 	uint32_t seg_alloc_sa;
+	uint32_t seg_sum_alloc;
 	struct _seg_sum seg_sum;// segment summary for the hot segment
 	
 	int fbuf_count;
@@ -293,8 +293,13 @@ static void my_read (uint32_t sa, void *buf, unsigned size);
 static void my_write(uint32_t sa, const void *buf, unsigned size);
 
 static uint32_t logstor_ba2sa_normal(uint32_t ba);
+static uint32_t logstor_ba2sa_during_commit(uint32_t ba);
+static bool is_sec_valid_normal(uint32_t sa, uint32_t ba_rev);
+static bool is_sec_valid_during_commit(uint32_t sa, uint32_t ba_rev);
+
 static void logstor_check(void);
 
+static bool (*is_sec_valid)(uint32_t sa, uint32_t ba_rev) = is_sec_valid_normal;
 static uint32_t (*logstor_ba2sa)(uint32_t ba) = logstor_ba2sa_normal;
 
 #if defined(MY_DEBUG)
@@ -438,6 +443,7 @@ logstor_open(const char *disk_file)
 	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
 	uint32_t sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
 	my_read(sa, &sc.seg_sum, 1);
+	sc.seg_sum_alloc = 0;
 	sc.data_write_count = sc.other_write_count = 0;
 
 	fbuf_mod_init();
@@ -580,7 +586,11 @@ _logstor_read_one(unsigned ba, void *data)
 
 	MY_ASSERT(ba < sc.superblock.block_cnt_max);
 
-	sa = logstor_ba2sa_normal(ba);
+	sa = logstor_ba2sa(ba);
+#if defined(WYC)
+	logstor_ba2sa_normal();
+	logstor_ba2sa_during_commit();
+#endif
 	if (sa == SECTOR_NULL)
 		bzero(data, SECTOR_SIZE);
 	else {
@@ -591,7 +601,7 @@ _logstor_read_one(unsigned ba, void *data)
 
 // is a sector with a reverse ba valid?
 static bool
-is_sec_valid(uint32_t sa, uint32_t ba_rev)
+is_sec_valid_normal(uint32_t sa, uint32_t ba_rev)
 {
 	uint32_t sa_rev; // the sector address for ba_rev
 #if defined(MY_DEBUG)
@@ -599,18 +609,57 @@ is_sec_valid(uint32_t sa, uint32_t ba_rev)
 	ma_rev.uint32 = ba_rev;
 #endif
 
+	// might running out of clean buffer
+	// move some clean buffer on leaf queue to clean queue
+	fbuf_clean_queue_check(true); // cannot do write again so replace only clean fbuf
+
 	if (IS_META_ADDR(ba_rev)) {
 		sa_rev = ma2sa((union meta_addr)ba_rev);
 		if (sa == sa_rev)
 			return true;
 	} else {
-		sa_rev = file_read_4byte(sc.superblock.fd_cur, ba_rev);
-		if (sa == sa_rev)
-			return true;
+		uint8_t fd[2] = {
+		    sc.superblock.fd_cur,
+		    sc.superblock.fd_snap};
 
-		sa_rev = file_read_4byte(sc.superblock.fd_snap, ba_rev);
+		for (int i = 0; i < 2; ++i) {
+			sa_rev = file_read_4byte(fd[i], ba_rev);
+			if (sa == sa_rev)
+				return true;
+		}
+	}
+	return false;
+}
+
+// is a sector with a reverse ba valid?
+static bool __unused
+is_sec_valid_during_commit(uint32_t sa, uint32_t ba_rev)
+{
+	uint32_t sa_rev; // the sector address for ba_rev
+#if defined(MY_DEBUG)
+	union meta_addr ma_rev __unused;
+	ma_rev.uint32 = ba_rev;
+#endif
+
+	// might running out of clean buffer
+	// move some clean buffer on leaf queue to clean queue
+	fbuf_clean_queue_check(true); // cannot do write again so replace only clean fbuf
+
+	if (IS_META_ADDR(ba_rev)) {
+		sa_rev = ma2sa((union meta_addr)ba_rev);
 		if (sa == sa_rev)
 			return true;
+	} else {
+		uint8_t fd[3] = {
+		    sc.superblock.fd_cur,
+		    sc.superblock.fd_prev,
+		    sc.superblock.fd_snap};
+
+		for (int i = 0; i < 3; ++i) {
+			sa_rev = file_read_4byte(fd[i], ba_rev);
+			if (sa == sa_rev)
+				return true;
+		}
 	}
 	return false;
 }
@@ -634,12 +683,11 @@ _logstor_write_one(uint32_t ba, void *data)
 	ma.uint32 = ba;
 #endif
 
-	MY_ASSERT(is_called == false); // recursive call is not allowed
 	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.block_cnt_max);
-	MY_ASSERT(seg_sum->ss_alloc < SEG_SUM_OFFSET);
+	MY_ASSERT(!is_called); // recursive call is not allowed
 	is_called = true;
 again:
-	for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
+	for (int i = sc.seg_sum_alloc; i < SEG_SUM_OFFSET; ++i)
 	{
 		uint32_t sa = sc.seg_alloc_sa + i;
 		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
@@ -647,16 +695,17 @@ again:
 		ma_rev.uint32 = ba_rev;
 #endif
 //MY_BREAK(ba == 0 || ba_rev == 0);
-		// might running out of clean buffer
-		// move some clean buffer on leaf queue to clean queue
-		fbuf_clean_queue_check(true); // cannot do write again so replace only clean fbuf
 		if (is_sec_valid(sa, ba_rev))
 			continue;
+#if defined(WYC)
+		is_sec_valid_normal();
+		is_sec_valid_during_commit();
+#endif
 
 		my_write(sa, data, 1);
 		seg_sum->ss_rm[i] = ba;		// record reverse mapping
-		seg_sum->ss_alloc = i + 1;	// advnace the alloc pointer
-		if (seg_sum->ss_alloc == SEG_SUM_OFFSET) {
+		sc.seg_sum_alloc = i + 1;	// advnace the alloc pointer
+		if (sc.seg_sum_alloc == SEG_SUM_OFFSET) {
 			seg_sum_write();
 			seg_alloc();
 		}
@@ -682,53 +731,49 @@ static uint32_t
 logstor_ba2sa_normal(uint32_t ba)
 {
 	uint32_t sa;
-
-	MY_ASSERT(!IS_META_ADDR(ba));
 	uint8_t fd[2] = {
 	    sc.superblock.fd_cur,
 	    sc.superblock.fd_snap};
 
+	MY_ASSERT(!IS_META_ADDR(ba));
 	for (int i = 0; i < 2; ++i) {
 		sa = file_read_4byte(fd[i], ba);
-		if (sa == SECTOR_DEL) {
+		if (sa == SECTOR_DEL) { // don't need to check further
 			sa = SECTOR_NULL;
-			goto end;
+			break;
 		}
 		if (sa != SECTOR_NULL)
 			break;
 	}
-end:
 	return sa;
 }
-#if 0
+
 /*
 Description:
     Block address to sector address translation in commit state
 */
-static uint32_t
+static uint32_t __unused
 logstor_ba2sa_during_commit(uint32_t ba)
 {
 	uint32_t sa;
-
-	MY_ASSERT(!IS_META_ADDR(ba));
 	uint8_t fd[3] = {
 	    sc.superblock.fd_cur,
 	    sc.superblock.fd_prev,
 	    sc.superblock.fd_snap};
 
+	MY_ASSERT(!IS_META_ADDR(ba));
 	for (int i = 0; i < 3; ++i) {
 		sa = file_read_4byte(fd[i], ba);
-		if (sa == SECTOR_DEL) {
+		if (sa == SECTOR_DEL) { // don't need to check further
 			sa = SECTOR_NULL;
-			goto end;
+			break;
 		}
 		if (sa != SECTOR_NULL)
 			break;
 	}
-end:
 	return sa;
 }
-#endif
+
 uint32_t
 logstor_get_block_cnt(void)
 {
@@ -845,7 +890,6 @@ disk_init(int fd)
 	struct _seg_sum ss;
 	for (int i = 0; i < SECTORS_PER_SEG - 1; ++i)
 		ss.ss_rm[i] = BLOCK_INVALID;
-	ss.ss_alloc = 0;
 	sc.superblock.seg_cnt = seg_cnt; // to silence the assert fail in my_write
 	// initialize all segment summary blocks
 	for (int i = SEG_DATA_START; i < seg_cnt; ++i)
@@ -976,7 +1020,7 @@ seg_alloc(void)
 		sc.superblock.seg_alloc = SEG_DATA_START;
 	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
 	my_read(sc.seg_alloc_sa + SEG_SUM_OFFSET, &sc.seg_sum, 1);
-	sc.seg_sum.ss_alloc = 0;
+	sc.seg_sum_alloc = 0;
 }
 
 /*********************************************************
@@ -1050,7 +1094,8 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *off_4byte)
 	union meta_addr	ma;		// metadata address
 	struct _fbuf *fbuf;
 
-	MY_ASSERT(ba < BLOCK_MAX);
+	if (ba >= BLOCK_MAX)
+		return NULL;
 	if (fd >= FD_COUNT)
 		return NULL;
 
@@ -1133,7 +1178,7 @@ ma2pma(union meta_addr ma, unsigned *pindex_out)
 		ma.depth = 1; // i.e. ma.depth - 1
 		break;
 	default:
-		ma = META_INVALID;
+		MY_PANIC();
 		break;
 	}
 	return ma;
@@ -1168,7 +1213,7 @@ ma2sa(union meta_addr ma)
 		}
 #endif
 		break;
-	case 3: // it is an invalid block/metadata address
+	case 3: // it is an invalid metadata address
 		sa = SECTOR_NULL;
 		break;
 	}
@@ -1614,6 +1659,10 @@ logstor_check(void)
 	for (ba = 0; ba < max_block; ++ba) {
 		fbuf_clean_queue_check(true);
 		sa = logstor_ba2sa(ba);
+#if defined(WYC)
+		logstor_ba2sa_normal();
+		logstor_ba2sa_during_commit();
+#endif
 		if (sa != SECTOR_NULL) {
 			ba_exp = logstor_check_sa2ba(sa);
 			if (ba_exp != ba) {
