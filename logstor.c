@@ -88,23 +88,23 @@ struct _superblock {
 	// block_cnt_max must be < (4G/4)
 	uint32_t block_cnt_max;	// max number of blocks supported
 	/*
-	   The files for forward mapping file
+	   The files for forward mapping
 
-	   Normally mapping is written to %fd_cur. When commit command is issued
-	   %fd_cur and %fd_snap are merged to %fd_snap_new and new mappings are temporarily
-	   written to %fd_new.
-	   After the commit command is complete, %fd_new will become %fd_cur
-	   %fd_new_snap will become %fd_snap and the old %fd_cur and %fd_snap
-	   will be deleted.
+	   New mapping is written to %fd_cur. When commit command is issued
+	   %fd_cur is movied to %fd_prev, %fd_prev and %fd_snap are merged to %fd_new_snap
+	   After the commit command is complete, %fd_new_snap is movied to %fd_snap
+	   and %fd_prev is deleted.
 
 	   So the actual mapping in normal state is
 	       %fd_cur || %fd_snap
 	   and during commit it is
-	       %fd_new_cur || %fd_cur || %fd_snap
+	       %fd_cur || %fd_prev || %fd_snap
 
-	   The first mapping that is not empty is used.
+	   The first mapping that is not null is used.
+	   To support trim command, the mapping marked as delete will stop
+	   the checking for the next mapping file and return null immediately
 	*/
-	uint32_t fd_tab[FD_COUNT]; 	// file handles table
+	uint32_t fd_tab[FD_COUNT];	// the root sector of the file
 	uint8_t fd_cur;		// the file descriptor for current mapping
 	uint8_t fd_snap;	// the file descriptor for snapshot mapping
 	uint8_t fd_prev;	// the file descriptor for previous current mapping
@@ -513,12 +513,11 @@ again:
 	while (true) {
 		if (!fbuf->fc.accessed) {
 			if (!clean_only)
-				break;
-			// clean only the not modified fbuf
+				break; // replace this fbuf
 			if (!fbuf->fc.modified)
-				break;
+				break; // replace only clean fbuf
 			}
-		fbuf->fc.accessed = false;	// give this buffer a second chance
+		fbuf->fc.accessed = false;	// give this fbuf a second chance
 		if (!fbuf->fc.modified)
 			all_modified = false;
 		fbuf = fbuf->fc.queue_next;
@@ -1094,9 +1093,9 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *off_4byte)
 	union meta_addr	ma;		// metadata address
 	struct _fbuf *fbuf;
 
-	if (ba >= BLOCK_MAX)
-		return NULL;
 	if (fd >= FD_COUNT)
+		return NULL;
+	if (ba >= BLOCK_MAX)
 		return NULL;
 
 	// the sector address stored in file for this ba is 4 bytes
@@ -1108,11 +1107,8 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *off_4byte)
 	ma.fd = fd;
 	ma.meta = 0xFF;	// for metadata address, bits 31:24 are all 1s
 	fbuf = fbuf_read(ma);
-	if (fbuf == NULL) {
-		// no forwarding mapping for this %fd
-		return NULL;
-	}
-	fbuf->fc.accessed = true;
+	if (fbuf)
+		fbuf->fc.accessed = true;
 
 	return fbuf;
 }
@@ -1452,7 +1448,7 @@ fbuf_read(union meta_addr ma)
 {
 	struct _fbuf *parent;	// parent buffer
 	struct _fbuf *fbuf;
-	union meta_addr	tma;	// temporary metadata address
+	union meta_addr	ima;	// the intermediate metadata address
 	uint32_t sa;	// sector address where the metadata is stored
 	unsigned index;
 
@@ -1470,18 +1466,18 @@ fbuf_read(union meta_addr ma)
 MY_BREAK(ma.uint32 == DITOMA(1, 0, 0));
 	// cache miss
 	parent = NULL;	// parent for root is NULL
-	tma.uint32 = META_START; // set .meta to 0xFF and all others to 0
-	tma.fd = ma.fd;
+	ima.uint32 = META_START; // set .meta to 0xFF and all others to 0
+	ima.fd = ma.fd;
 	// read the metadata from root to leaf node
 	for (int i = 0; ; ++i) {
-		tma.depth = i;
-		fbuf = fbuf_search(tma);
+		ima.depth = i;
+		fbuf = fbuf_search(ima);
 #if defined(MY_DEBUG)
 		depth[i] = fbuf;
 #endif
 		if (fbuf == NULL) {
 			fbuf = fbuf_alloc();	// allocate a fbuf from clean queue
-			fbuf->ma = tma;
+			fbuf->ma = ima;
 			fbuf_hash_insert_head(fbuf);
 			fbuf->parent = parent;
 			if (parent) {
@@ -1513,7 +1509,7 @@ MY_BREAK(ma.uint32 == DITOMA(1, 0, 0));
 		parent = fbuf;		// %fbuf is the parent of next level indirect block
 		index = ma_index_get(ma, i);// the index to next level's indirect block
 		sa = parent->data[index];	// the sector address of the next level indirect block
-		tma = ma_index_set(tma, i, index); // set the next level's index for @tma
+		ima = ma_index_set(ima, i, index); // set the next level's index for @ima
 	} // for
 #if defined(MY_DEBUG)
 	fbuf_queue_check();
