@@ -33,7 +33,7 @@ e-mail: wy-chung@outlook.com
 #define __unused		__attribute__((unused))
 
 // convert depth and index to ma
-#define DITOMA(d, i0, i1)\
+#define DI2MA(d, i0, i1)\
 	((union meta_addr){.meta=0xFF, .fd=FD_CUR, .depth=d, .index0=i0, .index1=i1}).uint32
 
 #define RAM_DISK_SIZE		0x180000000UL // 6G
@@ -262,16 +262,16 @@ static struct g_logstor_softc sc;
 static uint32_t _logstor_read_one(uint32_t ba, void *data);
 static uint32_t _logstor_write_one(uint32_t ba, void *data);
 
-static void seg_alloc(void);
-static void seg_sum_write(void);
+static void _seg_alloc(void);
+static void _seg_sum_write(void);
 
-static void disk_init(int fd);
+static uint32_t disk_init(int fd);
 static int  superblock_read(void);
 static void superblock_write(void);
 
+static struct _fbuf *file_access_4byte(uint8_t fd, uint32_t offset, uint32_t *off_4byte);
 static uint32_t file_read_4byte(uint8_t fh, uint32_t ba);
 static void file_write_4byte(uint8_t fh, uint32_t ba, uint32_t sa);
-static struct _fbuf *file_access_4byte(uint8_t fd, uint32_t offset, uint32_t *off_4byte);
 
 static void fbuf_mod_init(void);
 static void fbuf_mod_fini(void);
@@ -392,16 +392,19 @@ sega2sa(uint32_t sega)
 
 // called by ggate or logsinit when disk is a file
 // not used when disk is a ram disk
-void logstor_disk_init(const char *disk_file)
+uint32_t logstor_disk_init(const char *disk_file)
 {
 	int disk_fd;
 
 	disk_fd = open(disk_file, O_WRONLY);
 	MY_ASSERT(disk_fd > 0);
-	disk_init(disk_fd);
+	return disk_init(disk_fd);
 }
 
-void logstor_init(void)
+/*
+Return the max number of blocks for this disk
+*/
+uint32_t logstor_init(void)
 {
 	int disk_fd;
 
@@ -414,7 +417,7 @@ void logstor_init(void)
 	disk_fd = open(disk_file, O_WRONLY);
 	MY_ASSERT(disk_fd > 0);
 #endif
-	disk_init(disk_fd);
+	return disk_init(disk_fd);
 }
 
 void
@@ -461,7 +464,7 @@ logstor_close(void)
 
 	fbuf_mod_fini();
 
-	seg_sum_write();
+	_seg_sum_write();
 
 	superblock_write();
 #if !defined(RAM_DISK_SIZE)
@@ -605,11 +608,11 @@ _logstor_read_one(unsigned ba, void *data)
 static bool
 is_sec_valid_normal(uint32_t sa, uint32_t ba_rev)
 {
-	uint32_t sa_rev; // the sector address for ba_rev
 #if defined(MY_DEBUG)
 	union meta_addr ma_rev __unused;
 	ma_rev.uint32 = ba_rev;
 #endif
+	uint32_t sa_rev; // the sector address for ba_rev
 
 	// might running out of clean buffer
 	// move some clean buffer on leaf queue to clean queue
@@ -696,7 +699,10 @@ again:
 #if defined(MY_DEBUG)
 		ma_rev.uint32 = ba_rev;
 #endif
-//MY_BREAK(ba == 0 || ba_rev == 0);
+if (sa==1056) {
+MY_BREAK(ba == 1504398);
+MY_BREAK(ba == DI2MA(2,0,513));
+}
 		if (is_sec_valid(sa, ba_rev))
 			continue;
 #if defined(WYC)
@@ -708,8 +714,8 @@ again:
 		seg_sum->ss_rm[i] = ba;		// record reverse mapping
 		sc.seg_sum_alloc = i + 1;	// advnace the alloc pointer
 		if (sc.seg_sum_alloc == SEG_SUM_OFFSET) {
-			seg_sum_write();
-			seg_alloc();
+			_seg_sum_write();
+			_seg_alloc();
 		}
 		if (!IS_META_ADDR(ba)) {
 			// record the forward mapping for the %ba
@@ -721,7 +727,7 @@ again:
 		return sa;
 	}
 	// no free sector in current segment
-	seg_alloc();
+	_seg_alloc();
 	goto again;
 }
 
@@ -810,7 +816,7 @@ logstor_get_fbuf_miss(void)
   write out the segment summary
 */
 static void
-seg_sum_write(void)
+_seg_sum_write(void)
 {
 	uint32_t sa;
 
@@ -824,8 +830,11 @@ seg_sum_write(void)
 /*
 Description:
     Write the initialized supeblock to the downstream disk
+
+Return:
+    The max number of blocks for this disk
 */
-static void
+static uint32_t
 disk_init(int fd)
 {
 	int32_t seg_cnt;
@@ -859,10 +868,11 @@ disk_init(int fd)
 		MY_PANIC();
 	}
 	seg_cnt = sb->seg_cnt;
-	sb->block_cnt_max =
+	uint32_t max_block =
 	    (seg_cnt - SEG_DATA_START) * BLOCKS_PER_SEG -
 	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT * 1.02;
-	MY_ASSERT(sb->block_cnt_max < 0x40000000); // 1G
+	MY_ASSERT(max_block < 0x40000000); // 1G
+	sb->block_cnt_max = max_block;
 #if defined(MY_DEBUG)
 	printf("%s: sector_cnt %u block_cnt_max %u\n",
 	    __func__, sector_cnt, sb->block_cnt_max);
@@ -898,6 +908,7 @@ disk_init(int fd)
 	{	uint32_t sa = sega2sa(i) + SEG_SUM_OFFSET;
 		my_write(sa, &ss, 1);
 	}
+	return max_block;
 }
 
 /*
@@ -972,7 +983,7 @@ superblock_write(void)
 static void
 my_read(uint32_t sa, void *buf, unsigned size)
 {
-//MY_BREAK(sa == 263525);
+MY_BREAK(sa == 1056);
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(buf, ram_disk + (off_t)sa * SECTOR_SIZE, size * SECTOR_SIZE);
 }
@@ -980,7 +991,7 @@ my_read(uint32_t sa, void *buf, unsigned size)
 static void
 my_write(uint32_t sa, const void *buf, unsigned size)
 {
-//MY_BREAK(sa == 263525);
+MY_BREAK(sa == 1056);
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(ram_disk + (off_t)sa * SECTOR_SIZE , buf, size * SECTOR_SIZE);
 }
@@ -1015,7 +1026,7 @@ Output:
   Initialize @seg_sum->sum.alloc_p to 0
 */
 static void
-seg_alloc(void)
+_seg_alloc(void)
 {
 	MY_ASSERT(sc.superblock.seg_alloc < sc.superblock.seg_cnt);
 	if (++sc.superblock.seg_alloc == sc.superblock.seg_cnt)
@@ -1468,7 +1479,7 @@ fbuf_read(union meta_addr ma)
 	fbuf = fbuf_search(ma);
 	if (fbuf != NULL) // cache hit
 		return fbuf;
-MY_BREAK(ma.uint32 == DITOMA(1, 0, 0));
+
 	// cache miss
 	parent = NULL;	// parent for root is NULL
 	ima.uint32 = META_START; // set .meta to 0xFF and all others to 0
@@ -1535,7 +1546,7 @@ fbuf_write_if_modified(struct _fbuf *fbuf)
 
 	if (!fbuf->fc.modified)
 		return;
-//MY_BREAK(fbuf->ma.uint32==DITOMA(2,0,0));
+
 	sa = _logstor_write_one(fbuf->ma.uint32, fbuf->data);
 #if defined(MY_DEBUG)
 	fbuf->sa = sa;

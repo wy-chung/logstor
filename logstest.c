@@ -50,7 +50,7 @@ static struct {
 } *ba2sa;	// stored value for ba
 static uint8_t *ba_write_count;	// write count for each block
 
-static unsigned loop_count; // initialized in arrays_alloc()
+static unsigned loop_count;
 
 static void
 test_write(unsigned max_block)
@@ -85,8 +85,8 @@ test_write(unsigned max_block)
 		buf[5] = i;
 		buf[6] = ba;
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
-//MY_BREAK(ba==0);
 		sa = logstor_write_test(ba, buf);
+//MY_BREAK(ba==1504398);
 		ba2sa[ba].sa[1] = ba2sa[ba].sa[0];
 		ba2sa[ba].sa[0] = sa;
 	}
@@ -181,15 +181,16 @@ main_logstest(int argc, char *argv[])
 	unsigned max_block;
 
 	srandom(RAND_SEED);
-	logstor_init();
+	max_block = logstor_init();
 
 	//main_loop_count = MUTIPLIER_TO_MAXBLOCK/ratio_to_maxblock + 0.999;
+	//loop_count = max_block * ratio_to_maxblock;
+
 	main_loop_count = 1;
 	loop_count = 1764943;
 	for (int i = 0; i < main_loop_count; i++) {
 		printf("#### test %d ####\n", i);
 		logstor_open(DISK_FILE);
-		max_block = logstor_get_block_cnt();
 		arrays_alloc_init(max_block);
 #if defined(WYC)
 		arrays_alloc();
@@ -231,8 +232,6 @@ static void
 arrays_alloc(unsigned max_block)
 {
 	size_t size;
-
-	//loop_count = max_block * ratio_to_maxblock;
 
 	size = loop_count * sizeof(*i2ba);
 	i2ba = malloc(size);
