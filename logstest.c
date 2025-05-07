@@ -86,7 +86,7 @@ test_write(unsigned max_block)
 		buf[6] = ba;
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
 		sa = logstor_write_test(ba, buf);
-//MY_BREAK(ba==1504398);
+//MY_BREAK(ba==);
 		ba2sa[ba].sa[1] = ba2sa[ba].sa[0];
 		ba2sa[ba].sa[0] = sa;
 	}
@@ -147,7 +147,6 @@ test_read(unsigned max_block)
 	int read_count = 0;
 	uint32_t i_max = 0;
 	for (ba = 0 ; ba < max_block; ba += 1) {
-//MY_BREAK(ba == 34);
 		if ( (ba % 0x10000) == 0)
 			printf("r %7d/%7d\n", ba, max_block);
 		if (ba_write_count[ba] > 0) {

@@ -209,9 +209,12 @@ struct _fbuf_queue {
 	int	count;	// number of fbuf in this queue
 };
 struct g_logstor_softc {
-	uint32_t seg_alloc_sa;
-	uint32_t seg_sum_alloc;
+	uint32_t seg_alloc_sa;	// the sector address of the segment for allocation
+	uint32_t seg_sum_alloc;	// the allocation address with the segment summary block
 	struct _seg_sum seg_sum;// segment summary for the hot segment
+	uint32_t sb_sa; 	// superblock's sector address
+	bool sb_modified;	// is the super block modified
+	bool ss_modified;	// is segment summary modified
 	
 	int fbuf_count;
 	struct _fbuf *fbufs;
@@ -231,8 +234,6 @@ struct g_logstor_softc {
 	unsigned fbuf_hit;
 	unsigned fbuf_miss;
 
-	bool sb_modified;	// the super block is dirty
-	uint32_t sb_sa; 	// superblock's sector address
 	/*
 	  The macro RAM_DISK_SIZE is used for debug.
 	  By using RAM as the storage device, the test can run way much faster.
@@ -450,6 +451,8 @@ logstor_open(const char *disk_file)
 	uint32_t sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
 	my_read(sa, &sc.seg_sum, 1);
 	sc.seg_sum_alloc = 0;
+	sc.sb_modified = false;
+	sc.ss_modified = false;
 	sc.data_write_count = sc.other_write_count = 0;
 
 	fbuf_mod_init();
@@ -578,7 +581,6 @@ logstor_read_test(uint32_t ba, void *data)
 uint32_t
 logstor_write_test(uint32_t ba, void *data)
 {
-//MY_BREAK(ba==830866);
 	uint32_t sa = _logstor_write_one(ba, data);
 	fbuf_clean_queue_check(false);
 	return sa;
@@ -699,10 +701,7 @@ again:
 #if defined(MY_DEBUG)
 		ma_rev.uint32 = ba_rev;
 #endif
-if (sa==1056) {
-MY_BREAK(ba == 1504398);
-MY_BREAK(ba == DI2MA(2,0,513));
-}
+
 		if (is_sec_valid(sa, ba_rev))
 			continue;
 #if defined(WYC)
@@ -712,6 +711,7 @@ MY_BREAK(ba == DI2MA(2,0,513));
 
 		my_write(sa, data, 1);
 		seg_sum->ss_rm[i] = ba;		// record reverse mapping
+		sc.ss_modified = true;
 		sc.seg_sum_alloc = i + 1;	// advnace the alloc pointer
 		if (sc.seg_sum_alloc == SEG_SUM_OFFSET) {
 			_seg_sum_write();
@@ -727,6 +727,8 @@ MY_BREAK(ba == DI2MA(2,0,513));
 		return sa;
 	}
 	// no free sector in current segment
+	if (sc.ss_modified)
+		_seg_sum_write();
 	_seg_alloc();
 	goto again;
 }
@@ -824,6 +826,7 @@ _seg_sum_write(void)
 	sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
 	sc.seg_sum.ss_gen = sc.superblock.sb_gen;
 	my_write(sa, (void *)&sc.seg_sum, 1);
+	sc.ss_modified = false;
 	sc.other_write_count++; // the write for the segment summary
 }
 
@@ -958,7 +961,6 @@ superblock_read(void)
 		return EINVAL;
 
 	memcpy(&sc.superblock, sb, sizeof(sc.superblock));
-	sc.sb_modified = false;
 
 	return 0;
 }
@@ -983,7 +985,7 @@ superblock_write(void)
 static void
 my_read(uint32_t sa, void *buf, unsigned size)
 {
-MY_BREAK(sa == 1056);
+//MY_BREAK(sa == );
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(buf, ram_disk + (off_t)sa * SECTOR_SIZE, size * SECTOR_SIZE);
 }
@@ -991,7 +993,7 @@ MY_BREAK(sa == 1056);
 static void
 my_write(uint32_t sa, const void *buf, unsigned size)
 {
-MY_BREAK(sa == 1056);
+//MY_BREAK(sa == );
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(ram_disk + (off_t)sa * SECTOR_SIZE , buf, size * SECTOR_SIZE);
 }
@@ -1214,14 +1216,6 @@ ma2sa(union meta_addr ma)
 		parent = fbuf_read(pma);
 		MY_ASSERT(parent != NULL);
 		sa = parent->data[pindex];
-#if 0
-		if (parent != NULL)
-			sa = parent->data[pindex];
-		else {
-			MY_BREAK(true);
-			sa = SECTOR_NULL;
-		}
-#endif
 		break;
 	case 3: // it is an invalid metadata address
 		sa = SECTOR_NULL;
