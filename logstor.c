@@ -155,8 +155,8 @@ _Static_assert(sizeof(union meta_addr) == 4, "The size of emta_addr must be 4");
 enum {
 	QUEUE_IND0,	// for level 0 indirect blocks
 	QUEUE_IND1,	// for level 1 indirect blocks
-	QUEUE_LEAF,	// only replace buffers from leaf nodes
-	QUEUE_CLEAN,	// leaf node but also guaranteed clean
+	QUEUE_LEAF,	// the modified part of the leaf nodes
+	QUEUE_CLEAN,	// the clean part of the leaf nodes
 	QUEUE_CNT,
 };
 #define META_LEAF_DEPTH	QUEUE_LEAF
@@ -204,7 +204,7 @@ struct _fbuf { // file buffer
 	logstor soft control
 */
 struct _fbuf_queue {
-	struct _fbuf *head; // always points to sentinel except for QUEUE_LEAF
+	struct _fbuf *head; // always points to sentinel except for QUEUE_CLEAN
 	struct _fbuf_sentinel sentinel;	// head of the queues
 	int	count;	// number of fbuf in this queue
 };
@@ -270,7 +270,7 @@ static uint32_t disk_init(int fd);
 static int  superblock_read(void);
 static void superblock_write(void);
 
-static struct _fbuf *file_access_4byte(uint8_t fd, uint32_t offset, uint32_t *off_4byte);
+static struct _fbuf *file_access_4byte(uint8_t fd, uint32_t offset, uint32_t *off_4byte, bool write_access);
 static uint32_t file_read_4byte(uint8_t fh, uint32_t ba);
 static void file_write_4byte(uint8_t fh, uint32_t ba, uint32_t sa);
 
@@ -279,16 +279,16 @@ static void fbuf_mod_fini(void);
 static void fbuf_queue_init(int which);
 static void fbuf_queue_insert_tail(int which, struct _fbuf *fbuf);
 static void fbuf_queue_remove(struct _fbuf *fbuf);
-static struct _fbuf *fbuf_search(union meta_addr ma);
+static struct _fbuf *fbuf_search(union meta_addr ma, bool write_access);
 static void fbuf_hash_init(int which);
 static void fbuf_hash_insert_head(struct _fbuf *fbuf);
 static void fbuf_hash_remove(struct _fbuf *fbuf);
-static struct _fbuf *fbuf_read(union meta_addr ma);
-static void fbuf_write_if_modified(struct _fbuf *fbuf);
+static struct _fbuf *fbuf_access(union meta_addr ma, bool write_access);
+static void fbuf_write(struct _fbuf *fbuf);
 static void fbuf_flush(void);
 static struct _fbuf *fbuf_alloc(void);
 static void fbuf_queue_check(void);
-static void fbuf_clean_queue_check(bool clean_only);
+static void fbuf_dirty_queue_flush(void);
 
 static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
 static uint32_t ma2sa(union meta_addr ma);
@@ -496,85 +496,41 @@ int logstor_delete(off_t offset, void *data, off_t length)
 	for (i = 0; i < size; i++)
 		file_write_4byte(sc.superblock.fd_cur, ba + i, SECTOR_DEL);
 
-	fbuf_clean_queue_check(false);
+	fbuf_dirty_queue_flush();
 	return (0);
 }
 
-/*
-Description:
-  using the second chance replace policy to choose a fbuf in QUEUE_LEAF
-
-Parameter:
-  clean_only: replace only clean buffer
-*/
-struct _fbuf *
-fbuf_get_replacement(bool clean_only)
+static void
+fbuf_dirty_queue_flush(void)
 {
-	struct _fbuf *fbuf;
 	struct _fbuf_queue *fbuf_queue;
-	struct _fbuf_sentinel *queue_sentinel;
+	struct _fbuf_sentinel	*queue_sentinel;
+	struct _fbuf	*fbuf;
+	uint32_t dirty_threshold = sc.superblock.block_cnt_max / 2;
 
 	fbuf_queue = &sc.fbuf_queue[QUEUE_LEAF];
-	queue_sentinel = &fbuf_queue->sentinel;
-	fbuf = fbuf_queue->head;
-	bool all_modified = true;
-again:
-	while (true) {
-		if (!fbuf->fc.accessed) {
-			if (!clean_only)
-				break; // replace this fbuf
-			if (!fbuf->fc.modified)
-				break; // replace only clean fbuf
-			}
-		fbuf->fc.accessed = false;	// give this fbuf a second chance
-		if (!fbuf->fc.modified)
-			all_modified = false;
-		fbuf = fbuf->fc.queue_next;
-		if (fbuf == fbuf_queue->head && clean_only && all_modified)
-			return NULL;
-	}
-	if ((struct _fbuf_sentinel *)fbuf == queue_sentinel) {
-		fbuf->fc.accessed = true;
-		fbuf = fbuf->fc.queue_next;
-		goto again;
-	}
-	fbuf_queue->head = fbuf->fc.queue_next;
-	MY_ASSERT(fbuf->queue_which == QUEUE_LEAF);
-
-	return fbuf;
-}
-
-static void
-fbuf_clean_queue_check(bool clean_only)
-{
-	static bool is_called = false;
-	struct _fbuf *fbuf;
-	/*
-	 will fail at "MY_ASSERT(fbuf != (struct _fbuf *)queue_sentinel);" in fbuf_alloc
-	 if min_clean <= 9
-	*/
-	const int min_clean = 12;
-
-	if (is_called)
+	if (fbuf_queue->count < dirty_threshold)
 		return;
-	is_called = true;
-	while (sc.fbuf_queue[QUEUE_CLEAN].count < min_clean) {
-		fbuf = fbuf_get_replacement(clean_only);
-		MY_ASSERT(fbuf != NULL);
-		MY_ASSERT(!fbuf->fc.is_sentinel);
-		MY_ASSERT(!clean_only || !fbuf->fc.modified);
+
+	fbuf_flush();
+
+	// move all fbufs in QUEUE_LEAF to QUEUE_CLEAN
+	queue_sentinel = &fbuf_queue->sentinel;
+	fbuf = queue_sentinel->fc.queue_next;
+	while (fbuf != (struct _fbuf *)queue_sentinel) {
+		MY_ASSERT(fbuf->queue_which == QUEUE_LEAF);
+		MY_ASSERT(!fbuf->fc.modified);
 		fbuf_queue_remove(fbuf);
 		fbuf_queue_insert_tail(QUEUE_CLEAN, fbuf);
-		fbuf_write_if_modified(fbuf);
+		fbuf = fbuf->fc.queue_next;
 	}
-	is_called = false;
 }
 
 uint32_t
 logstor_read_test(uint32_t ba, void *data)
 {
 	uint32_t sa = _logstor_read_one(ba, data);
-	fbuf_clean_queue_check(false);
+	fbuf_dirty_queue_flush();
 	return sa;
 }
 
@@ -582,7 +538,7 @@ uint32_t
 logstor_write_test(uint32_t ba, void *data)
 {
 	uint32_t sa = _logstor_write_one(ba, data);
-	fbuf_clean_queue_check(false);
+	fbuf_dirty_queue_flush();
 	return sa;
 }
 
@@ -616,10 +572,6 @@ is_sec_valid_normal(uint32_t sa, uint32_t ba_rev)
 #endif
 	uint32_t sa_rev; // the sector address for ba_rev
 
-	// might running out of clean buffer
-	// move some clean buffer on leaf queue to clean queue
-	fbuf_clean_queue_check(true); // cannot do write again so replace only clean fbuf
-
 	if (IS_META_ADDR(ba_rev)) {
 		sa_rev = ma2sa((union meta_addr)ba_rev);
 		if (sa == sa_rev)
@@ -647,10 +599,6 @@ is_sec_valid_during_commit(uint32_t sa, uint32_t ba_rev)
 	union meta_addr ma_rev __unused;
 	ma_rev.uint32 = ba_rev;
 #endif
-
-	// might running out of clean buffer
-	// move some clean buffer on leaf queue to clean queue
-	fbuf_clean_queue_check(true); // cannot do write again so replace only clean fbuf
 
 	if (IS_META_ADDR(ba_rev)) {
 		sa_rev = ma2sa((union meta_addr)ba_rev);
@@ -968,16 +916,16 @@ superblock_read(void)
 static void
 superblock_write(void)
 {
-	struct _superblock *sb;
+	size_t sb_size = sizeof(sc.superblock);
 	char buf[SECTOR_SIZE];
 
 	sc.superblock.sb_gen++;
 	if (++sc.sb_sa == SECTORS_PER_SEG)
 		sc.sb_sa = 0;
-	sb = (struct _superblock *)buf;
-	memcpy(sb, &sc.superblock, sizeof(sc.superblock));
-	
-	my_write(sc.sb_sa, sb, 1);
+	memcpy(buf, &sc.superblock, sb_size);
+	memset(buf + sb_size, 0, SECTOR_SIZE - sb_size);
+	my_write(sc.sb_sa, buf, 1);
+	sc.sb_modified = false;
 	sc.other_write_count++;
 }
 
@@ -1061,7 +1009,7 @@ file_read_4byte(uint8_t fd, uint32_t ba)
 	uint32_t off_4byte;	// the offset in 4 bytes within the file buffer data
 	uint32_t sa;
 
-	fbuf = file_access_4byte(fd, ba, &off_4byte);
+	fbuf = file_access_4byte(fd, ba, &off_4byte, false);
 	if (fbuf)
 		sa = fbuf->data[off_4byte];
 	else
@@ -1084,7 +1032,7 @@ file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
 	struct _fbuf *fbuf;
 	uint32_t off_4byte;	// the offset in 4 bytes within the file buffer data
 
-	fbuf = file_access_4byte(fd, ba, &off_4byte);
+	fbuf = file_access_4byte(fd, ba, &off_4byte, true);
 	MY_ASSERT(fbuf != NULL);
 	fbuf->fc.modified = true;
 	fbuf->data[off_4byte] = sa;
@@ -1104,7 +1052,7 @@ Return:
 	the address of the file buffer data
 */
 static struct _fbuf *
-file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *off_4byte)
+file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *off_4byte, bool write_access)
 {
 	union meta_addr	ma;		// metadata address
 	struct _fbuf *fbuf;
@@ -1122,10 +1070,11 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *off_4byte)
 	ma.depth = META_LEAF_DEPTH;
 	ma.fd = fd;
 	ma.meta = 0xFF;	// for metadata address, bits 31:24 are all 1s
-	fbuf = fbuf_read(ma);
-	if (fbuf)
+	fbuf = fbuf_access(ma, write_access);
+	if (fbuf) {
+		MY_ASSERT(!write_access || fbuf->queue_which == 2);
 		fbuf->fc.accessed = true;
-
+	}
 	return fbuf;
 }
 
@@ -1213,7 +1162,7 @@ ma2sa(union meta_addr ma)
 	case 1:
 	case 2:
 		pma = ma2pma(ma, &pindex);
-		parent = fbuf_read(pma);
+		parent = fbuf_access(pma, false);
 		MY_ASSERT(parent != NULL);
 		sa = parent->data[pindex];
 		break;
@@ -1239,6 +1188,7 @@ fbuf_mod_init(void)
 		fbuf_count = FBUF_MIN;
 	if (fbuf_count > FBUF_MAX)
 		fbuf_count = FBUF_MAX;
+	sc.fbuf_count = fbuf_count;
 	sc.fbufs = malloc(fbuf_count * sizeof(*sc.fbufs));
 	MY_ASSERT(sc.fbufs != NULL);
 
@@ -1248,8 +1198,6 @@ fbuf_mod_init(void)
 	for (i = 0; i < QUEUE_CNT; ++i) {
 		fbuf_queue_init(i);
 	}
-	// set it to true to skip the sentinel from the replacement for clean fbuf
-	sc.fbuf_queue[QUEUE_LEAF].sentinel.fc.modified = true;
 
 	// insert fbuf to both QUEUE_CLEAN and hash queue
 	for (i = 0; i < fbuf_count; ++i) {
@@ -1267,9 +1215,6 @@ fbuf_mod_init(void)
 		fbuf->index = i;
 #endif
 	}
-#if defined(MY_DEBUG)
-	sc.fbuf_count = fbuf_count;
-#endif
 	sc.fbuf_hit = sc.fbuf_miss = 0;
 }
 
@@ -1287,16 +1232,19 @@ fbuf_flush(void)
 	struct _fbuf	*fbuf;
 	int	i;
 
-	for (i = META_LEAF_DEPTH; i >= 0; --i) {
+	for (i = QUEUE_CNT-1; i >= 0; --i) {
 		queue_sentinel = &sc.fbuf_queue[i].sentinel;
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
 			MY_ASSERT(fbuf->queue_which == i);
 			MY_ASSERT(IS_META_ADDR(fbuf->ma.uint32));
-			fbuf_write_if_modified(fbuf);
+			if (fbuf->fc.modified)
+				fbuf_write(fbuf);
 			fbuf = fbuf->fc.queue_next;
 		}
 	}
+	// write the superblock back to disk
+	superblock_write();
 }
 
 static void
@@ -1313,7 +1261,7 @@ fbuf_queue_init(int which)
 	fbuf->fc.queue_next = fbuf;
 	fbuf->fc.queue_prev = fbuf;
 	fbuf->fc.is_sentinel = true;
-	fbuf->fc.accessed = false;
+	fbuf->fc.accessed = true;
 	fbuf->fc.modified = false;
 }
 
@@ -1325,6 +1273,7 @@ fbuf_queue_insert_tail(int which, struct _fbuf *fbuf)
 
 	MY_ASSERT(which < QUEUE_CNT);
 	fbuf->queue_which = which;
+	MY_ASSERT(which != QUEUE_CLEAN || !fbuf->fc.modified);
 	head = sc.fbuf_queue[which].head;
 	prev = head->fc.queue_prev;
 	MY_ASSERT(prev->fc.is_sentinel || prev->queue_which == which);
@@ -1422,7 +1371,7 @@ Description:
     Search the file buffer with the tag value of @ma. Return NULL if not found
 */
 static struct _fbuf *
-fbuf_search(union meta_addr ma)
+fbuf_search(union meta_addr ma, bool write_access)
 {
 	unsigned	hash;	// hash value
 	struct _fbuf	*fbuf;
@@ -1434,7 +1383,7 @@ fbuf_search(union meta_addr ma)
 	while (fbuf != (struct _fbuf *)bucket_sentinel) {
 		if (fbuf->ma.uint32 == ma.uint32) { // cache hit
 			sc.fbuf_hit++;
-			if (fbuf->queue_which == QUEUE_CLEAN) {
+			if (fbuf->queue_which == QUEUE_CLEAN && write_access) {
 				fbuf_queue_remove(fbuf);
 				fbuf_queue_insert_tail(QUEUE_LEAF, fbuf);
 			}
@@ -1446,6 +1395,55 @@ fbuf_search(union meta_addr ma)
 	return NULL;	// cache miss
 }
 
+/*
+Description:
+  using the second chance replace policy to choose a fbuf in QUEUE_CLEAN
+  if the fbuf has been modified, move it to QUEUE_LEAF
+*/
+struct _fbuf *
+fbuf_alloc(void)
+{
+	struct _fbuf_queue *fbuf_queue;
+	struct _fbuf_sentinel *queue_sentinel;
+	struct _fbuf *fbuf, *parent;
+
+	fbuf_queue = &sc.fbuf_queue[QUEUE_CLEAN];
+	queue_sentinel = &fbuf_queue->sentinel;
+	fbuf = fbuf_queue->head;
+again:
+	while (true) {
+		MY_ASSERT(!fbuf->fc.modified);
+		if (!fbuf->fc.accessed)
+			break;
+
+		fbuf->fc.accessed = false;	// give this fbuf a second chance
+		fbuf = fbuf->fc.queue_next;
+	}
+	if (fbuf == (struct _fbuf *)queue_sentinel) {
+		fbuf->fc.accessed = true;
+		fbuf = fbuf->fc.queue_next;
+		MY_ASSERT(fbuf != (struct _fbuf *)queue_sentinel);
+		goto again;
+	}
+	fbuf_queue->head = fbuf->fc.queue_next;
+
+	MY_ASSERT(fbuf->child_cnt == 0);
+	fbuf_hash_remove(fbuf);
+	fbuf_queue_remove(fbuf);
+	parent = fbuf->parent;
+	// when parent's child count drops to 0, move it to QUEUE_LEAF
+	if (parent && --parent->child_cnt == 0) {
+		MY_ASSERT(parent->queue_which == parent->ma.depth);
+		fbuf_queue_remove(parent);
+		if (parent->fc.modified)
+			fbuf_queue_insert_tail(QUEUE_LEAF, parent);
+		else
+			fbuf_queue_insert_tail(QUEUE_CLEAN, parent);
+	}
+
+	return fbuf;
+}
+
 #if defined(MY_DEBUG)
 static struct _fbuf *depth[3];
 #endif
@@ -1454,7 +1452,7 @@ Description:
     Read or write the file buffer with metadata address @ma
 */
 static struct _fbuf *
-fbuf_read(union meta_addr ma)
+fbuf_access(union meta_addr ma, bool write_access)
 {
 	uint32_t sa;	// sector address where the metadata is stored
 	unsigned index;
@@ -1470,7 +1468,7 @@ fbuf_read(union meta_addr ma)
 	if (sa == SECTOR_DEL) // the file does not exist
 		return NULL;
 
-	fbuf = fbuf_search(ma);
+	fbuf = fbuf_search(ma, write_access);
 	if (fbuf != NULL) // cache hit
 		return fbuf;
 
@@ -1481,7 +1479,7 @@ fbuf_read(union meta_addr ma)
 	// read the metadata from root to leaf node
 	for (int i = 0; ; ++i) {
 		ima.depth = i;
-		fbuf = fbuf_search(ima);
+		fbuf = fbuf_search(ima, write_access);
 #if defined(MY_DEBUG)
 		depth[i] = fbuf;
 #endif
@@ -1510,7 +1508,10 @@ fbuf_read(union meta_addr ma)
 				parent->child[index] = fbuf;
 #endif
 			if (i == ma.depth) { // reach the intended depth
-				fbuf_queue_insert_tail(QUEUE_LEAF, fbuf);
+				if (write_access)
+					fbuf_queue_insert_tail(QUEUE_LEAF, fbuf);
+				else
+					fbuf_queue_insert_tail(QUEUE_CLEAN, fbuf);
 			} else
 				fbuf_queue_insert_tail(i, fbuf);
 
@@ -1532,15 +1533,13 @@ fbuf_read(union meta_addr ma)
 }
 
 static void
-fbuf_write_if_modified(struct _fbuf *fbuf)
+fbuf_write(struct _fbuf *fbuf)
 {
 	struct _fbuf *parent;	// buffer parent
 	unsigned pindex;	// the index in parent indirect block
 	uint32_t sa;		// sector address
 
-	if (!fbuf->fc.modified)
-		return;
-
+	MY_ASSERT(fbuf->fc.modified);
 	sa = _logstor_write_one(fbuf->ma.uint32, fbuf->data);
 #if defined(MY_DEBUG)
 	fbuf->sa = sa;
@@ -1564,12 +1563,13 @@ fbuf_write_if_modified(struct _fbuf *fbuf)
 	}
 }
 
+#if 0
 /*
 Description:
     allocate a file buffer from free queue
 */
 static struct _fbuf *
-fbuf_alloc(void)
+fbuf_alloc(bool read_only)
 {
 	struct _fbuf *fbuf, *parent;
 	struct _fbuf_sentinel *queue_sentinel;
@@ -1587,10 +1587,9 @@ fbuf_alloc(void)
 		fbuf_queue_remove(parent);
 		fbuf_queue_insert_tail(QUEUE_LEAF, parent);
 	}
-	fbuf->child_cnt = 0;
 	return fbuf;
 }
-
+#endif
 #if defined(MY_DEBUG)
 void
 fbuf_hash_check(void)
@@ -1618,6 +1617,7 @@ static void
 fbuf_queue_check(void)
 {
 	int	i;
+	struct _fbuf_queue *fbuf_queue;
 	struct _fbuf_sentinel *queue_sentinel;
 	struct _fbuf *fbuf;
 	unsigned count[QUEUE_CNT];
@@ -1635,7 +1635,8 @@ fbuf_queue_check(void)
 	int gdb_root_cnt = 0;
 	for (i = QUEUE_CNT-1; i >= 0  ; --i) {
 		count[i] = 0;
-		queue_sentinel = &sc.fbuf_queue[i].sentinel;
+		fbuf_queue = &sc.fbuf_queue[i];
+		queue_sentinel = &fbuf_queue->sentinel;
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
 			++count[i];
@@ -1643,15 +1644,14 @@ fbuf_queue_check(void)
 			if (i == 0) {
 				MY_ASSERT(fbuf->parent == NULL);
 				++gdb_root_cnt;
-			}
-			if (i == 1 || i == 2)
+			} else if (i == 1)
 				MY_ASSERT(fbuf->parent != NULL);
 			if (fbuf->parent)
 				++fbuf->parent->gdb_uint16; // increment parent's debug child count
 
 			fbuf = fbuf->fc.queue_next;
 		}
-		MY_ASSERT(sc.fbuf_queue[i].count == count[i]);
+		MY_ASSERT(fbuf_queue->count == count[i]);
 	}
 	// check that the child count is correct
 	for (i = 0; i < QUEUE_LEAF; ++i) {
@@ -1701,7 +1701,6 @@ logstor_check(void)
 	max_block = logstor_get_block_cnt();
 	MY_ASSERT(!IS_META_ADDR(max_block));
 	for (ba = 0; ba < max_block; ++ba) {
-		fbuf_clean_queue_check(true);
 		sa = logstor_ba2sa(ba);
 #if defined(WYC)
 		logstor_ba2sa_normal();

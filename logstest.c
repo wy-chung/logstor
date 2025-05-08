@@ -185,7 +185,7 @@ main_logstest(int argc, char *argv[])
 	//main_loop_count = MUTIPLIER_TO_MAXBLOCK/ratio_to_maxblock + 0.999;
 	//loop_count = max_block * ratio_to_maxblock;
 
-	main_loop_count = 1;
+	main_loop_count = 2;
 	loop_count = 1764943;
 	for (int i = 0; i < main_loop_count; i++) {
 		printf("#### test %d ####\n", i);
