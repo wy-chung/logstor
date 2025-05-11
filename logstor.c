@@ -218,7 +218,8 @@ struct g_logstor_softc {
 	bool ss_modified;	// is segment summary modified
 	
 	int fbuf_count;
-	struct _fbuf *fbufs;
+	struct _fbuf *fbufs;	// an array of fbufs
+	struct _fbuf *fbuf_alloc; // point to the fbuf candidate for replacement
 	struct _fbuf_queue fbuf_queue[QUEUE_CNT];
 
 	// buffer hash queue
@@ -543,6 +544,7 @@ fbuf_clean_queue_check(void)
 				fbuf_queue_remove(fbuf);
 				fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
 			}
+			fbuf = fbuf->fc.queue_next;
 		}
 	}
 }
@@ -1055,13 +1057,15 @@ file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
 
 	fbuf = file_access_4byte(fd, ba, &off_4byte);
 	MY_ASSERT(fbuf != NULL);
+	fbuf->data[off_4byte] = sa;
 	if (!fbuf->fc.modified) {
 		MY_ASSERT(fbuf->queue_which == QUEUE_LEAF_CLEAN);
 		fbuf->fc.modified = true;
+		if (fbuf == sc.fbuf_alloc)
+			sc.fbuf_alloc = fbuf->fc.queue_next;
 		fbuf_queue_remove(fbuf);
 		fbuf_queue_insert_tail(QUEUE_LEAF_DIRTY, fbuf);
 	}
-	fbuf->data[off_4byte] = sa;
 }
 
 /*
@@ -1097,9 +1101,6 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *off_4byte)
 	ma.fd = fd;
 	ma.meta = 0xFF;	// for metadata address, bits 31:24 are all 1s
 	fbuf = fbuf_access(ma);
-	if (fbuf) {
-		fbuf->fc.accessed = true;
-	}
 	return fbuf;
 }
 
@@ -1223,6 +1224,7 @@ fbuf_mod_init(void)
 	for (i = 0; i < QUEUE_CNT; ++i) {
 		fbuf_queue_init(i);
 	}
+	sc.fbuf_alloc = (struct _fbuf *)&sc.fbuf_queue[QUEUE_LEAF_CLEAN].sentinel;
 
 	// insert fbuf to both QUEUE_LEAF_CLEAN and hash queue
 	for (i = 0; i < fbuf_count; ++i) {
@@ -1277,6 +1279,14 @@ fbuf_flush(void)
 	dirty_sentinel = &sc.fbuf_queue[QUEUE_LEAF_DIRTY].sentinel;
 	if (is_queue_empty(dirty_sentinel))
 		return;
+
+	// set queue_which to QUEUE_LEAF_CLEAN for all fbufs on QUEUE_LEAF_DIRTY
+	queue_sentinel = &sc.fbuf_queue[QUEUE_LEAF_DIRTY].sentinel;
+	fbuf = queue_sentinel->fc.queue_next;
+	while (fbuf != (struct _fbuf *)queue_sentinel) {
+		fbuf->queue_which = QUEUE_LEAF_CLEAN;
+		fbuf = fbuf->fc.queue_next;
+	}
 
 	// move all fbufs in QUEUE_LEAF_DIRTY to QUEUE_LEAF_CLEAN
 	clean_sentinel = &sc.fbuf_queue[QUEUE_LEAF_CLEAN].sentinel;
@@ -1451,7 +1461,7 @@ fbuf_alloc(void)
 
 	fbuf_queue = &sc.fbuf_queue[QUEUE_LEAF_CLEAN];
 	queue_sentinel = &fbuf_queue->sentinel;
-	fbuf = fbuf_queue->head;
+	fbuf = sc.fbuf_alloc;
 again:
 	while (true) {
 		if (!fbuf->fc.accessed)
@@ -1467,7 +1477,7 @@ again:
 		goto again;
 	}
 	MY_ASSERT(!fbuf->fc.modified);
-	fbuf_queue->head = fbuf->fc.queue_next;
+	sc.fbuf_alloc = fbuf->fc.queue_next;
 
 	fbuf_hash_remove(fbuf);
 	parent = fbuf->parent;
@@ -1504,7 +1514,7 @@ fbuf_access(union meta_addr ma)
 
 	fbuf = fbuf_search(ma);
 	if (fbuf != NULL) // cache hit
-		return fbuf;
+		goto end;
 
 	// cache miss
 	parent = NULL;	// parent for root is NULL
@@ -1547,6 +1557,7 @@ fbuf_access(union meta_addr ma)
 		}
 		if (i == ma.depth) // reach the intended depth
 			break;
+
 		parent = fbuf;		// %fbuf is the parent of next level indirect block
 		index = ma_index_get(ma, i);// the index to next level's indirect block
 		sa = parent->data[index];	// the sector address of the next level indirect block
@@ -1555,6 +1566,8 @@ fbuf_access(union meta_addr ma)
 #if defined(MY_DEBUG)
 	fbuf_queue_check();
 #endif
+end:
+	fbuf->fc.accessed = true;
 	return fbuf;
 }
 
