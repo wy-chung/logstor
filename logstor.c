@@ -119,7 +119,8 @@ _Static_assert(sizeof(struct _superblock) < SECTOR_SIZE, "The size of the super 
 struct _seg_sum {
 	uint32_t ss_rm[SECTORS_PER_SEG - 1];	// reverse map
 	// reverse map SECTORS_PER_SEG - 1 is not used so we store something here
-	uint32_t ss_gen;  // sequence number. used for redo after system crash
+	uint32_t ss_alloc;	// the sector for allocation in the segment
+	//uint32_t ss_gen;  // sequence number. used for redo after system crash
 };
 
 _Static_assert(sizeof(struct _seg_sum) == SECTOR_SIZE,
@@ -205,7 +206,6 @@ struct _fbuf { // file buffer
 */
 struct g_logstor_softc {
 	uint32_t seg_alloc_sa;	// the sector address of the segment for allocation
-	uint32_t seg_sum_alloc;	// the allocation address within the segment summary block
 	struct _seg_sum seg_sum;// segment summary for the hot segment
 	uint32_t sb_sa; 	// superblock's sector address
 	bool sb_modified;	// is the super block modified
@@ -447,7 +447,7 @@ logstor_open(const char *disk_file)
 	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
 	uint32_t sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
 	my_read(sa, &sc.seg_sum, 1);
-	sc.seg_sum_alloc = 0;
+	MY_ASSERT(sc.seg_sum.ss_alloc < SEG_SUM_OFFSET - 1);
 	sc.ss_modified = false;
 	sc.data_write_count = sc.other_write_count = 0;
 
@@ -610,7 +610,7 @@ _logstor_write_one(uint32_t ba, void *data)
 	MY_ASSERT(!is_called); // recursive call is not allowed
 	is_called = true;
 again:
-	for (int i = sc.seg_sum_alloc; i < SEG_SUM_OFFSET; ++i)
+	for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
 	{
 		uint32_t sa = sc.seg_alloc_sa + i;
 		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
@@ -628,8 +628,8 @@ again:
 		my_write(sa, data, 1);
 		seg_sum->ss_rm[i] = ba;		// record reverse mapping
 		sc.ss_modified = true;
-		sc.seg_sum_alloc = i + 1;	// advnace the alloc pointer
-		if (sc.seg_sum_alloc == SEG_SUM_OFFSET) {
+		seg_sum->ss_alloc = i + 1;	// advnace the alloc pointer
+		if (seg_sum->ss_alloc == SEG_SUM_OFFSET) {
 			seg_sum_write();
 			_seg_alloc();
 		}
@@ -741,7 +741,6 @@ seg_sum_write(void)
 		return;
 	// segment summary is at the end of a segment
 	sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
-	sc.seg_sum.ss_gen = sc.superblock.sb_gen;
 	my_write(sa, (void *)&sc.seg_sum, 1);
 	sc.ss_modified = false;
 	sc.other_write_count++; // the write for the segment summary
@@ -954,7 +953,7 @@ _seg_alloc(void)
 		sc.superblock.seg_alloc = SEG_DATA_START;
 	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
 	my_read(sc.seg_alloc_sa + SEG_SUM_OFFSET, &sc.seg_sum, 1);
-	sc.seg_sum_alloc = 0;
+	sc.seg_sum.ss_alloc = 0;
 }
 
 /*********************************************************
