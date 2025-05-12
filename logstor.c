@@ -62,8 +62,7 @@ e-mail: wy-chung@outlook.com
 #define	SECTOR_NULL	0	// this sector address can not map to any block address
 #define SECTOR_DEL	1	// don't look further, it is NULL
 
-//#define FBUF_MAX	500
-#define FBUF_CLEAN_THRESHOLD	12
+#define FBUF_CLEAN_THRESHOLD	32
 #define FBUF_MIN	(1024 + FBUF_CLEAN_THRESHOLD)
 #define FBUF_MAX	(FBUF_MIN * 2)
 #define FBUF_BUCKETS	1097	// this should be a prime number
@@ -261,7 +260,7 @@ static uint32_t _logstor_read_one(uint32_t ba, void *data);
 static uint32_t _logstor_write_one(uint32_t ba, void *data);
 
 static void _seg_alloc(void);
-static void _seg_sum_write(void);
+static void seg_sum_write(void);
 
 static uint32_t disk_init(int fd);
 static int  superblock_read(void);
@@ -293,12 +292,12 @@ static uint32_t ma2sa(union meta_addr ma);
 static void my_read (uint32_t sa, void *buf, unsigned size);
 static void my_write(uint32_t sa, const void *buf, unsigned size);
 
+static void logstor_check(void);
+
 static uint32_t logstor_ba2sa_normal(uint32_t ba);
 static uint32_t logstor_ba2sa_during_commit(uint32_t ba);
 static bool is_sec_valid_normal(uint32_t sa, uint32_t ba_rev);
 static bool is_sec_valid_during_commit(uint32_t sa, uint32_t ba_rev);
-
-static void logstor_check(void);
 
 static bool (*is_sec_valid)(uint32_t sa, uint32_t ba_rev) = is_sec_valid_normal;
 static uint32_t (*logstor_ba2sa)(uint32_t ba) = logstor_ba2sa_normal;
@@ -464,7 +463,7 @@ logstor_close(void)
 
 	fbuf_mod_fini();
 
-	_seg_sum_write();
+	seg_sum_write();
 
 	superblock_write();
 #if !defined(RAM_DISK_SIZE)
@@ -495,56 +494,6 @@ int logstor_delete(off_t offset, void *data, off_t length)
 
 	fbuf_clean_queue_check();
 	return (0);
-}
-
-static inline bool is_queue_empty(struct _fbuf_sentinel *sentinel)
-{
-	if ((struct _fbuf_sentinel *)sentinel->fc.queue_next == sentinel) {
-		MY_ASSERT((struct _fbuf_sentinel *)sentinel->fc.queue_prev == sentinel);
-		return true;
-	}
-	return false;
-}
-
-static inline void queue_init(struct _fbuf_sentinel *sentinel)
-{
-	sentinel->fc.queue_next = (struct _fbuf *)sentinel;
-	sentinel->fc.queue_prev = (struct _fbuf *)sentinel;
-}
-
-static void
-fbuf_clean_queue_check(void)
-{
-	struct _fbuf_sentinel	*queue_sentinel;
-	struct _fbuf	*fbuf;
-	uint32_t clean_threshold = 32;
-
-	queue_sentinel = &sc.fbuf_queue[QUEUE_LEAF_CLEAN];
-	if (queue_sentinel->count > clean_threshold)
-		return;
-
-	fbuf_flush();
-
-	// move all parent nodes with child_cnt 0 to clean queue
-	for (int i = QUEUE_IND1; i >= QUEUE_IND0; --i) {
-		queue_sentinel = &sc.fbuf_queue[i];
-		fbuf = queue_sentinel->fc.queue_next;
-		while (fbuf != (struct _fbuf *)queue_sentinel) {
-			if (fbuf->child_cnt == 0) {
-				struct _fbuf *parent = fbuf->parent;
-				if (parent) {
-					--parent->child_cnt;
-					MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
-				} else {
-					sc.superblock.fd_tab[fbuf->ma.fd] = SECTOR_NULL;
-					sc.sb_modified = true;
-				}
-				fbuf_queue_remove(fbuf);
-				fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
-			}
-			fbuf = fbuf->fc.queue_next;
-		}
-	}
 }
 
 uint32_t
@@ -683,7 +632,7 @@ again:
 		sc.ss_modified = true;
 		sc.seg_sum_alloc = i + 1;	// advnace the alloc pointer
 		if (sc.seg_sum_alloc == SEG_SUM_OFFSET) {
-			_seg_sum_write();
+			seg_sum_write();
 			_seg_alloc();
 		}
 		if (!IS_META_ADDR(ba)) {
@@ -697,7 +646,7 @@ again:
 	}
 	// no free sector in current segment
 	if (sc.ss_modified)
-		_seg_sum_write();
+		seg_sum_write();
 	_seg_alloc();
 	goto again;
 }
@@ -787,7 +736,7 @@ logstor_get_fbuf_miss(void)
   write out the segment summary
 */
 static void
-_seg_sum_write(void)
+seg_sum_write(void)
 {
 	uint32_t sa;
 
@@ -1026,9 +975,9 @@ Return:
 static uint32_t
 file_read_4byte(uint8_t fd, uint32_t ba)
 {
-	struct _fbuf *fbuf;
 	uint32_t off_4byte;	// the offset in 4 bytes within the file buffer data
 	uint32_t sa;
+	struct _fbuf *fbuf;
 
 	fbuf = file_access_4byte(fd, ba, &off_4byte);
 	if (fbuf)
@@ -1248,6 +1197,57 @@ fbuf_mod_fini(void)
 {
 	fbuf_flush();
 	free(sc.fbufs);
+}
+
+static inline bool
+is_queue_empty(struct _fbuf_sentinel *sentinel)
+{
+	if ((struct _fbuf_sentinel *)sentinel->fc.queue_next == sentinel) {
+		MY_ASSERT((struct _fbuf_sentinel *)sentinel->fc.queue_prev == sentinel);
+		return true;
+	}
+	return false;
+}
+
+static inline void
+queue_init(struct _fbuf_sentinel *sentinel)
+{
+	sentinel->fc.queue_next = (struct _fbuf *)sentinel;
+	sentinel->fc.queue_prev = (struct _fbuf *)sentinel;
+}
+
+static void
+fbuf_clean_queue_check(void)
+{
+	struct _fbuf_sentinel	*queue_sentinel;
+	struct _fbuf	*fbuf;
+
+	queue_sentinel = &sc.fbuf_queue[QUEUE_LEAF_CLEAN];
+	if (queue_sentinel->count > FBUF_CLEAN_THRESHOLD)
+		return;
+
+	fbuf_flush();
+
+	// move all parent nodes with child_cnt 0 to clean queue
+	for (int i = QUEUE_IND1; i >= QUEUE_IND0; --i) {
+		queue_sentinel = &sc.fbuf_queue[i];
+		fbuf = queue_sentinel->fc.queue_next;
+		while (fbuf != (struct _fbuf *)queue_sentinel) {
+			if (fbuf->child_cnt == 0) {
+				struct _fbuf *parent = fbuf->parent;
+				if (parent) {
+					--parent->child_cnt;
+					MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
+				} else {
+					sc.superblock.fd_tab[fbuf->ma.fd] = SECTOR_NULL;
+					sc.sb_modified = true;
+				}
+				fbuf_queue_remove(fbuf);
+				fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
+			}
+			fbuf = fbuf->fc.queue_next;
+		}
+	}
 }
 
 static void
