@@ -519,7 +519,8 @@ fbuf_clean_queue_check(void)
 	struct _fbuf	*fbuf;
 	uint32_t clean_threshold = 32;
 
-	if (sc.fbuf_queue[QUEUE_LEAF_CLEAN].count > clean_threshold)
+	queue_sentinel = &sc.fbuf_queue[QUEUE_LEAF_CLEAN];
+	if (queue_sentinel->count > clean_threshold)
 		return;
 
 	fbuf_flush();
@@ -533,8 +534,10 @@ fbuf_clean_queue_check(void)
 				struct _fbuf *parent = fbuf->parent;
 				if (parent) {
 					--parent->child_cnt;
+					MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
 				} else {
 					sc.superblock.fd_tab[fbuf->ma.fd] = SECTOR_NULL;
+					sc.sb_modified = true;
 				}
 				fbuf_queue_remove(fbuf);
 				fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
@@ -1250,9 +1253,12 @@ fbuf_mod_fini(void)
 static void
 fbuf_flush(void)
 {
-	struct _fbuf_sentinel	*queue_sentinel;
-	struct _fbuf	*fbuf;
 	int	i;
+	struct _fbuf	*fbuf;
+	struct _fbuf *clean_next, *dirty_next, *dirty_prev;
+	struct _fbuf_sentinel	*queue_sentinel;
+	struct _fbuf_sentinel	*dirty_sentinel;
+	struct _fbuf_sentinel	*clean_sentinel;
 
 	for (i = QUEUE_LEAF_DIRTY; i >= 0; --i) {
 		queue_sentinel = &sc.fbuf_queue[i];
@@ -1268,12 +1274,12 @@ fbuf_flush(void)
 	// write the superblock back to disk
 	superblock_write();
 
-	struct _fbuf_sentinel	*clean_sentinel;
-	struct _fbuf_sentinel	*dirty_sentinel;
-
 	dirty_sentinel = &sc.fbuf_queue[QUEUE_LEAF_DIRTY];
 	if (is_queue_empty(dirty_sentinel))
 		return;
+
+	dirty_next = dirty_sentinel->fc.queue_next;
+	dirty_prev = dirty_sentinel->fc.queue_prev;
 
 	// set queue_which to QUEUE_LEAF_CLEAN for all fbufs on QUEUE_LEAF_DIRTY
 	fbuf = dirty_sentinel->fc.queue_next;
@@ -1284,9 +1290,7 @@ fbuf_flush(void)
 
 	// move all fbufs in QUEUE_LEAF_DIRTY to QUEUE_LEAF_CLEAN
 	clean_sentinel = &sc.fbuf_queue[QUEUE_LEAF_CLEAN];
-	struct _fbuf *clean_next = clean_sentinel->fc.queue_next;
-	struct _fbuf *dirty_next = dirty_sentinel->fc.queue_next;
-	struct _fbuf *dirty_prev = dirty_sentinel->fc.queue_prev;
+	clean_next = clean_sentinel->fc.queue_next;
 	clean_sentinel->fc.queue_next = dirty_next;
 	dirty_next->fc.queue_prev = (struct _fbuf *)clean_sentinel;
 	dirty_prev->fc.queue_next = clean_next;
@@ -1295,7 +1299,6 @@ fbuf_flush(void)
 	sc.fbuf_queue[QUEUE_LEAF_DIRTY].count = 0;
 	queue_init(dirty_sentinel);
 	// don't need to change clean queue's head
-
 }
 
 static void
@@ -1307,7 +1310,7 @@ fbuf_queue_init(int which)
 	MY_ASSERT(which < QUEUE_CNT);
 	fbuf_queue = &sc.fbuf_queue[which];
 	fbuf_queue->count = 0;
-	fbuf = fbuf_queue;
+	fbuf = (struct _fbuf *)fbuf_queue;
 	fbuf->fc.queue_next = fbuf;
 	fbuf->fc.queue_prev = fbuf;
 	fbuf->fc.is_sentinel = true;
@@ -1324,7 +1327,7 @@ fbuf_queue_insert_tail(int which, struct _fbuf *fbuf)
 	MY_ASSERT(which < QUEUE_CNT);
 	MY_ASSERT(which != QUEUE_LEAF_CLEAN || !fbuf->fc.modified);
 	fbuf->queue_which = which;
-	head = &sc.fbuf_queue[which];
+	head = (struct _fbuf *)&sc.fbuf_queue[which];
 	prev = head->fc.queue_prev;
 	MY_ASSERT(prev->fc.is_sentinel || prev->queue_which == which);
 	head->fc.queue_prev = fbuf;
@@ -1474,6 +1477,7 @@ again:
 	parent = fbuf->parent;
 	if (parent) {
 		--parent->child_cnt;
+		MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
 		MY_ASSERT(parent->queue_which == parent->ma.depth);
 	}
 	return fbuf;
