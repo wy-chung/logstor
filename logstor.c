@@ -205,7 +205,7 @@ struct _fbuf { // file buffer
 */
 struct g_logstor_softc {
 	uint32_t seg_alloc_sa;	// the sector address of the segment for allocation
-	uint32_t seg_sum_alloc;	// the allocation address with the segment summary block
+	uint32_t seg_sum_alloc;	// the allocation address within the segment summary block
 	struct _seg_sum seg_sum;// segment summary for the hot segment
 	uint32_t sb_sa; 	// superblock's sector address
 	bool sb_modified;	// is the super block modified
@@ -441,13 +441,13 @@ logstor_open(const char *disk_file)
 
 	error = superblock_read();
 	MY_ASSERT(error == 0);
+	sc.sb_modified = false;
 
 	// read the segment summary block
 	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
 	uint32_t sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
 	my_read(sa, &sc.seg_sum, 1);
 	sc.seg_sum_alloc = 0;
-	sc.sb_modified = false;
 	sc.ss_modified = false;
 	sc.data_write_count = sc.other_write_count = 0;
 
@@ -462,9 +462,7 @@ logstor_close(void)
 {
 
 	fbuf_mod_fini();
-
 	seg_sum_write();
-
 	superblock_write();
 #if !defined(RAM_DISK_SIZE)
 	close(sc.disk_fd);
@@ -644,9 +642,8 @@ again:
 		is_called = false;
 		return sa;
 	}
-	// no free sector in current segment
-	if (sc.ss_modified)
-		seg_sum_write();
+	// segment summary might have been written in the previous call
+	seg_sum_write();
 	_seg_alloc();
 	goto again;
 }
@@ -740,6 +737,8 @@ seg_sum_write(void)
 {
 	uint32_t sa;
 
+	if (!sc.ss_modified)
+		return;
 	// segment summary is at the end of a segment
 	sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
 	sc.seg_sum.ss_gen = sc.superblock.sb_gen;
@@ -889,6 +888,8 @@ superblock_write(void)
 	size_t sb_size = sizeof(sc.superblock);
 	char buf[SECTOR_SIZE];
 
+	if (!sc.sb_modified)
+		return;
 	sc.superblock.sb_gen++;
 	if (++sc.sb_sa == SECTORS_PER_SEG)
 		sc.sb_sa = 0;
@@ -1233,15 +1234,8 @@ fbuf_clean_queue_check(void)
 		queue_sentinel = &sc.fbuf_queue[i];
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
+			MY_ASSERT(fbuf->queue_which == i);
 			if (fbuf->child_cnt == 0) {
-				struct _fbuf *parent = fbuf->parent;
-				if (parent) {
-					--parent->child_cnt;
-					MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
-				} else {
-					sc.superblock.fd_tab[fbuf->ma.fd] = SECTOR_NULL;
-					sc.sb_modified = true;
-				}
 				fbuf_queue_remove(fbuf);
 				fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
 			}
@@ -1260,6 +1254,7 @@ fbuf_flush(void)
 	struct _fbuf_sentinel	*dirty_sentinel;
 	struct _fbuf_sentinel	*clean_sentinel;
 
+	// write back all the modified fbufs to disk
 	for (i = QUEUE_LEAF_DIRTY; i >= 0; --i) {
 		queue_sentinel = &sc.fbuf_queue[i];
 		fbuf = queue_sentinel->fc.queue_next;
@@ -1271,7 +1266,7 @@ fbuf_flush(void)
 			fbuf = fbuf->fc.queue_next;
 		}
 	}
-	// write the superblock back to disk
+	seg_sum_write();
 	superblock_write();
 
 	dirty_sentinel = &sc.fbuf_queue[QUEUE_LEAF_DIRTY];
@@ -1476,6 +1471,8 @@ again:
 	fbuf_hash_remove(fbuf);
 	parent = fbuf->parent;
 	if (parent) {
+		// parent with child_cnt == 0 will stay in its queue
+		// it will only be moved to QUEUE_LEAF_CLEAN in fbuf_clean_queue_check()
 		--parent->child_cnt;
 		MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
 		MY_ASSERT(parent->queue_which == parent->ma.depth);
@@ -1529,6 +1526,8 @@ fbuf_access(union meta_addr ma)
 			fbuf->parent = parent;
 			if (parent) {
 				if (parent->child_cnt++ == 0) {
+					// an internal node that has previously been moved to QUEUE_LEAF_CLEAN
+					// internal nodes can only be moved to QUEUE_LEAF_CLEAN
 					MY_ASSERT(parent->queue_which == QUEUE_LEAF_CLEAN);
 					fbuf_queue_remove(parent);
 					fbuf_queue_insert_tail(parent->ma.depth, parent);
