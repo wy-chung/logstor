@@ -305,18 +305,14 @@ static uint32_t (*logstor_ba2sa)(uint32_t ba) = logstor_ba2sa_normal;
 #if defined(MY_DEBUG)
 void my_break(void)
 {
-//	fbuf_flush();
 }
 
-void my_debug(const char * fname, int line_num, bool bl_panic)
+void my_debug(const char * file, int line, const char *func)
 {
-	const char *type[] = {"break", "panic"};
-
-	printf("*** %s *** %s %d\n", type[bl_panic], fname, line_num);
+	printf("error: %s %d %s\n", file, line, func);
 	perror("");
 	my_break();
-	if (bl_panic)
-		exit(1);
+	exit(1);
 }
 #endif
 
@@ -447,7 +443,7 @@ logstor_open(const char *disk_file)
 	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
 	uint32_t sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
 	my_read(sa, &sc.seg_sum, 1);
-	MY_ASSERT(sc.seg_sum.ss_alloc < SEG_SUM_OFFSET - 1);
+	MY_ASSERT(sc.seg_sum.ss_alloc < SEG_SUM_OFFSET);
 	sc.ss_modified = false;
 	sc.data_write_count = sc.other_write_count = 0;
 
@@ -629,10 +625,9 @@ again:
 		seg_sum->ss_rm[i] = ba;		// record reverse mapping
 		sc.ss_modified = true;
 		seg_sum->ss_alloc = i + 1;	// advnace the alloc pointer
-		if (seg_sum->ss_alloc == SEG_SUM_OFFSET) {
-			seg_sum_write();
+		if (seg_sum->ss_alloc == SEG_SUM_OFFSET)
 			_seg_alloc();
-		}
+
 		if (!IS_META_ADDR(ba)) {
 			// record the forward mapping for the %ba
 			// the forward mapping must be recorded after
@@ -642,8 +637,6 @@ again:
 		is_called = false;
 		return sa;
 	}
-	// segment summary might have been written in the previous call
-	seg_sum_write();
 	_seg_alloc();
 	goto again;
 }
@@ -948,6 +941,9 @@ Output:
 static void
 _seg_alloc(void)
 {
+	// write the previous segment summary to disk if it has been modified
+	seg_sum_write();
+
 	MY_ASSERT(sc.superblock.seg_alloc < sc.superblock.seg_cnt);
 	if (++sc.superblock.seg_alloc == sc.superblock.seg_cnt)
 		sc.superblock.seg_alloc = SEG_DATA_START;
@@ -1181,7 +1177,7 @@ fbuf_mod_init(void)
 		fbuf->fc.modified = false;
 		fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
 		// distribute fbuf evently to hash buckets
-		fbuf->ma.uint32 = i;
+		fbuf->ma.uint32 = i; // set it with invalid metadata address so it is guaranteed not be found
 		fbuf_hash_insert_head(fbuf);
 		fbuf->parent = NULL;
 		fbuf->child_cnt = 0;

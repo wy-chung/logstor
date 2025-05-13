@@ -21,17 +21,16 @@ typedef long	int64_t;
 //#define DISK_FILE	"/dev/ada1"
 
 #if defined(MY_DEBUG)
-void my_debug(const char * fname, int line_num, bool bl_panic);
+void my_debug(const char * file, int line_num, const char *func);
 void my_break(void);
 
-#define MY_ASSERT(x)	do if (!(x)) my_debug(__func__, __LINE__, true); while(0)
+#define MY_ASSERT(x)	do if (!(x)) my_debug(__FILE__, __LINE__, __func__); while(0)
 #define MY_BREAK(x)	do if ((x)) my_break(); while(0)
-#define MY_PANIC()	my_debug(__FILE__, __LINE__, true)
 #else
 #define MY_ASSERT(x)
 #define MY_BREAK(x)
-#define MY_PANIC()
 #endif
+#define MY_PANIC()	my_debug(__FILE__, __LINE__, __func__)
 
 #define	SECTOR_SIZE	0x1000		// 4K
 

@@ -38,19 +38,59 @@ static void arrays_free(void);
 static void test(int n, unsigned max_block);
 static void test_write(unsigned max_block);
 static void test_read(unsigned max_block);
-#if defined(MY_DEBUG)
 static void arrays_check(void);
-#endif
 
-static arrays_alloc_f *arrays_alloc_init = arrays_alloc;
+static arrays_alloc_f *arrays_alloc_once = arrays_alloc;
 static uint32_t *i2ba;	// ba for iteration i
 static uint32_t *ba2i;	// stored value for ba
-static struct {
-	uint32_t sa[2];
-} *ba2sa;	// stored value for ba
+static uint32_t *ba2sa;	// stored value for ba
 static uint8_t *ba_write_count;	// write count for each block
 
 static unsigned loop_count;
+
+static int
+main_logstest(int argc, char *argv[])
+{
+	int	main_loop_count;
+	unsigned max_block;
+
+	srandom(RAND_SEED);
+	max_block = logstor_init();
+
+	//main_loop_count = MUTIPLIER_TO_MAXBLOCK/ratio_to_maxblock + 0.999;
+	//loop_count = max_block * ratio_to_maxblock;
+
+	main_loop_count = 2;
+	loop_count = 1764943;
+	for (int i = 0; i < main_loop_count; i++) {
+		printf("#### test %d ####\n", i);
+		logstor_open(DISK_FILE);
+		arrays_alloc_once(max_block);
+#if defined(WYC)
+		arrays_alloc();
+		arrays_nop();
+#endif
+gdb_cond0 = i;
+		test(i, max_block);
+		logstor_close();
+	}
+	arrays_free();
+	logstor_fini();
+
+	return 0;
+}
+
+static void
+test(int n, unsigned max_block)
+{
+
+	printf("writing %d...\n", n);
+	test_write(max_block);
+	arrays_check();
+	printf("reading %d...\n", n);
+	test_read(max_block);
+	fbuf_hash_check();
+}
 
 static void
 test_write(unsigned max_block)
@@ -86,9 +126,7 @@ test_write(unsigned max_block)
 		buf[6] = ba;
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
 		sa = logstor_write_test(ba, buf);
-//MY_BREAK(ba==);
-		ba2sa[ba].sa[1] = ba2sa[ba].sa[0];
-		ba2sa[ba].sa[0] = sa;
+		ba2sa[ba] = sa;
 	}
 	printf("overwrite %d/%d\n", overwrite_count, loop_count);
 	printf("\n");
@@ -105,7 +143,45 @@ test_write(unsigned max_block)
 	printf("\n");
 }
 
-#if defined(MY_DEBUG)
+static void 
+test_read(unsigned max_block)
+{
+	uint32_t ba, sa;
+	uint32_t i_exp, i_get;
+	uint32_t buf[SECTOR_SIZE/4]; // [5]:i, [6]:ba
+
+	// reading data from logstor
+	int read_count = 0;
+	uint32_t i_max = 0;
+	for (ba = 0 ; ba < max_block; ba += 1) {
+		if ( (ba % 0x10000) == 0)
+			printf("r %7d/%7d\n", ba, max_block);
+		if (ba_write_count[ba] > 0) {
+			if (ba_write_count[ba] > i_max)
+				i_max = ba_write_count[ba];
+			sa = logstor_read_test(ba, buf);
+			MY_ASSERT(sa == ba2sa[ba]);
+			++read_count;
+			i_exp = ba2i[ba];
+			i_get = buf[5];
+			if (i_exp != i_get) {
+				printf("%s: ERROR miscompare: ba %u, i_exp %u, i_get %u ba_write_count %u\n",
+				    __func__, ba, i_exp, i_get, ba_write_count[ba]);
+				MY_PANIC();
+			} else {
+				MY_ASSERT(buf[ba%4] == i_get);
+				MY_ASSERT(buf[SECTOR_SIZE/4-4+(ba%4)] == i_get);
+			}
+		}
+		else {
+		MY_BREAK(gdb_cond0 == 1 && ba == 52);
+			sa = logstor_read_test(ba, buf);
+			MY_ASSERT(sa == 0/*SECTOR_NULL*/);
+		}
+	}
+	printf("read_count %d i_max %u\n\n", read_count, i_max);
+}
+
 static void
 arrays_check(void)
 {
@@ -120,92 +196,6 @@ arrays_check(void)
 		MY_ASSERT(i == i_exp);
 	}
 }
-#endif
-
-static void
-test(int n, unsigned max_block)
-{
-
-	printf("writing %d...\n", n);
-	test_write(max_block);
-#if defined(MY_DEBUG)
-	arrays_check();
-#endif
-	printf("reading %d...\n", n);
-	test_read(max_block);
-	fbuf_hash_check();
-}
-
-static void 
-test_read(unsigned max_block)
-{
-	uint32_t buf[SECTOR_SIZE/4];
-	uint32_t i_exp, i_get;
-	uint32_t ba, sa;
-
-	// reading data from logstor
-	int read_count = 0;
-	uint32_t i_max = 0;
-	for (ba = 0 ; ba < max_block; ba += 1) {
-		if ( (ba % 0x10000) == 0)
-			printf("r %7d/%7d\n", ba, max_block);
-		if (ba_write_count[ba] > 0) {
-			if (ba_write_count[ba] > i_max)
-				i_max = ba_write_count[ba];
-			sa = logstor_read_test(ba, buf);
-			++read_count;
-			i_exp = ba2i[ba];
-			i_get = buf[5];
-			if (i_exp != i_get) {
-				printf("%s: ERROR miscompare: ba %u, i_exp %u, i_get %u ba_write_count %u\n",
-				    __func__, ba, i_exp, i_get, ba_write_count[ba]);
-				MY_PANIC();
-			} else {
-				MY_ASSERT(buf[ba%4] == i_get);
-				MY_ASSERT(buf[SECTOR_SIZE/4-4+(ba%4)] == i_get);
-			}
-		}
-		else {
-		MY_BREAK(gdb_cond0 == 1);
-			sa = logstor_read_test(ba, buf);
-			MY_ASSERT(sa == 0/*SECTOR_NULL*/);
-		}
-	}
-	printf("read_count %d i_max %u\n\n", read_count, i_max);
-}
-
-static int
-main_logstest(int argc, char *argv[])
-{
-	int	main_loop_count;
-	unsigned max_block;
-
-	srandom(RAND_SEED);
-	max_block = logstor_init();
-
-	//main_loop_count = MUTIPLIER_TO_MAXBLOCK/ratio_to_maxblock + 0.999;
-	//loop_count = max_block * ratio_to_maxblock;
-
-	main_loop_count = 2;
-	//loop_count = 1764943;
-	loop_count = 17649;
-	for (int i = 0; i < main_loop_count; i++) {
-		printf("#### test %d ####\n", i);
-		logstor_open(DISK_FILE);
-		arrays_alloc_init(max_block);
-#if defined(WYC)
-		arrays_alloc();
-		arrays_init();
-#endif
-gdb_cond0 = i;
-		test(i, max_block);
-		logstor_close();
-	}
-	arrays_free();
-	logstor_fini();
-
-	return 0;
-}
 
 int main(int argc, char *argv[]) // main_logstest
 {
@@ -213,21 +203,8 @@ int main(int argc, char *argv[]) // main_logstest
 }
 
 static void
-arrays_init(unsigned max_block)
+arrays_nop(unsigned max_block)
 {
-	size_t size;
-
-	size = loop_count * sizeof(*i2ba);
-	memset(i2ba, -1, size);
-
-	size = max_block * sizeof(*ba2i);
-	memset(ba2i, -1, size);
-
-	size = max_block * sizeof(*ba2sa);
-	memset(ba2sa, 0, size);
-
-	size = max_block * sizeof(*ba_write_count);
-	bzero(ba_write_count, size);
 }
 
 static void
@@ -248,14 +225,14 @@ arrays_alloc(unsigned max_block)
 	size = max_block * sizeof(*ba2sa);
 	ba2sa = malloc(size);
 	MY_ASSERT(ba2sa != NULL);
-	memset(ba2sa, 0, size);
+	bzero(ba2sa, size);
 
 	size = max_block * sizeof(*ba_write_count);
 	ba_write_count = malloc(size);
 	MY_ASSERT(ba_write_count != NULL);
 	bzero(ba_write_count, size);
 
-	arrays_alloc_init = arrays_init;	// don't do array alloc any more
+	arrays_alloc_once = arrays_nop;	// don't do array alloc any more
 }
 
 static void arrays_free(void)
