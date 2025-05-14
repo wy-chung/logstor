@@ -89,8 +89,8 @@ struct _superblock {
 	   The files for forward mapping
 
 	   New mapping is written to %fd_cur. When commit command is issued
-	   %fd_cur is movied to %fd_prev, %fd_prev and %fd_snap are merged to %fd_new_snap
-	   After the commit command is complete, %fd_new_snap is movied to %fd_snap
+	   %fd_cur is movied to %fd_prev, %fd_prev and %fd_snap are merged to %fd_snap_new
+	   After the commit command is complete, %fd_snap_new is movied to %fd_snap
 	   and %fd_prev is deleted.
 
 	   So the actual mapping in normal state is
@@ -106,7 +106,7 @@ struct _superblock {
 	uint8_t fd_cur;		// the file descriptor for current mapping
 	uint8_t fd_snap;	// the file descriptor for snapshot mapping
 	uint8_t fd_prev;	// the file descriptor for previous current mapping
-	uint8_t fd_new_snap;	// the file descriptor for new snapshot mapping
+	uint8_t fd_snap_new;	// the file descriptor for new snapshot mapping
 };
 
 #if !defined(WYC)
@@ -465,13 +465,29 @@ logstor_close(void)
 #endif
 }
 
+uint32_t
+logstor_read_test(uint32_t ba, void *data)
+{
+	fbuf_clean_queue_check();
+	uint32_t sa = _logstor_read_one(ba, data);
+	return sa;
+}
+
+uint32_t
+logstor_write_test(uint32_t ba, void *data)
+{
+	fbuf_clean_queue_check();
+	uint32_t sa = _logstor_write_one(ba, data);
+	return sa;
+}
+
 // To enable TRIM, the following statement must be added
 // in "case BIO_GETATTR" of g_gate_start() of g_gate.c
 //	if (g_handleattr_int(pbp, "GEOM::candelete", 1))
 //		return;
 // and the command below must be executed before mounting the device
 //	tunefs -t enabled /dev/ggate0
-int logstor_delete(off_t offset, void *data, off_t length)
+int logstor_delete(off_t offset, void *data __unused, off_t length)
 {
 	uint32_t ba;	// block address
 	int size;	// number of remaining sectors to process
@@ -483,27 +499,42 @@ int logstor_delete(off_t offset, void *data, off_t length)
 	size = length / SECTOR_SIZE;
 	MY_ASSERT(ba < sc.superblock.block_cnt_max);
 
-	for (i = 0; i < size; i++)
+	for (i = 0; i < size; ++i) {
+		fbuf_clean_queue_check();
 		file_write_4byte(sc.superblock.fd_cur, ba + i, SECTOR_DEL);
+	}
 
-	fbuf_clean_queue_check();
 	return (0);
 }
 
-uint32_t
-logstor_read_test(uint32_t ba, void *data)
+void
+logstor_commit(void)
 {
-	uint32_t sa = _logstor_read_one(ba, data);
-	fbuf_clean_queue_check();
-	return sa;
-}
+	uint32_t block_max = sc.superblock.block_cnt_max;
+	uint32_t sa;
 
-uint32_t
-logstor_write_test(uint32_t ba, void *data)
-{
-	uint32_t sa = _logstor_write_one(ba, data);
-	fbuf_clean_queue_check();
-	return sa;
+	is_sec_valid = is_sec_valid_during_commit;
+	sc.superblock.fd_prev = sc.superblock.fd_cur;
+	sc.superblock.fd_cur = sc.superblock.fd_cur ^ 2;
+	sc.superblock.fd_snap_new = sc.superblock.fd_cur + 1;
+
+	sc.superblock.fd_tab[sc.superblock.fd_cur] = SECTOR_NULL;
+	sc.superblock.fd_tab[sc.superblock.fd_snap_new] = SECTOR_NULL;
+	for (int ba = 0; ba < block_max; ++ba) {
+		fbuf_clean_queue_check();
+		sa = file_read_4byte(sc.superblock.fd_prev, ba);
+		if (sa == SECTOR_NULL)
+			sa = file_read_4byte(sc.superblock.fd_snap, ba);
+		else if (sa == SECTOR_DEL)
+			sa = SECTOR_NULL;
+
+		if (sa != SECTOR_NULL)
+			file_write_4byte(sc.superblock.fd_snap_new, ba, sa);
+	}
+	sc.superblock.fd_snap = sc.superblock.fd_snap_new;
+	sc.superblock.fd_prev = FD_INVALID;
+	sc.superblock.fd_snap_new = FD_INVALID;
+	is_sec_valid = is_sec_valid_normal;
 }
 
 uint32_t
@@ -770,7 +801,7 @@ disk_init(int fd)
 	sb->fd_cur = FD_CUR;
 	sb->fd_prev = FD_INVALID;
 	sb->fd_snap = FD_INVALID;
-	sb->fd_new_snap = FD_INVALID;
+	sb->fd_snap_new = FD_INVALID;
 	sb->seg_cnt = sector_cnt / SECTORS_PER_SEG;
 	if (sizeof(struct _superblock) + sb->seg_cnt > SECTOR_SIZE) {
 		printf("%s: size of superblock %d seg_cnt %d\n",
@@ -975,6 +1006,8 @@ file_read_4byte(uint8_t fd, uint32_t ba)
 	uint32_t sa;
 	struct _fbuf *fbuf;
 
+	if (sc.superblock.fd_tab[fd] == SECTOR_NULL)
+		return SECTOR_NULL;
 	fbuf = file_access_4byte(fd, ba, &off_4byte);
 	if (fbuf)
 		sa = fbuf->data[off_4byte];
@@ -1230,11 +1263,12 @@ fbuf_clean_queue_check(void)
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
 			MY_ASSERT(fbuf->queue_which == i);
+			struct _fbuf *fbuf_next = fbuf->fc.queue_next;
 			if (fbuf->child_cnt == 0) {
 				fbuf_queue_remove(fbuf);
 				fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
 			}
-			fbuf = fbuf->fc.queue_next;
+			fbuf = fbuf_next;
 		}
 	}
 }
@@ -1256,6 +1290,7 @@ fbuf_flush(void)
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
 			MY_ASSERT(fbuf->queue_which == i);
 			MY_ASSERT(IS_META_ADDR(fbuf->ma.uint32));
+			// for non-leaf nodes the fbuf might not be modified
 			if (fbuf->fc.modified)
 				fbuf_write(fbuf);
 			fbuf = fbuf->fc.queue_next;
@@ -1520,7 +1555,7 @@ fbuf_access(union meta_addr ma)
 			fbuf_hash_insert_head(fbuf);
 			fbuf->parent = parent;
 			if (parent) {
-				if (parent->child_cnt++ == 0) {
+				if (parent->child_cnt++ == 0 && parent->queue_which == QUEUE_LEAF_CLEAN) {
 					// an internal node that has previously been moved to QUEUE_LEAF_CLEAN
 					// internal nodes can only be moved to QUEUE_LEAF_CLEAN
 					MY_ASSERT(parent->queue_which == QUEUE_LEAF_CLEAN);

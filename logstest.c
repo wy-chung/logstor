@@ -60,8 +60,10 @@ main_logstest(int argc, char *argv[])
 	//main_loop_count = MUTIPLIER_TO_MAXBLOCK/ratio_to_maxblock + 0.999;
 	//loop_count = max_block * ratio_to_maxblock;
 
-	main_loop_count = 2;
-	loop_count = 1764943;
+	//main_loop_count = 2;
+	//loop_count = 1764943;
+	main_loop_count = 16;
+	loop_count = 176494;
 	for (int i = 0; i < main_loop_count; i++) {
 		printf("#### test %d ####\n", i);
 		logstor_open(DISK_FILE);
@@ -70,7 +72,6 @@ main_logstest(int argc, char *argv[])
 		arrays_alloc();
 		arrays_nop();
 #endif
-gdb_cond0 = i;
 		test(i, max_block);
 		logstor_close();
 	}
@@ -89,6 +90,7 @@ test(int n, unsigned max_block)
 	arrays_check();
 	printf("reading %d...\n", n);
 	test_read(max_block);
+	logstor_commit();
 	fbuf_hash_check();
 }
 
@@ -174,7 +176,6 @@ test_read(unsigned max_block)
 			}
 		}
 		else {
-		MY_BREAK(gdb_cond0 == 1 && ba == 52);
 			sa = logstor_read_test(ba, buf);
 			MY_ASSERT(sa == 0/*SECTOR_NULL*/);
 		}

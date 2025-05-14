@@ -55,6 +55,7 @@ unsigned logstor_get_fbuf_miss(void);
 // for logstor test
 uint32_t logstor_read_test(uint32_t ba, void *data);
 uint32_t logstor_write_test(uint32_t ba, void *data);
+void logstor_commit(void);
 
 #if defined(WYC)
 #define roundup2(x, y)	(((x)+((y)-1))&~((y)-1))
