@@ -174,7 +174,6 @@ struct _fbuf_comm {
 
 struct _fbuf_sentinel {
 	struct _fbuf_comm fc;
-	int	count;	// number of fbuf in this queue
 };
 
 /*
@@ -189,12 +188,12 @@ struct _fbuf { // file buffer
 	uint16_t child_cnt; // number of children reference this fbuf
 
 	union meta_addr	ma;	// the metadata address
-#if defined(MY_DEBUG)
 	uint16_t queue_which;
+#if defined(MY_DEBUG)
 	uint16_t bucket_which;
-	uint16_t	index; // the array index for this fbuf
-	uint16_t	gdb_uint16;
-	uint32_t	sa;	// the sector address of the @data
+	uint16_t index; // the array index for this fbuf
+	uint16_t dbg_child_cnt;
+	uint32_t sa;	// the sector address of the @data
 	struct _fbuf 	*child[SECTOR_SIZE/sizeof(uint32_t)];
 #endif
 	// the metadata is cached here
@@ -215,10 +214,13 @@ struct g_logstor_softc {
 	struct _fbuf *fbufs;	// an array of fbufs
 	struct _fbuf *fbuf_alloc; // point to the fbuf candidate for replacement
 	struct _fbuf_sentinel fbuf_queue[QUEUE_CNT];
+	int fbuf_queue_len[QUEUE_CNT];
 
 	// buffer hash queue
 	struct _fbuf_sentinel fbuf_bucket[FBUF_BUCKETS];
-	
+#if defined(MY_DEBUG)
+	int fbuf_bucket_len[FBUF_BUCKETS];
+#endif
 	// statistics
 	unsigned data_write_count;	// data block write to disk
 	unsigned other_write_count;	// other write to disk, such as metadata write and segment cleaning
@@ -1203,15 +1205,15 @@ fbuf_mod_init(void)
 		fbuf->fc.is_sentinel = false;
 		fbuf->fc.accessed = false;
 		fbuf->fc.modified = false;
-		fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
-		// distribute fbuf evently to hash buckets
-		fbuf->ma.uint32 = i; // set it with invalid metadata address so it is guaranteed not be found
-		fbuf_hash_insert_head(fbuf);
 		fbuf->parent = NULL;
 		fbuf->child_cnt = 0;
 #if defined(MY_DEBUG)
 		fbuf->index = i;
 #endif
+		fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
+		// distribute fbuf evently to hash buckets
+		fbuf->ma.uint32 = i; // set it with invalid metadata address so it is guaranteed not be found
+		fbuf_hash_insert_head(fbuf);
 	}
 	sc.fbuf_hit = sc.fbuf_miss = 0;
 }
@@ -1246,8 +1248,7 @@ fbuf_clean_queue_check(void)
 	struct _fbuf_sentinel	*queue_sentinel;
 	struct _fbuf	*fbuf;
 
-	queue_sentinel = &sc.fbuf_queue[QUEUE_LEAF_CLEAN];
-	if (queue_sentinel->count > FBUF_CLEAN_THRESHOLD)
+	if (sc.fbuf_queue_len[QUEUE_LEAF_CLEAN] > FBUF_CLEAN_THRESHOLD)
 		return;
 
 	fbuf_flush();
@@ -1315,8 +1316,8 @@ fbuf_flush(void)
 	dirty_next->fc.queue_prev = (struct _fbuf *)clean_sentinel;
 	dirty_prev->fc.queue_next = clean_next;
 	clean_next->fc.queue_prev = dirty_prev;
-	sc.fbuf_queue[QUEUE_LEAF_CLEAN].count += sc.fbuf_queue[QUEUE_LEAF_DIRTY].count;
-	sc.fbuf_queue[QUEUE_LEAF_DIRTY].count = 0;
+	sc.fbuf_queue_len[QUEUE_LEAF_CLEAN] += sc.fbuf_queue_len[QUEUE_LEAF_DIRTY];
+	sc.fbuf_queue_len[QUEUE_LEAF_DIRTY] = 0;
 	queue_init(dirty_sentinel);
 	// don't need to change clean queue's head
 }
@@ -1324,13 +1325,11 @@ fbuf_flush(void)
 static void
 fbuf_queue_init(int which)
 {
-	struct _fbuf_sentinel *fbuf_queue;
 	struct _fbuf *fbuf;
 
 	MY_ASSERT(which < QUEUE_CNT);
-	fbuf_queue = &sc.fbuf_queue[which];
-	fbuf_queue->count = 0;
-	fbuf = (struct _fbuf *)fbuf_queue;
+	sc.fbuf_queue_len[which] = 0;
+	fbuf = (struct _fbuf *)&sc.fbuf_queue[which];
 	fbuf->fc.queue_next = fbuf;
 	fbuf->fc.queue_prev = fbuf;
 	fbuf->fc.is_sentinel = true;
@@ -1354,7 +1353,7 @@ fbuf_queue_insert_tail(int which, struct _fbuf *fbuf)
 	fbuf->fc.queue_next = head;
 	fbuf->fc.queue_prev = prev;
 	prev->fc.queue_next = fbuf;
-	++sc.fbuf_queue[which].count;
+	++sc.fbuf_queue_len[which];
 }
 
 static void
@@ -1371,7 +1370,7 @@ fbuf_queue_remove(struct _fbuf *fbuf)
 	MY_ASSERT(next->fc.is_sentinel || next->queue_which == which);
 	prev->fc.queue_next = next;
 	next->fc.queue_prev = prev;
-	--sc.fbuf_queue[which].count;
+	--sc.fbuf_queue_len[which];
 }
 
 static void
@@ -1379,13 +1378,13 @@ fbuf_hash_init(int which)
 {
 	struct _fbuf_sentinel *bucket_head;
 
-	MY_ASSERT(which < FBUF_BUCKETS+1);
+	MY_ASSERT(which < FBUF_BUCKETS);
 	bucket_head = &sc.fbuf_bucket[which];
 	bucket_head->fc.queue_next = (struct _fbuf *)bucket_head;
 	bucket_head->fc.queue_prev = (struct _fbuf *)bucket_head;
 	bucket_head->fc.is_sentinel = true;
 #if defined(MY_DEBUG)
-	bucket_head->count = 0;
+	sc.fbuf_bucket_len[which] = 0;
 #endif
 }
 
@@ -1398,11 +1397,11 @@ fbuf_hash_insert_head(struct _fbuf *fbuf)
 	struct _fbuf_sentinel *bucket_head;
 
 	which = fbuf->ma.uint32 % FBUF_BUCKETS;
-	bucket_head = &sc.fbuf_bucket[which];
 #if defined(MY_DEBUG)
 	fbuf->bucket_which = which;
-	++bucket_head->count;
+	++sc.fbuf_bucket_len[which];
 #endif
+	bucket_head = &sc.fbuf_bucket[which];
 	next = bucket_head->fc.queue_next;
 	bucket_head->fc.queue_next = fbuf;
 	fbuf->bucket_next = next;
@@ -1422,11 +1421,11 @@ fbuf_hash_remove(struct _fbuf *fbuf)
 	struct _fbuf_sentinel *bucket_head;
 	int which = fbuf->bucket_which;
 
+	MY_ASSERT(which < FBUF_BUCKETS);
+	--sc.fbuf_bucket_len[which];
 	bucket_head = &sc.fbuf_bucket[which];
-	--bucket_head->count;
-#endif
-	MY_ASSERT(which < FBUF_BUCKETS+1);
 	MY_ASSERT(fbuf != (struct _fbuf *)bucket_head);
+#endif
 
 	prev = fbuf->bucket_prev;
 	next = fbuf->bucket_next;
@@ -1665,7 +1664,7 @@ fbuf_hash_check(void)
 			++total;
 			MY_ASSERT(!fbuf->fc.is_sentinel);
 			MY_ASSERT(fbuf->bucket_which == i);
-			MY_ASSERT(fbuf->ma.uint32 % FBUF_BUCKETS == i);
+			MY_ASSERT(fbuf->ma.uint32 % (FBUF_BUCKETS) == i);
 			fbuf = fbuf->bucket_next;
 		}
 	}
@@ -1686,7 +1685,7 @@ fbuf_queue_check(void)
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
 			MY_ASSERT(fbuf->ma.depth == i);
-			fbuf->gdb_uint16 = 0; // set the child count to 0
+			fbuf->dbg_child_cnt = 0; // set the child count to 0
 			fbuf = fbuf->fc.queue_next;
 		}
 	}
@@ -1704,18 +1703,18 @@ fbuf_queue_check(void)
 			} else if (i == 1)
 				MY_ASSERT(fbuf->parent != NULL);
 			if (fbuf->parent)
-				++fbuf->parent->gdb_uint16; // increment parent's debug child count
+				++fbuf->parent->dbg_child_cnt; // increment parent's debug child count
 
 			fbuf = fbuf->fc.queue_next;
 		}
-		MY_ASSERT(queue_sentinel->count == count[i]);
+		MY_ASSERT(sc.fbuf_queue_len[i] == count[i]);
 	}
 	// check that the child count is correct
 	for (i = 0; i < QUEUE_LEAF_DIRTY; ++i) {
 		queue_sentinel = &sc.fbuf_queue[i];
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
-			MY_ASSERT(fbuf->gdb_uint16 == fbuf->child_cnt);
+			MY_ASSERT(fbuf->dbg_child_cnt == fbuf->child_cnt);
 			fbuf = fbuf->fc.queue_next;
 		}
 	}
