@@ -65,7 +65,7 @@ e-mail: wy-chung@outlook.com
 #define FBUF_CLEAN_THRESHOLD	32
 #define FBUF_MIN	(1024 + FBUF_CLEAN_THRESHOLD)
 #define FBUF_MAX	(FBUF_MIN * 2)
-#define FBUF_BUCKETS	1097	// this should be a prime number
+#define FBUF_BUCKETS	(1097+1)	// this should be a prime number plus 1
 
 #define	FD_CUR	2
 #define FD_COUNT	4	// max number of metadata files supported
@@ -273,9 +273,10 @@ static void fbuf_queue_init(int which);
 static void fbuf_queue_insert_tail(int which, struct _fbuf *fbuf);
 static void fbuf_queue_remove(struct _fbuf *fbuf);
 static struct _fbuf *fbuf_search(union meta_addr ma);
-static void fbuf_hash_init(int which);
 static void fbuf_hash_insert_head(struct _fbuf *fbuf);
-static void fbuf_hash_remove(struct _fbuf *fbuf);
+static void fbuf_bucket_init(int which);
+static void fbuf_bucket_insert_head(struct _fbuf *fbuf, unsigned which);
+static void fbuf_bucket_remove(struct _fbuf *fbuf);
 static struct _fbuf *fbuf_access(union meta_addr ma);
 static void fbuf_write(struct _fbuf *fbuf);
 static void fbuf_flush(void);
@@ -1192,7 +1193,7 @@ fbuf_mod_init(void)
 	MY_ASSERT(sc.fbufs != NULL);
 
 	for (i = 0; i < FBUF_BUCKETS; ++i) {
-		fbuf_hash_init(i);
+		fbuf_bucket_init(i);
 	}
 	for (i = 0; i < QUEUE_CNT; ++i) {
 		fbuf_queue_init(i);
@@ -1211,9 +1212,8 @@ fbuf_mod_init(void)
 		fbuf->index = i;
 #endif
 		fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
-		// distribute fbuf evently to hash buckets
-		fbuf->ma.uint32 = i; // set it with invalid metadata address so it is guaranteed not be found
-		fbuf_hash_insert_head(fbuf);
+		// insert fbuf to the last fbuf bucket
+		fbuf_bucket_insert_head(fbuf, FBUF_BUCKETS-1);
 	}
 	sc.fbuf_hit = sc.fbuf_miss = 0;
 }
@@ -1374,7 +1374,7 @@ fbuf_queue_remove(struct _fbuf *fbuf)
 }
 
 static void
-fbuf_hash_init(int which)
+fbuf_bucket_init(int which)
 {
 	struct _fbuf_sentinel *bucket_head;
 
@@ -1388,15 +1388,12 @@ fbuf_hash_init(int which)
 #endif
 }
 
-// insert to the head of the bucket
 static void
-fbuf_hash_insert_head(struct _fbuf *fbuf)
+fbuf_bucket_insert_head(struct _fbuf *fbuf, unsigned which)
 {
-	unsigned which;
 	struct _fbuf *next;
 	struct _fbuf_sentinel *bucket_head;
 
-	which = fbuf->ma.uint32 % FBUF_BUCKETS;
 #if defined(MY_DEBUG)
 	fbuf->bucket_which = which;
 	++sc.fbuf_bucket_len[which];
@@ -1412,8 +1409,18 @@ fbuf_hash_insert_head(struct _fbuf *fbuf)
 		next->bucket_prev = fbuf;
 }
 
+// insert to the head of the bucket
 static void
-fbuf_hash_remove(struct _fbuf *fbuf)
+fbuf_hash_insert_head(struct _fbuf *fbuf)
+{
+	unsigned which;
+
+	which = fbuf->ma.uint32 % (FBUF_BUCKETS-1);
+	fbuf_bucket_insert_head(fbuf, which);
+}
+
+static void
+fbuf_bucket_remove(struct _fbuf *fbuf)
 {
 	struct _fbuf *prev;
 	struct _fbuf *next;
@@ -1450,7 +1457,7 @@ fbuf_search(union meta_addr ma)
 	struct _fbuf	*fbuf;
 	struct _fbuf_sentinel	*bucket_sentinel;
 
-	hash = ma.uint32 % FBUF_BUCKETS;
+	hash = ma.uint32 % (FBUF_BUCKETS-1);
 	bucket_sentinel = &sc.fbuf_bucket[hash];
 	fbuf = bucket_sentinel->fc.queue_next;
 	while (fbuf != (struct _fbuf *)bucket_sentinel) {
@@ -1493,7 +1500,7 @@ again:
 	MY_ASSERT(!fbuf->fc.modified);
 	sc.fbuf_alloc = fbuf->fc.queue_next;
 
-	fbuf_hash_remove(fbuf);
+	fbuf_bucket_remove(fbuf);
 	parent = fbuf->parent;
 	if (parent) {
 		// parent with child_cnt == 0 will stay in its queue
@@ -1636,7 +1643,7 @@ fbuf_alloc(bool read_only)
 	fbuf = queue_sentinel->fc.queue_next;
 	MY_ASSERT(fbuf != (struct _fbuf *)queue_sentinel);
 	MY_ASSERT(fbuf->queue_which == QUEUE_LEAF_CLEAN);
-	fbuf_hash_remove(fbuf);
+	fbuf_bucket_remove(fbuf);
 	fbuf_queue_remove(fbuf);
 	parent = fbuf->parent;
 	// when parent's child count drops to 0, move it to QUEUE_LEAF_DIRTY
@@ -1664,7 +1671,8 @@ fbuf_hash_check(void)
 			++total;
 			MY_ASSERT(!fbuf->fc.is_sentinel);
 			MY_ASSERT(fbuf->bucket_which == i);
-			MY_ASSERT(fbuf->ma.uint32 % (FBUF_BUCKETS) == i);
+			if (i != (FBUF_BUCKETS-1))
+				MY_ASSERT(fbuf->ma.uint32 % (FBUF_BUCKETS-1) == i);
 			fbuf = fbuf->bucket_next;
 		}
 	}
