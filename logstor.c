@@ -217,12 +217,7 @@ struct g_logstor_softc {
 	struct _fbuf_sentinel fbuf_queue[QUEUE_CNT];
 
 	// buffer hash queue
-	struct {
-		struct _fbuf_sentinel sentinel;	// head of the queues
-#if defined(MY_DEBUG)
-		int	count;
-#endif
-	} fbuf_bucket[FBUF_BUCKETS];
+	struct _fbuf_sentinel fbuf_bucket[FBUF_BUCKETS];
 	
 	// statistics
 	unsigned data_write_count;	// data block write to disk
@@ -1382,16 +1377,16 @@ fbuf_queue_remove(struct _fbuf *fbuf)
 static void
 fbuf_hash_init(int which)
 {
-	struct _fbuf_sentinel *fbuf;
+	struct _fbuf_sentinel *bucket_head;
 
-	MY_ASSERT(which < FBUF_BUCKETS);
+	MY_ASSERT(which < FBUF_BUCKETS+1);
+	bucket_head = &sc.fbuf_bucket[which];
+	bucket_head->fc.queue_next = (struct _fbuf *)bucket_head;
+	bucket_head->fc.queue_prev = (struct _fbuf *)bucket_head;
+	bucket_head->fc.is_sentinel = true;
 #if defined(MY_DEBUG)
-	sc.fbuf_bucket[which].count = 0;
+	bucket_head->count = 0;
 #endif
-	fbuf = &sc.fbuf_bucket[which].sentinel;
-	fbuf->fc.queue_next = (struct _fbuf *)fbuf;
-	fbuf->fc.queue_prev = (struct _fbuf *)fbuf;
-	fbuf->fc.is_sentinel = true;
 }
 
 // insert to the head of the bucket
@@ -1403,12 +1398,11 @@ fbuf_hash_insert_head(struct _fbuf *fbuf)
 	struct _fbuf_sentinel *bucket_head;
 
 	which = fbuf->ma.uint32 % FBUF_BUCKETS;
-	fbuf->bucket_which = which;
+	bucket_head = &sc.fbuf_bucket[which];
 #if defined(MY_DEBUG)
-	sc.fbuf_bucket[which].count++;
+	fbuf->bucket_which = which;
+	++bucket_head->count;
 #endif
-	bucket_head = &sc.fbuf_bucket[which].sentinel;
-
 	next = bucket_head->fc.queue_next;
 	bucket_head->fc.queue_next = fbuf;
 	fbuf->bucket_next = next;
@@ -1422,16 +1416,18 @@ fbuf_hash_insert_head(struct _fbuf *fbuf)
 static void
 fbuf_hash_remove(struct _fbuf *fbuf)
 {
-	int which;
 	struct _fbuf *prev;
 	struct _fbuf *next;
-
-	which = fbuf->bucket_which;
-	MY_ASSERT(which < FBUF_BUCKETS);
-	MY_ASSERT(fbuf != (struct _fbuf *)&sc.fbuf_bucket[which].sentinel);
 #if defined(MY_DEBUG)
-	sc.fbuf_bucket[which].count--;
+	struct _fbuf_sentinel *bucket_head;
+	int which = fbuf->bucket_which;
+
+	bucket_head = &sc.fbuf_bucket[which];
+	--bucket_head->count;
 #endif
+	MY_ASSERT(which < FBUF_BUCKETS+1);
+	MY_ASSERT(fbuf != (struct _fbuf *)bucket_head);
+
 	prev = fbuf->bucket_prev;
 	next = fbuf->bucket_next;
 	if (prev->fc.is_sentinel)
@@ -1456,7 +1452,7 @@ fbuf_search(union meta_addr ma)
 	struct _fbuf_sentinel	*bucket_sentinel;
 
 	hash = ma.uint32 % FBUF_BUCKETS;
-	bucket_sentinel = &sc.fbuf_bucket[hash].sentinel;
+	bucket_sentinel = &sc.fbuf_bucket[hash];
 	fbuf = bucket_sentinel->fc.queue_next;
 	while (fbuf != (struct _fbuf *)bucket_sentinel) {
 		if (fbuf->ma.uint32 == ma.uint32) { // cache hit
@@ -1663,7 +1659,7 @@ fbuf_hash_check(void)
 
 	for (int i = 0; i < FBUF_BUCKETS; ++i)
 	{
-		bucket_sentinel = &sc.fbuf_bucket[i].sentinel;
+		bucket_sentinel = &sc.fbuf_bucket[i];
 		fbuf = bucket_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)bucket_sentinel) {
 			++total;
