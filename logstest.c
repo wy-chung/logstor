@@ -62,7 +62,7 @@ main_logstest(int argc, char *argv[])
 
 	//main_loop_count = 2;
 	//loop_count = 1764943;
-	main_loop_count = 16;
+	main_loop_count = 7;
 	loop_count = 176494;
 	for (int i = 0; i < main_loop_count; i++) {
 		printf("#### test %d ####\n", i);
@@ -104,6 +104,7 @@ test_write(unsigned max_block)
 	int overwrite_count = 0;
 	for (unsigned i = 0 ; i < loop_count ; ++i)
 	{
+gdb_cond0 = i;
 		if ( (i % 0x10000) == 0)
 			printf("w %7d/%7d\n", i, loop_count);
 

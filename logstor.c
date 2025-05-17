@@ -1293,8 +1293,20 @@ fbuf_flush(void)
 	struct _fbuf_sentinel	*dirty_sentinel;
 	struct _fbuf_sentinel	*clean_sentinel;
 
-	// write back all the modified fbufs to disk
-	for (i = QUEUE_LEAF_DIRTY; i >= 0; --i) {
+	// write back all the dirty leaf nodes to disk
+	queue_sentinel = &sc.fbuf_queue[QUEUE_LEAF_DIRTY];
+	fbuf = queue_sentinel->fc.queue_next;
+	while (fbuf != (struct _fbuf *)queue_sentinel) {
+		MY_ASSERT(fbuf->queue_which == QUEUE_LEAF_DIRTY);
+		MY_ASSERT(IS_META_ADDR(fbuf->ma.uint32));
+		MY_ASSERT(fbuf->fc.modified);
+		// for dirty leaf nodes it's always dirty
+		fbuf_write(fbuf);
+		fbuf = fbuf->fc.queue_next;
+	}
+
+	// write back all the modified internal nodes to disk
+	for (i = QUEUE_IND1; i >= 0; --i) {
 		queue_sentinel = &sc.fbuf_queue[i];
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
