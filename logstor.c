@@ -65,7 +65,8 @@ e-mail: wy-chung@outlook.com
 #define FBUF_CLEAN_THRESHOLD	32
 #define FBUF_MIN	(1024 + FBUF_CLEAN_THRESHOLD)
 #define FBUF_MAX	(FBUF_MIN * 2)
-#define FBUF_BUCKETS	(1097+1)	// this should be a prime number plus 1
+// the last bucket is reserved for queuing fbufs that will not be searched
+#define FBUF_BUCKET_CNT	(911+1)	// this should be a prime number plus 1
 
 #define	FD_CUR	2
 #define FD_COUNT	4	// max number of metadata files supported
@@ -217,9 +218,9 @@ struct g_logstor_softc {
 	int fbuf_queue_len[QUEUE_CNT];
 
 	// buffer hash queue
-	struct _fbuf_sentinel fbuf_bucket[FBUF_BUCKETS];
+	struct _fbuf_sentinel fbuf_bucket[FBUF_BUCKET_CNT];
 #if defined(MY_DEBUG)
-	int fbuf_bucket_len[FBUF_BUCKETS];
+	int fbuf_bucket_len[FBUF_BUCKET_CNT];
 #endif
 	// statistics
 	unsigned data_write_count;	// data block write to disk
@@ -280,7 +281,7 @@ static void fbuf_bucket_remove(struct _fbuf *fbuf);
 static struct _fbuf *fbuf_access(union meta_addr ma);
 static void fbuf_write(struct _fbuf *fbuf);
 static void fbuf_flush(void);
-static struct _fbuf *fbuf_alloc(void);
+static struct _fbuf *fbuf_alloc(union meta_addr ma, int depth);
 static void fbuf_queue_check(void);
 static void fbuf_clean_queue_check(void);
 
@@ -1192,14 +1193,12 @@ fbuf_mod_init(void)
 	sc.fbufs = malloc(fbuf_count * sizeof(*sc.fbufs));
 	MY_ASSERT(sc.fbufs != NULL);
 
-	for (i = 0; i < FBUF_BUCKETS; ++i) {
+	for (i = 0; i < FBUF_BUCKET_CNT; ++i) {
 		fbuf_bucket_init(i);
 	}
 	for (i = 0; i < QUEUE_CNT; ++i) {
 		fbuf_queue_init(i);
 	}
-	sc.fbuf_alloc = (struct _fbuf *)&sc.fbuf_queue[QUEUE_LEAF_CLEAN];
-
 	// insert fbuf to both QUEUE_LEAF_CLEAN and hash queue
 	for (i = 0; i < fbuf_count; ++i) {
 		struct _fbuf *fbuf = &sc.fbufs[i];
@@ -1213,8 +1212,10 @@ fbuf_mod_init(void)
 #endif
 		fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
 		// insert fbuf to the last fbuf bucket
-		fbuf_bucket_insert_head(fbuf, FBUF_BUCKETS-1);
+		// this bucket is not used in hash search
+		fbuf_bucket_insert_head(fbuf, FBUF_BUCKET_CNT-1);
 	}
+	sc.fbuf_alloc = &sc.fbufs[0];;
 	sc.fbuf_hit = sc.fbuf_miss = 0;
 }
 
@@ -1245,8 +1246,9 @@ queue_init(struct _fbuf_sentinel *sentinel)
 static void
 fbuf_clean_queue_check(void)
 {
-	struct _fbuf_sentinel	*queue_sentinel;
-	struct _fbuf	*fbuf;
+	struct _fbuf_sentinel *queue_sentinel;
+	struct _fbuf *fbuf;
+	struct _fbuf *parent;
 
 	if (sc.fbuf_queue_len[QUEUE_LEAF_CLEAN] > FBUF_CLEAN_THRESHOLD)
 		return;
@@ -1259,10 +1261,22 @@ fbuf_clean_queue_check(void)
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
 			MY_ASSERT(fbuf->queue_which == i);
+			MY_ASSERT(!fbuf->fc.modified);
 			struct _fbuf *fbuf_next = fbuf->fc.queue_next;
 			if (fbuf->child_cnt == 0) {
+				parent = fbuf->parent;
+				fbuf->parent = NULL;
+				if (parent) {
+					MY_ASSERT(i == QUEUE_IND1);
+					--parent->child_cnt;
+					MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
+				}
 				fbuf_queue_remove(fbuf);
 				fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
+				fbuf->fc.accessed = false; // so that it can be replaced faster
+				// insert it to the last bucket so that it cannot be searched
+				fbuf_bucket_remove(fbuf);
+				fbuf_bucket_insert_head(fbuf, FBUF_BUCKET_CNT-1);
 			}
 			fbuf = fbuf_next;
 		}
@@ -1287,7 +1301,7 @@ fbuf_flush(void)
 			MY_ASSERT(fbuf->queue_which == i);
 			MY_ASSERT(IS_META_ADDR(fbuf->ma.uint32));
 			// for non-leaf nodes the fbuf might not be modified
-			if (fbuf->fc.modified)
+			if (__predict_true(fbuf->fc.modified))
 				fbuf_write(fbuf);
 			fbuf = fbuf->fc.queue_next;
 		}
@@ -1373,19 +1387,29 @@ fbuf_queue_remove(struct _fbuf *fbuf)
 	--sc.fbuf_queue_len[which];
 }
 
+// insert to the head of the hashed bucket
+static void
+fbuf_hash_insert_head(struct _fbuf *fbuf)
+{
+	unsigned which;
+
+	which = fbuf->ma.uint32 % (FBUF_BUCKET_CNT-1);
+	fbuf_bucket_insert_head(fbuf, which);
+}
+
 static void
 fbuf_bucket_init(int which)
 {
 	struct _fbuf_sentinel *bucket_head;
 
-	MY_ASSERT(which < FBUF_BUCKETS);
+#if defined(MY_DEBUG)
+	MY_ASSERT(which < FBUF_BUCKET_CNT);
+	sc.fbuf_bucket_len[which] = 0;
+#endif
 	bucket_head = &sc.fbuf_bucket[which];
 	bucket_head->fc.queue_next = (struct _fbuf *)bucket_head;
 	bucket_head->fc.queue_prev = (struct _fbuf *)bucket_head;
 	bucket_head->fc.is_sentinel = true;
-#if defined(MY_DEBUG)
-	sc.fbuf_bucket_len[which] = 0;
-#endif
 }
 
 static void
@@ -1395,6 +1419,7 @@ fbuf_bucket_insert_head(struct _fbuf *fbuf, unsigned which)
 	struct _fbuf_sentinel *bucket_head;
 
 #if defined(MY_DEBUG)
+	MY_ASSERT(which < FBUF_BUCKET_CNT);
 	fbuf->bucket_which = which;
 	++sc.fbuf_bucket_len[which];
 #endif
@@ -1409,16 +1434,6 @@ fbuf_bucket_insert_head(struct _fbuf *fbuf, unsigned which)
 		next->bucket_prev = fbuf;
 }
 
-// insert to the head of the bucket
-static void
-fbuf_hash_insert_head(struct _fbuf *fbuf)
-{
-	unsigned which;
-
-	which = fbuf->ma.uint32 % (FBUF_BUCKETS-1);
-	fbuf_bucket_insert_head(fbuf, which);
-}
-
 static void
 fbuf_bucket_remove(struct _fbuf *fbuf)
 {
@@ -1428,7 +1443,7 @@ fbuf_bucket_remove(struct _fbuf *fbuf)
 	struct _fbuf_sentinel *bucket_head;
 	int which = fbuf->bucket_which;
 
-	MY_ASSERT(which < FBUF_BUCKETS);
+	MY_ASSERT(which < FBUF_BUCKET_CNT);
 	--sc.fbuf_bucket_len[which];
 	bucket_head = &sc.fbuf_bucket[which];
 	MY_ASSERT(fbuf != (struct _fbuf *)bucket_head);
@@ -1457,7 +1472,7 @@ fbuf_search(union meta_addr ma)
 	struct _fbuf	*fbuf;
 	struct _fbuf_sentinel	*bucket_sentinel;
 
-	hash = ma.uint32 % (FBUF_BUCKETS-1);
+	hash = ma.uint32 % (FBUF_BUCKET_CNT-1);
 	bucket_sentinel = &sc.fbuf_bucket[hash];
 	fbuf = bucket_sentinel->fc.queue_next;
 	while (fbuf != (struct _fbuf *)bucket_sentinel) {
@@ -1476,7 +1491,7 @@ Description:
   using the second chance replace policy to choose a fbuf in QUEUE_LEAF_CLEAN
 */
 struct _fbuf *
-fbuf_alloc(void)
+fbuf_alloc(union meta_addr ma, int depth)
 {
 	struct _fbuf_sentinel *queue_sentinel;
 	struct _fbuf *fbuf, *parent;
@@ -1500,7 +1515,15 @@ again:
 	MY_ASSERT(!fbuf->fc.modified);
 	sc.fbuf_alloc = fbuf->fc.queue_next;
 
+	if (depth != META_LEAF_DEPTH) {
+		// for fbuf allocated for internal nodes insert it immediately
+		// to its internal queue
+		fbuf_queue_remove(fbuf);
+		fbuf_queue_insert_tail(depth, fbuf);
+	}
 	fbuf_bucket_remove(fbuf);
+	fbuf->ma = ma;
+	fbuf_hash_insert_head(fbuf);
 	parent = fbuf->parent;
 	if (parent) {
 		// parent with child_cnt == 0 will stay in its queue
@@ -1552,18 +1575,12 @@ fbuf_access(union meta_addr ma)
 		depth[i] = fbuf;
 #endif
 		if (fbuf == NULL) {
-			fbuf = fbuf_alloc();	// allocate a fbuf from clean queue
-			fbuf->ma = ima;
-			fbuf_hash_insert_head(fbuf);
+			fbuf = fbuf_alloc(ima, i);	// allocate a fbuf from clean queue
 			fbuf->parent = parent;
 			if (parent) {
-				if (parent->child_cnt++ == 0 && parent->queue_which == QUEUE_LEAF_CLEAN) {
-					// an internal node that has previously been moved to QUEUE_LEAF_CLEAN
-					// internal nodes can only be moved to QUEUE_LEAF_CLEAN
-					MY_ASSERT(parent->queue_which == QUEUE_LEAF_CLEAN);
-					fbuf_queue_remove(parent);
-					fbuf_queue_insert_tail(parent->ma.depth, parent);
-				}
+				// parent with child_cnt == 0 will stay in its queue
+				// it will only be moved to QUEUE_LEAF_CLEAN in fbuf_clean_queue_check()
+				++parent->child_cnt;
 				MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
 			}
 			if (sa == SECTOR_NULL)	// the metadata block does not exist
@@ -1663,7 +1680,7 @@ fbuf_hash_check(void)
 	struct _fbuf_sentinel *bucket_sentinel;
 	int total = 0;
 
-	for (int i = 0; i < FBUF_BUCKETS; ++i)
+	for (int i = 0; i < FBUF_BUCKET_CNT; ++i)
 	{
 		bucket_sentinel = &sc.fbuf_bucket[i];
 		fbuf = bucket_sentinel->fc.queue_next;
@@ -1671,8 +1688,8 @@ fbuf_hash_check(void)
 			++total;
 			MY_ASSERT(!fbuf->fc.is_sentinel);
 			MY_ASSERT(fbuf->bucket_which == i);
-			if (i != (FBUF_BUCKETS-1))
-				MY_ASSERT(fbuf->ma.uint32 % (FBUF_BUCKETS-1) == i);
+			if (i != (FBUF_BUCKET_CNT-1))
+				MY_ASSERT(fbuf->ma.uint32 % (FBUF_BUCKET_CNT-1) == i);
 			fbuf = fbuf->bucket_next;
 		}
 	}
