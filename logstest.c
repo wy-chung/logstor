@@ -62,7 +62,7 @@ main_logstest(int argc, char *argv[])
 
 	//main_loop_count = 2;
 	//loop_count = 1764943;
-	main_loop_count = 7;
+	main_loop_count = 6;
 	loop_count = 176494;
 	for (int i = 0; i < main_loop_count; i++) {
 		printf("#### test %d ####\n", i);
@@ -136,7 +136,7 @@ gdb_cond0 = i;
 
 	unsigned fbuf_hit = logstor_get_fbuf_hit();
 	unsigned fbuf_miss = logstor_get_fbuf_miss();
-	printf("file hit %f\n", (double)fbuf_hit / (fbuf_hit + fbuf_miss));
+	printf("metadata hit %f\n", (double)fbuf_hit / (fbuf_hit + fbuf_miss));
 
 	unsigned data_write_count = logstor_get_data_write_count();
 	unsigned other_write_count = logstor_get_other_write_count();

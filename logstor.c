@@ -63,12 +63,11 @@ e-mail: wy-chung@outlook.com
 #define SECTOR_DEL	1	// don't look further, it is NULL
 
 #define FBUF_CLEAN_THRESHOLD	32
-#define FBUF_MIN	(1024 + FBUF_CLEAN_THRESHOLD)
+#define FBUF_MIN	1564
 #define FBUF_MAX	(FBUF_MIN * 2)
 // the last bucket is reserved for queuing fbufs that will not be searched
 #define FBUF_BUCKET_CNT	(911+1)	// this should be a prime number plus 1
 
-#define	FD_CUR	2
 #define FD_COUNT	4	// max number of metadata files supported
 #define FD_INVALID	-1	// invalid file
 
@@ -512,13 +511,17 @@ logstor_commit(void)
 	uint32_t block_max = sc.superblock.block_cnt_max;
 	uint32_t sa;
 
-	is_sec_valid = is_sec_valid_during_commit;
+	// lock metadata
+	// move fd_cur to fd_prev
 	sc.superblock.fd_prev = sc.superblock.fd_cur;
+	// create new files fd_cur and fd_snap_new
 	sc.superblock.fd_cur = sc.superblock.fd_cur ^ 2;
 	sc.superblock.fd_snap_new = sc.superblock.fd_cur + 1;
-
 	sc.superblock.fd_tab[sc.superblock.fd_cur] = SECTOR_NULL;
 	sc.superblock.fd_tab[sc.superblock.fd_snap_new] = SECTOR_NULL;
+
+	is_sec_valid = is_sec_valid_during_commit;
+	// unlock metadata
 	for (int ba = 0; ba < block_max; ++ba) {
 		fbuf_clean_queue_check();
 		sa = file_read_4byte(sc.superblock.fd_prev, ba);
@@ -530,10 +533,14 @@ logstor_commit(void)
 		if (sa != SECTOR_NULL)
 			file_write_4byte(sc.superblock.fd_snap_new, ba, sa);
 	}
+	// lock metadata
+	// move fd_snap_new to fd_snap and delete fd_prev and fd_snap_new
 	sc.superblock.fd_snap = sc.superblock.fd_snap_new;
 	sc.superblock.fd_prev = FD_INVALID;
 	sc.superblock.fd_snap_new = FD_INVALID;
+
 	is_sec_valid = is_sec_valid_normal;
+	//unlock metadata
 }
 
 uint32_t
@@ -658,7 +665,10 @@ again:
 		if (seg_sum->ss_alloc == SEG_SUM_OFFSET)
 			_seg_alloc();
 
-		if (!IS_META_ADDR(ba)) {
+		if (IS_META_ADDR(ba))
+			++sc.other_write_count;
+		else {
+			++sc.data_write_count;
 			// record the forward mapping for the %ba
 			// the forward mapping must be recorded after
 			// the segment summary block write
@@ -797,7 +807,7 @@ disk_init(int fd)
 #else
 	sb->sb_gen = random();
 #endif	
-	sb->fd_cur = FD_CUR;
+	sb->fd_cur = 0;
 	sb->fd_prev = FD_INVALID;
 	sb->fd_snap = FD_INVALID;
 	sb->fd_snap_new = FD_INVALID;
@@ -1366,17 +1376,17 @@ fbuf_queue_init(int which)
 static void
 fbuf_queue_insert_tail(int which, struct _fbuf *fbuf)
 {
-	struct _fbuf *head;
+	struct _fbuf_sentinel *queue_head;
 	struct _fbuf *prev;
 
 	MY_ASSERT(which < QUEUE_CNT);
 	MY_ASSERT(which != QUEUE_LEAF_CLEAN || !fbuf->fc.modified);
 	fbuf->queue_which = which;
-	head = (struct _fbuf *)&sc.fbuf_queue[which];
-	prev = head->fc.queue_prev;
+	queue_head = &sc.fbuf_queue[which];
+	prev = queue_head->fc.queue_prev;
 	MY_ASSERT(prev->fc.is_sentinel || prev->queue_which == which);
-	head->fc.queue_prev = fbuf;
-	fbuf->fc.queue_next = head;
+	queue_head->fc.queue_prev = fbuf;
+	fbuf->fc.queue_next = (struct _fbuf *)queue_head;
 	fbuf->fc.queue_prev = prev;
 	prev->fc.queue_next = fbuf;
 	++sc.fbuf_queue_len[which];
@@ -1427,8 +1437,8 @@ fbuf_bucket_init(int which)
 static void
 fbuf_bucket_insert_head(struct _fbuf *fbuf, unsigned which)
 {
-	struct _fbuf *next;
 	struct _fbuf_sentinel *bucket_head;
+	struct _fbuf *next;
 
 #if defined(MY_DEBUG)
 	MY_ASSERT(which < FBUF_BUCKET_CNT);
@@ -1639,7 +1649,6 @@ fbuf_write(struct _fbuf *fbuf)
 	fbuf->sa = sa;
 #endif
 	fbuf->fc.modified = false;
-	sc.other_write_count++;
 
 	// update the sector address of this fbuf in its parent's fbuf
 	parent = fbuf->parent;
