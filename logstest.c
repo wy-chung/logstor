@@ -151,7 +151,7 @@ test_read(unsigned max_block)
 {
 	uint32_t ba, sa;
 	uint32_t i_exp, i_get;
-	uint32_t buf[SECTOR_SIZE/4]; // [5]:i, [6]:ba
+	uint32_t buf[SECTOR_SIZE/4]; // [4]: %, [5]:i, [6]:ba
 
 	// reading data from logstor
 	int read_count = 0;

@@ -59,8 +59,11 @@ e-mail: wy-chung@outlook.com
 #define	META_START	(((union meta_addr){.meta = 0xFF}).uint32)	// metadata block address start
 #define	IS_META_ADDR(x)	((x) >= META_START)
 
-#define	SECTOR_NULL	0	// this sector address can not map to any block address
-#define SECTOR_DEL	1	// don't look further, it is NULL
+enum {
+	SECTOR_NULL,	// the metadata are all NULL
+	SECTOR_DEL,	// don't look further, it is NULL
+	SECTOR_CACHE,	// the root sector is in the cache
+};
 
 #define FBUF_CLEAN_THRESHOLD	32
 #define FBUF_MIN	1564
@@ -1604,6 +1607,9 @@ fbuf_access(union meta_addr ma)
 				// it will only be moved to QUEUE_LEAF_CLEAN in fbuf_clean_queue_check()
 				++parent->child_cnt;
 				MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
+			} else {
+				MY_ASSERT(i == 0);
+				sc.superblock.fd_tab[ma.fd] = SECTOR_CACHE;
 			}
 			if (sa == SECTOR_NULL)	// the metadata block does not exist
 				bzero(fbuf->data, sizeof(fbuf->data));
@@ -1618,7 +1624,7 @@ fbuf_access(union meta_addr ma)
 #endif
 		} else {
 			MY_ASSERT(fbuf->parent == parent);
-			MY_ASSERT(fbuf->sa == sa);
+			MY_ASSERT(fbuf->sa == sa || sa == SECTOR_CACHE);
 		}
 		if (i == ma.depth) // reach the intended depth
 			break;
