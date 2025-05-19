@@ -33,12 +33,5 @@
 *.dSYM/
 /.project
 
-# *.json
-# *.code-workspace
-
 logstor.disk
-ggatelog
-ggatelog.debug
-ggatelog.full
-.depend
 
