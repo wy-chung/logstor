@@ -20,7 +20,7 @@ e-mail: wy-chung@outlook.com
 /**************************************
  *           Test function            *
  **************************************/
-#if 1
+#if 0
 	#define	RAND_SEED	time(NULL)
 #else
 	#define	RAND_SEED	0
@@ -62,7 +62,7 @@ main_logstest(int argc, char *argv[])
 
 	//main_loop_count = 2;
 	//loop_count = 1764943;
-	main_loop_count = 8;
+	main_loop_count = 24;
 	loop_count = 176494;
 	for (int i = 0; i < main_loop_count; i++) {
 		printf("#### test %d ####\n", i);
@@ -135,7 +135,7 @@ gdb_cond0 = i;
 		buf[5] = i;
 		buf[6] = ba;
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
-		sa = logstor_write_test(ba, buf);
+		sa = logstor_write(ba, buf);
 		ba2sa[ba] = sa;
 	}
 	printf("overwrite percent %f\n", (double)overwrite_count/loop_count);
@@ -163,7 +163,7 @@ test_read(unsigned max_block)
 		if (ba_write_count[ba] > 0) {
 			if (ba_write_count[ba] > i_max)
 				i_max = ba_write_count[ba];
-			sa = logstor_read_test(ba, buf);
+			sa = logstor_read(ba, buf);
 			MY_ASSERT(sa == ba2sa[ba]);
 			++read_count;
 			i_exp = ba2i[ba];
@@ -178,7 +178,7 @@ test_read(unsigned max_block)
 			}
 		}
 		else {
-			sa = logstor_read_test(ba, buf);
+			sa = logstor_read(ba, buf);
 			MY_ASSERT(sa == 0/*SECTOR_NULL*/);
 		}
 	}

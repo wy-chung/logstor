@@ -71,8 +71,8 @@ enum {
 // the last bucket is reserved for queuing fbufs that will not be searched
 #define FBUF_BUCKET_CNT	(911+1)	// this should be a prime number plus 1
 
-#define FD_COUNT	4	// max number of metadata files supported
-#define FD_INVALID	-1	// invalid file
+#define FD_COUNT	4		// max number of metadata files supported
+#define FD_INVALID	FD_COUNT	// the valid file descriptor are 0 to 3
 
 struct _superblock {
 	uint32_t sig;		// signature
@@ -105,7 +105,7 @@ struct _superblock {
 	   To support trim command, the mapping marked as delete will stop
 	   the checking for the next mapping file and return null immediately
 	*/
-	uint32_t fd_tab[FD_COUNT];	// the root sector of the file
+	uint32_t fd_root[FD_COUNT];	// the root sector of the file
 	uint8_t fd_cur;		// the file descriptor for current mapping
 	uint8_t fd_snap;	// the file descriptor for snapshot mapping
 	uint8_t fd_prev;	// the file descriptor for previous current mapping
@@ -207,6 +207,7 @@ struct _fbuf { // file buffer
 	logstor soft control
 */
 struct g_logstor_softc {
+	uint32_t seg_alloc_start;// the starting segment for _logstor_write
 	uint32_t seg_alloc_sa;	// the sector address of the segment for allocation
 	struct _seg_sum seg_sum;// segment summary for the hot segment
 	uint32_t sb_sa; 	// superblock's sector address
@@ -256,8 +257,8 @@ static union {
 #endif
 static struct g_logstor_softc sc;
 
-static uint32_t _logstor_read_one(uint32_t ba, void *data);
-static uint32_t _logstor_write_one(uint32_t ba, void *data);
+static uint32_t _logstor_read(uint32_t ba, void *data);
+static uint32_t _logstor_write(uint32_t ba, void *data);
 
 static void _seg_alloc(void);
 static void seg_sum_write(void);
@@ -466,18 +467,18 @@ logstor_close(void)
 }
 
 uint32_t
-logstor_read_test(uint32_t ba, void *data)
+logstor_read(uint32_t ba, void *data)
 {
 	fbuf_clean_queue_check();
-	uint32_t sa = _logstor_read_one(ba, data);
+	uint32_t sa = _logstor_read(ba, data);
 	return sa;
 }
 
 uint32_t
-logstor_write_test(uint32_t ba, void *data)
+logstor_write(uint32_t ba, void *data)
 {
 	fbuf_clean_queue_check();
-	uint32_t sa = _logstor_write_one(ba, data);
+	uint32_t sa = _logstor_write(ba, data);
 	return sa;
 }
 
@@ -517,13 +518,15 @@ logstor_commit(void)
 	// move fd_cur to fd_prev
 	sc.superblock.fd_prev = sc.superblock.fd_cur;
 	// create new files fd_cur and fd_snap_new
+	// fc_cur is either 0 or 2 and fd_snap always follows fd_cur
 	sc.superblock.fd_cur = sc.superblock.fd_cur ^ 2;
 	sc.superblock.fd_snap_new = sc.superblock.fd_cur + 1;
-	sc.superblock.fd_tab[sc.superblock.fd_cur] = SECTOR_NULL;
-	sc.superblock.fd_tab[sc.superblock.fd_snap_new] = SECTOR_NULL;
+	sc.superblock.fd_root[sc.superblock.fd_cur] = SECTOR_NULL;
+	sc.superblock.fd_root[sc.superblock.fd_snap_new] = SECTOR_NULL;
 
 	is_sec_valid = is_sec_valid_during_commit;
 	// unlock metadata
+
 	for (int ba = 0; ba < block_max; ++ba) {
 		fbuf_clean_queue_check();
 		sa = file_read_4byte(sc.superblock.fd_prev, ba);
@@ -535,8 +538,9 @@ logstor_commit(void)
 		if (sa != SECTOR_NULL)
 			file_write_4byte(sc.superblock.fd_snap_new, ba, sa);
 	}
+
 	// lock metadata
-	// move fd_snap_new to fd_snap and delete fd_prev and fd_snap_new
+	// move fd_snap_new to fd_snap, delete fd_prev and fd_snap_new
 	sc.superblock.fd_snap = sc.superblock.fd_snap_new;
 	sc.superblock.fd_prev = FD_INVALID;
 	sc.superblock.fd_snap_new = FD_INVALID;
@@ -546,7 +550,7 @@ logstor_commit(void)
 }
 
 uint32_t
-_logstor_read_one(unsigned ba, void *data)
+_logstor_read(unsigned ba, void *data)
 {
 	uint32_t sa;	// sector address
 
@@ -630,7 +634,7 @@ Return:
   the sector address where the data is written
 */
 static uint32_t
-_logstor_write_one(uint32_t ba, void *data)
+_logstor_write(uint32_t ba, void *data)
 {
 	static bool is_called = false;
 	struct _seg_sum *seg_sum = &sc.seg_sum;
@@ -644,43 +648,44 @@ _logstor_write_one(uint32_t ba, void *data)
 	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.block_cnt_max);
 	MY_ASSERT(!is_called); // recursive call is not allowed
 	is_called = true;
-again:
-	for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
-	{
-		uint32_t sa = sc.seg_alloc_sa + i;
-		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
+	sc.seg_alloc_start = sc.superblock.seg_alloc;
+	while(true) {
+		for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
+		{
+			uint32_t sa = sc.seg_alloc_sa + i;
+			uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
 #if defined(MY_DEBUG)
-		ma_rev.uint32 = ba_rev;
+			ma_rev.uint32 = ba_rev;
 #endif
 
-		if (is_sec_valid(sa, ba_rev))
-			continue;
+			if (is_sec_valid(sa, ba_rev))
+				continue;
 #if defined(WYC)
-		is_sec_valid_normal();
-		is_sec_valid_during_commit();
+			is_sec_valid_normal();
+			is_sec_valid_during_commit();
 #endif
 
-		my_write(sa, data, 1);
-		seg_sum->ss_rm[i] = ba;		// record reverse mapping
-		sc.ss_modified = true;
-		seg_sum->ss_alloc = i + 1;	// advnace the alloc pointer
-		if (seg_sum->ss_alloc == SEG_SUM_OFFSET)
-			_seg_alloc();
+			my_write(sa, data, 1);
+			seg_sum->ss_rm[i] = ba;		// record reverse mapping
+			sc.ss_modified = true;
+			seg_sum->ss_alloc = i + 1;	// advnace the alloc pointer
+			if (seg_sum->ss_alloc == SEG_SUM_OFFSET)
+				_seg_alloc();
 
-		if (IS_META_ADDR(ba))
-			++sc.other_write_count;
-		else {
-			++sc.data_write_count;
-			// record the forward mapping for the %ba
-			// the forward mapping must be recorded after
-			// the segment summary block write
-			file_write_4byte(sc.superblock.fd_cur, ba, sa);
+			if (IS_META_ADDR(ba))
+				++sc.other_write_count;
+			else {
+				++sc.data_write_count;
+				// record the forward mapping for the %ba
+				// the forward mapping must be recorded after
+				// the segment summary block write
+				file_write_4byte(sc.superblock.fd_cur, ba, sa);
+			}
+			is_called = false;
+			return sa;
 		}
-		is_called = false;
-		return sa;
+		_seg_alloc();
 	}
-	_seg_alloc();
-	goto again;
 }
 
 /*
@@ -833,7 +838,7 @@ disk_init(int fd)
 #endif
 	// the root sector address for the files
 	for (int i = 0; i < FD_COUNT; i++) {
-		sb->fd_tab[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
+		sb->fd_root[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
 	}
 	sb->seg_alloc = SEG_DATA_START;	// start allocate from here
 
@@ -989,6 +994,7 @@ _seg_alloc(void)
 	MY_ASSERT(sc.superblock.seg_alloc < sc.superblock.seg_cnt);
 	if (++sc.superblock.seg_alloc == sc.superblock.seg_cnt)
 		sc.superblock.seg_alloc = SEG_DATA_START;
+	MY_ASSERT(sc.superblock.seg_alloc != sc.seg_alloc_start);
 	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
 	my_read(sc.seg_alloc_sa + SEG_SUM_OFFSET, &sc.seg_sum, 1);
 	sc.seg_sum.ss_alloc = 0;
@@ -1017,8 +1023,19 @@ file_read_4byte(uint8_t fd, uint32_t ba)
 	uint32_t sa;
 	struct _fbuf *fbuf;
 
-	if (sc.superblock.fd_tab[fd] == SECTOR_NULL)
+	// the fd might be invalid if the file is deleted
+	if (fd >= FD_COUNT)
 		return SECTOR_NULL;
+
+	// the initialized reverse map in the segment summary is BLOCK_INVALID
+	// so it is possible that a caller might pass a ba that is >= BLOCK_MAX
+	if (ba >= BLOCK_MAX)
+		return SECTOR_NULL;
+
+	// this file is all 0
+	if (sc.superblock.fd_root[fd] == SECTOR_NULL)
+		return SECTOR_NULL;
+
 	fbuf = file_access_4byte(fd, ba, &off_4byte);
 	if (fbuf)
 		sa = fbuf->data[off_4byte];
@@ -1046,10 +1063,10 @@ file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
 	MY_ASSERT(fbuf != NULL);
 	fbuf->data[off_4byte] = sa;
 	if (!fbuf->fc.modified) {
-		MY_ASSERT(fbuf->queue_which == QUEUE_LEAF_CLEAN);
 		fbuf->fc.modified = true;
 		if (fbuf == sc.fbuf_alloc)
 			sc.fbuf_alloc = fbuf->fc.queue_next;
+		MY_ASSERT(fbuf->queue_which == QUEUE_LEAF_CLEAN);
 		fbuf_queue_remove(fbuf);
 		fbuf_queue_insert_tail(QUEUE_LEAF_DIRTY, fbuf);
 	}
@@ -1074,10 +1091,8 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *off_4byte)
 	union meta_addr	ma;		// metadata address
 	struct _fbuf *fbuf;
 
-	if (fd >= FD_COUNT)
-		return NULL;
-	if (ba >= BLOCK_MAX)
-		return NULL;
+	MY_ASSERT(fd < FD_COUNT);
+	MY_ASSERT(ba < BLOCK_MAX);
 
 	// the sector address stored in file for this ba is 4 bytes
 	*off_4byte = ((ba * 4) & (SECTOR_SIZE - 1)) / 4;
@@ -1170,7 +1185,7 @@ ma2sa(union meta_addr ma)
 	switch (ma.depth)
 	{
 	case 0:
-		sa = sc.superblock.fd_tab[ma.fd];
+		sa = sc.superblock.fd_root[ma.fd];
 		break;
 	case 1:
 	case 2:
@@ -1536,9 +1551,9 @@ again:
 		MY_ASSERT(fbuf != (struct _fbuf *)queue_sentinel);
 		goto again;
 	}
+
 	MY_ASSERT(!fbuf->fc.modified);
 	sc.fbuf_alloc = fbuf->fc.queue_next;
-
 	if (depth != META_LEAF_DEPTH) {
 		// for fbuf allocated for internal nodes insert it immediately
 		// to its internal queue
@@ -1579,7 +1594,7 @@ fbuf_access(union meta_addr ma)
 	MY_ASSERT(ma.depth <= META_LEAF_DEPTH);
 
 	// get the root sector address of the file %ma.fd
-	sa = sc.superblock.fd_tab[ma.fd];
+	sa = sc.superblock.fd_root[ma.fd];
 	if (sa == SECTOR_DEL) // the file does not exist
 		return NULL;
 
@@ -1608,7 +1623,7 @@ fbuf_access(union meta_addr ma)
 				MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
 			} else {
 				MY_ASSERT(i == 0);
-				sc.superblock.fd_tab[ma.fd] = SECTOR_CACHE;
+				sc.superblock.fd_root[ma.fd] = SECTOR_CACHE;
 			}
 			if (sa == SECTOR_NULL || sa == SECTOR_CACHE)	// the metadata block does not exist
 				bzero(fbuf->data, sizeof(fbuf->data));
@@ -1646,7 +1661,7 @@ fbuf_write(struct _fbuf *fbuf)
 	uint32_t sa;		// sector address
 
 	MY_ASSERT(fbuf->fc.modified);
-	sa = _logstor_write_one(fbuf->ma.uint32, fbuf->data);
+	sa = _logstor_write(fbuf->ma.uint32, fbuf->data);
 #if defined(MY_DEBUG)
 	fbuf->sa = sa;
 #endif
@@ -1663,38 +1678,11 @@ fbuf_write(struct _fbuf *fbuf)
 	} else {
 		MY_ASSERT(fbuf->ma.depth == 0);
 		// store the root sector address to the corresponding file table in super block
-		sc.superblock.fd_tab[fbuf->ma.fd] = sa;
+		sc.superblock.fd_root[fbuf->ma.fd] = sa;
 		sc.sb_modified = true;
 	}
 }
 
-#if 0
-/*
-Description:
-    allocate a file buffer from free queue
-*/
-static struct _fbuf *
-fbuf_alloc(bool read_only)
-{
-	struct _fbuf *fbuf, *parent;
-	struct _fbuf_sentinel *queue_sentinel;
-
-	queue_sentinel = &sc.fbuf_queue[QUEUE_LEAF_CLEAN].sentinel;
-	fbuf = queue_sentinel->fc.queue_next;
-	MY_ASSERT(fbuf != (struct _fbuf *)queue_sentinel);
-	MY_ASSERT(fbuf->queue_which == QUEUE_LEAF_CLEAN);
-	fbuf_bucket_remove(fbuf);
-	fbuf_queue_remove(fbuf);
-	parent = fbuf->parent;
-	// when parent's child count drops to 0, move it to QUEUE_LEAF_DIRTY
-	if (parent && --parent->child_cnt == 0) {
-		MY_ASSERT(parent->queue_which == parent->ma.depth);
-		fbuf_queue_remove(parent);
-		fbuf_queue_insert_tail(QUEUE_LEAF_DIRTY, parent);
-	}
-	return fbuf;
-}
-#endif
 #if defined(MY_DEBUG)
 void
 fbuf_hash_check(void)

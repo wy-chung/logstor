@@ -32,7 +32,7 @@ void my_break(void);
 #endif
 #define MY_PANIC()	my_debug(__FILE__, __LINE__, __func__)
 
-#define	SECTOR_SIZE	0x1000		// 4K
+#define	SECTOR_SIZE	0x1000	// 4K
 
 extern uint32_t gdb_cond0;	// for debug
 extern uint32_t gdb_cond1;	// for debug
@@ -42,19 +42,19 @@ uint32_t logstor_init(void);
 void logstor_fini(void);
 int  logstor_open(const char *disk_file);
 void logstor_close(void);
-void fbuf_queue_check(void);
-void fbuf_hash_check(void);
+uint32_t logstor_read(uint32_t ba, void *data);
+uint32_t logstor_write(uint32_t ba, void *data);
+void logstor_commit(void);
 int logstor_delete(off_t offset, void *data, off_t length);
 uint32_t logstor_get_block_cnt(void);
 unsigned logstor_get_data_write_count(void);
 unsigned logstor_get_other_write_count(void);
 unsigned logstor_get_fbuf_hit(void);
 unsigned logstor_get_fbuf_miss(void);
-
-// for logstor test
-uint32_t logstor_read_test(uint32_t ba, void *data);
-uint32_t logstor_write_test(uint32_t ba, void *data);
-void logstor_commit(void);
+#if defined(MY_DEBUG)
+void fbuf_queue_check(void);
+void fbuf_hash_check(void);
+#endif
 
 #if defined(WYC)
 #define roundup2(x, y)	(((x)+((y)-1))&~((y)-1))
