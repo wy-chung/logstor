@@ -62,7 +62,7 @@ main_logstest(int argc, char *argv[])
 
 	//main_loop_count = 2;
 	//loop_count = 1764943;
-	main_loop_count = 6;
+	main_loop_count = 8;
 	loop_count = 176494;
 	for (int i = 0; i < main_loop_count; i++) {
 		printf("#### test %d ####\n", i);
@@ -91,7 +91,14 @@ test(int n, unsigned max_block)
 	printf("reading %d...\n", n);
 	test_read(max_block);
 	logstor_commit();
+	test_read(max_block);
+
+	unsigned fbuf_hit = logstor_get_fbuf_hit();
+	unsigned fbuf_miss = logstor_get_fbuf_miss();
+	printf("metadata hit %f\n", (double)fbuf_hit / (fbuf_hit + fbuf_miss));
+
 	fbuf_hash_check();
+	fbuf_queue_check();
 }
 
 static void
@@ -131,13 +138,7 @@ gdb_cond0 = i;
 		sa = logstor_write_test(ba, buf);
 		ba2sa[ba] = sa;
 	}
-	printf("overwrite %d/%d\n", overwrite_count, loop_count);
-	printf("\n");
-
-	unsigned fbuf_hit = logstor_get_fbuf_hit();
-	unsigned fbuf_miss = logstor_get_fbuf_miss();
-	printf("metadata hit %f\n", (double)fbuf_hit / (fbuf_hit + fbuf_miss));
-
+	printf("overwrite %f%%\n", (double)overwrite_count/loop_count);
 	unsigned data_write_count = logstor_get_data_write_count();
 	unsigned other_write_count = logstor_get_other_write_count();
 	printf("write data %u other %u write amplification %f \n",
@@ -181,7 +182,7 @@ test_read(unsigned max_block)
 			MY_ASSERT(sa == 0/*SECTOR_NULL*/);
 		}
 	}
-	printf("read_count %d i_max %u\n\n", read_count, i_max);
+	printf("block read %f%% write count max %u\n\n", (double)read_count/max_block, i_max);
 }
 
 static void

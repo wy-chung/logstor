@@ -284,7 +284,6 @@ static struct _fbuf *fbuf_access(union meta_addr ma);
 static void fbuf_write(struct _fbuf *fbuf);
 static void fbuf_flush(void);
 static struct _fbuf *fbuf_alloc(union meta_addr ma, int depth);
-static void fbuf_queue_check(void);
 static void fbuf_clean_queue_check(void);
 
 static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
@@ -1634,9 +1633,6 @@ fbuf_access(union meta_addr ma)
 		sa = parent->data[index];	// the sector address of the next level indirect block
 		ima = ma_index_set(ima, i, index); // set the next level's index for @ima
 	} // for
-#if defined(MY_DEBUG)
-	fbuf_queue_check();
-#endif
 end:
 	fbuf->fc.accessed = true;
 	return fbuf;
@@ -1723,7 +1719,7 @@ fbuf_hash_check(void)
 	MY_ASSERT(total == sc.fbuf_count);
 }
 
-static void
+void
 fbuf_queue_check(void)
 {
 	int	i;
