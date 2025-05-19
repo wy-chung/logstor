@@ -10,7 +10,7 @@ logstest.o: logstest.c logstor.h GNUmakefile
 	cc -g -c -Wall logstest.c
 
 clean:
-	rm *.o *.out *.core ggatelog ggatelog.debug ggatelog.full
+	rm *.o *.out *.core
 
 logsinit.o: logsinit.c logstor.h GNUmakefile
 	cc -g -c -Wall logsinit.c
