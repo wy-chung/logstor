@@ -1501,12 +1501,12 @@ fbuf_search(union meta_addr ma)
 	fbuf = bucket_sentinel->fc.queue_next;
 	while (fbuf != (struct _fbuf *)bucket_sentinel) {
 		if (fbuf->ma.uint32 == ma.uint32) { // cache hit
-			sc.fbuf_hit++;
+			++sc.fbuf_hit;
 			return fbuf;
 		}
 		fbuf = fbuf->bucket_next;
 	}
-	sc.fbuf_miss++;
+	++sc.fbuf_miss;
 	return NULL;	// cache miss
 }
 

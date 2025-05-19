@@ -20,7 +20,7 @@ e-mail: wy-chung@outlook.com
 /**************************************
  *           Test function            *
  **************************************/
-#if 0
+#if 1
 	#define	RAND_SEED	time(NULL)
 #else
 	#define	RAND_SEED	0
@@ -95,7 +95,7 @@ test(int n, unsigned max_block)
 
 	unsigned fbuf_hit = logstor_get_fbuf_hit();
 	unsigned fbuf_miss = logstor_get_fbuf_miss();
-	printf("metadata hit %f\n", (double)fbuf_hit / (fbuf_hit + fbuf_miss));
+	printf("metadata hit rate %f\n", (double)fbuf_hit / (fbuf_hit + fbuf_miss));
 
 	fbuf_hash_check();
 	fbuf_queue_check();
@@ -112,7 +112,7 @@ test_write(unsigned max_block)
 	for (unsigned i = 0 ; i < loop_count ; ++i)
 	{
 gdb_cond0 = i;
-		if ( (i % 0x10000) == 0)
+		if ( (i % 0x20000) == 0)
 			printf("w %7d/%7d\n", i, loop_count);
 
 		ba = random() % max_block;	// get a random block address
@@ -138,7 +138,7 @@ gdb_cond0 = i;
 		sa = logstor_write_test(ba, buf);
 		ba2sa[ba] = sa;
 	}
-	printf("overwrite %f%%\n", (double)overwrite_count/loop_count);
+	printf("overwrite percent %f\n", (double)overwrite_count/loop_count);
 	unsigned data_write_count = logstor_get_data_write_count();
 	unsigned other_write_count = logstor_get_other_write_count();
 	printf("write data %u other %u write amplification %f \n",
@@ -158,7 +158,7 @@ test_read(unsigned max_block)
 	int read_count = 0;
 	uint32_t i_max = 0;
 	for (ba = 0 ; ba < max_block; ba += 1) {
-		if ( (ba % 0x10000) == 0)
+		if ( (ba % 0x20000) == 0)
 			printf("r %7d/%7d\n", ba, max_block);
 		if (ba_write_count[ba] > 0) {
 			if (ba_write_count[ba] > i_max)
@@ -182,7 +182,7 @@ test_read(unsigned max_block)
 			MY_ASSERT(sa == 0/*SECTOR_NULL*/);
 		}
 	}
-	printf("block read %f%% write count max %u\n\n", (double)read_count/max_block, i_max);
+	printf("percent of block read %f max overwrite times %u\n\n", (double)read_count/max_block, i_max);
 }
 
 static void
