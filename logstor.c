@@ -62,7 +62,7 @@ e-mail: wy-chung@outlook.com
 enum {
 	SECTOR_NULL,	// the metadata are all NULL
 	SECTOR_DEL,	// don't look further, it is NULL
-	SECTOR_CACHE,	// the root sector is in the cache
+	SECTOR_CACHE,	// the root sector is still in the cache
 };
 
 #define FBUF_CLEAN_THRESHOLD	32
@@ -1611,7 +1611,7 @@ fbuf_access(union meta_addr ma)
 				MY_ASSERT(i == 0);
 				sc.superblock.fd_tab[ma.fd] = SECTOR_CACHE;
 			}
-			if (sa == SECTOR_NULL)	// the metadata block does not exist
+			if (sa == SECTOR_NULL || sa == SECTOR_CACHE)	// the metadata block does not exist
 				bzero(fbuf->data, sizeof(fbuf->data));
 			else {
 				my_read(sa, fbuf->data, 1);
