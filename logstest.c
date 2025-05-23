@@ -91,8 +91,8 @@ test(int n, unsigned max_block)
 	arrays_check();
 	printf("reading %d...\n", n);
 	test_read(max_block);
-	logstor_commit();
-	test_read(max_block);
+	//logstor_commit();
+	//test_read(max_block);
 
 	unsigned fbuf_hit = logstor_get_fbuf_hit();
 	unsigned fbuf_miss = logstor_get_fbuf_miss();

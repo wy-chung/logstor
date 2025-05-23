@@ -527,6 +527,7 @@ logstor_commit(void)
 	sc.superblock.fd_root[sc.superblock.fd_snap_new] = SECTOR_NULL;
 
 	is_sec_valid_fp = is_sec_valid_during_commit;
+	logstor_ba2sa_fp = logstor_ba2sa_during_commit;
 	// unlock metadata
 
 	for (int ba = 0; ba < block_max; ++ba) {
@@ -542,14 +543,18 @@ logstor_commit(void)
 	}
 
 	// lock metadata
-	// move fd_snap_new to fd_snap, delete fd_prev and fd_snap_new
-	//fbuf_cache_flush();
-	//fbuf_cache_invalidate_fd(sc.superblock.fd_prev, sc.superblock.fd_snap);
+	fbuf_cache_flush();
+	fbuf_cache_invalidate_fd(sc.superblock.fd_prev, sc.superblock.fd_snap);
+	// move fd_snap_new to fd_snap
 	sc.superblock.fd_snap = sc.superblock.fd_snap_new;
+	// delete fd_prev and fd_snap_new
+	sc.superblock.fd_root[sc.superblock.fd_prev] = SECTOR_DEL;
+	sc.superblock.fd_root[sc.superblock.fd_snap_new] = SECTOR_DEL;
 	sc.superblock.fd_prev = FD_INVALID;
 	sc.superblock.fd_snap_new = FD_INVALID;
 
 	is_sec_valid_fp = is_sec_valid_normal;
+	logstor_ba2sa_fp = logstor_ba2sa_normal;
 	//unlock metadata
 }
 
@@ -656,40 +661,43 @@ _logstor_write(uint32_t ba, void *data)
 	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.block_cnt_max);
 	MY_ASSERT(!is_called); // recursive call is not allowed
 	is_called = true;
+
+	// record the starting segment
+	// if the search for free sector rolls over to the starting segment
+	// it means that there is no free sector in this disk
 	sc.seg_alloc_start = sc.superblock.seg_alloc;
-	while(true) {
-		for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
-		{
-			uint32_t sa = sc.seg_alloc_sa + i;
-			uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
+again:
+	for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
+	{
+		uint32_t sa = sc.seg_alloc_sa + i;
+		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
 #if defined(MY_DEBUG)
-			ma_rev.uint32 = ba_rev;
+		ma_rev.uint32 = ba_rev;
 #endif
+		if (is_sec_valid(sa, ba_rev))
+			continue;
 
-			if (is_sec_valid(sa, ba_rev))
-				continue;
+		my_write(sa, data, 1);
+		seg_sum->ss_rm[i] = ba;		// record reverse mapping
+		sc.ss_modified = true;
+		seg_sum->ss_alloc = i + 1;	// advnace the alloc pointer
+		if (seg_sum->ss_alloc == SEG_SUM_OFFSET)
+			_seg_alloc();
 
-			my_write(sa, data, 1);
-			seg_sum->ss_rm[i] = ba;		// record reverse mapping
-			sc.ss_modified = true;
-			seg_sum->ss_alloc = i + 1;	// advnace the alloc pointer
-			if (seg_sum->ss_alloc == SEG_SUM_OFFSET)
-				_seg_alloc();
-
-			if (IS_META_ADDR(ba))
-				++sc.other_write_count;
-			else {
-				++sc.data_write_count;
-				// record the forward mapping for the %ba
-				// the forward mapping must be recorded after
-				// the segment summary block write
-				file_write_4byte(sc.superblock.fd_cur, ba, sa);
-			}
-			is_called = false;
-			return sa;
+		if (IS_META_ADDR(ba))
+			++sc.other_write_count;
+		else {
+			++sc.data_write_count;
+			// record the forward mapping for the %ba
+			// the forward mapping must be recorded after
+			// the segment summary block write
+			file_write_4byte(sc.superblock.fd_cur, ba, sa);
 		}
-		_seg_alloc();
+		is_called = false;
+		return sa;
 	}
+	_seg_alloc();
+	goto again;
 }
 
 static uint32_t
@@ -1314,15 +1322,16 @@ fbuf_clean_queue_check(void)
 	}
 }
 
+// write back all the dirty fbufs to disk
 static void
 fbuf_cache_flush(void)
 {
 	int	i;
-	struct _fbuf	*fbuf;
+	struct _fbuf *fbuf;
 	struct _fbuf *clean_next, *dirty_next, *dirty_prev;
-	struct _fbuf_sentinel	*queue_sentinel;
-	struct _fbuf_sentinel	*dirty_sentinel;
-	struct _fbuf_sentinel	*clean_sentinel;
+	struct _fbuf_sentinel *queue_sentinel;
+	struct _fbuf_sentinel *dirty_sentinel;
+	struct _fbuf_sentinel *clean_sentinel;
 
 	// write back all the dirty leaf nodes to disk
 	queue_sentinel = &sc.fbuf_queue[QUEUE_LEAF_DIRTY];
@@ -1385,26 +1394,31 @@ fbuf_cache_invalidate_fd(int fd1, int fd2)
 {
 	struct _fbuf *fbuf;
 
-	for (fbuf = sc.fbufs; fbuf < &sc.fbufs[sc.fbuf_count]; ++fbuf)
+	for (int i = 0; i < sc.fbuf_count; ++i)
 	{
+		fbuf = &sc.fbufs[i];
+		MY_ASSERT(!fbuf->fc.modified);
 		if (fbuf->ma.uint32 == BLOCK_INVALID) {
+			// the fbufs on (FBUF_BUCKET_CNT-1) BUCKET must have
+			// its ma equal to BLOCK_INVALID
 			MY_ASSERT(fbuf->bucket_which == FBUF_BUCKET_CNT-1);
 			continue;
 		}
-		MY_ASSERT(IS_META_ADDR(fbuf->ma.uint32));
 		if (fbuf->ma.fd == fd1 || fbuf->ma.fd == fd2) {
 			MY_ASSERT(fbuf->bucket_which != FBUF_BUCKET_CNT-1);
-			fbuf->parent = NULL;
-			fbuf->child_cnt = 0;
-			fbuf->ma.uint32 = BLOCK_INVALID;
+			fbuf->fc.accessed = false; // so it will be recycled sooner
 			fbuf_bucket_remove(fbuf);
+			fbuf->parent = NULL;
+			fbuf->ma.uint32 = BLOCK_INVALID;
 			fbuf_bucket_insert_head(FBUF_BUCKET_CNT-1, fbuf);
 			if (fbuf->queue_which != QUEUE_LEAF_CLEAN) {
 				// it is an internal node, move it to QUEUE_LEAF_CLEAN
 				MY_ASSERT(fbuf->queue_which != QUEUE_LEAF_DIRTY);
+				fbuf->child_cnt = 0;
 				fbuf_queue_remove(fbuf);
 				fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
-			}
+			} else
+				MY_ASSERT(fbuf->child_cnt == 0);
 		}
 	}
 }
@@ -1587,6 +1601,7 @@ again:
 	}
 
 	MY_ASSERT(!fbuf->fc.modified);
+	MY_ASSERT(fbuf->child_cnt == 0);
 	sc.fbuf_alloc = fbuf->fc.queue_next;
 	if (depth != META_LEAF_DEPTH) {
 		// for fbuf allocated for internal nodes insert it immediately
