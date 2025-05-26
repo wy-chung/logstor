@@ -62,15 +62,16 @@ e-mail: wy-chung@outlook.com
 
 enum {
 	SECTOR_NULL,	// the metadata are all NULL
-	SECTOR_DEL,	// don't look further, it is NULL
-	SECTOR_CACHE,	// the root sector is still in the cache
+	SECTOR_DEL,	// the file does not exist or don't look the mapping further, it is NULL
+	SECTOR_CACHE,	// the root sector of the file is still in the cache
 };
 
 #define FBUF_CLEAN_THRESHOLD	32
 #define FBUF_MIN	1564
 #define FBUF_MAX	(FBUF_MIN * 2)
 // the last bucket is reserved for queuing fbufs that will not be searched
-#define FBUF_BUCKET_CNT	(911+1)	// this should be a prime number plus 1
+#define FBUF_BUCKET_LAST 953	// this should be a prime number
+#define FBUF_BUCKET_CNT	(FBUF_BUCKET_LAST+1)
 
 #define FD_COUNT	4		// max number of metadata files supported
 #define FD_INVALID	FD_COUNT	// the valid file descriptor are 0 to 3
@@ -286,7 +287,7 @@ static void fbuf_write(struct _fbuf *fbuf);
 static struct _fbuf *fbuf_alloc(union meta_addr ma, int depth);
 static struct _fbuf *fbuf_cache_access(union meta_addr ma);
 static void fbuf_cache_flush(void);
-static void fbuf_cache_invalidate_fd(int fd1, int fd2);
+static void fbuf_cache_flush_and_invalidate_fd(int fd1, int fd2);
 static void fbuf_clean_queue_check(void);
 
 static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
@@ -513,6 +514,9 @@ int logstor_delete(off_t offset, void *data __unused, off_t length)
 void
 logstor_commit(void)
 {
+#if 1
+	fbuf_cache_flush_and_invalidate_fd(sc.superblock.fd_cur, FD_INVALID);
+#else
 	uint32_t block_max = sc.superblock.block_cnt_max;
 	uint32_t sa;
 
@@ -543,19 +547,21 @@ logstor_commit(void)
 	}
 
 	// lock metadata
-	fbuf_cache_flush();
-	fbuf_cache_invalidate_fd(sc.superblock.fd_prev, sc.superblock.fd_snap);
+	int fd_prev = sc.superblock.fd_prev;
+	int fd_snap = sc.superblock.fd_snap;
+	fbuf_cache_flush_and_invalidate_fd(fd_prev, fd_snap);
+	sc.superblock.fd_root[fd_prev] = SECTOR_DEL;
+	sc.superblock.fd_root[fd_snap] = SECTOR_DEL;
 	// move fd_snap_new to fd_snap
 	sc.superblock.fd_snap = sc.superblock.fd_snap_new;
-	// delete fd_prev and fd_snap_new
-	sc.superblock.fd_root[sc.superblock.fd_prev] = SECTOR_DEL;
-	sc.superblock.fd_root[sc.superblock.fd_snap_new] = SECTOR_DEL;
+	// delete fd_prev and fd_snap
 	sc.superblock.fd_prev = FD_INVALID;
 	sc.superblock.fd_snap_new = FD_INVALID;
 
 	is_sec_valid_fp = is_sec_valid_normal;
 	logstor_ba2sa_fp = logstor_ba2sa_normal;
 	//unlock metadata
+#endif
 }
 
 uint32_t
@@ -824,10 +830,6 @@ disk_init(int fd)
 #else
 	sb->sb_gen = random();
 #endif	
-	sb->fd_cur = 0;
-	sb->fd_prev = FD_INVALID;
-	sb->fd_snap = FD_INVALID;
-	sb->fd_snap_new = FD_INVALID;
 	sb->seg_cnt = sector_cnt / SECTORS_PER_SEG;
 	if (sizeof(struct _superblock) + sb->seg_cnt > SECTOR_SIZE) {
 		printf("%s: size of superblock %d seg_cnt %d\n",
@@ -846,11 +848,17 @@ disk_init(int fd)
 	printf("%s: sector_cnt %u block_cnt_max %u\n",
 	    __func__, sector_cnt, sb->block_cnt_max);
 #endif
-	// the root sector address for the files
-	for (int i = 0; i < FD_COUNT; i++) {
-		sb->fd_root[i] = SECTOR_NULL;	// SECTOR_NULL means not allocated yet
-	}
 	sb->seg_alloc = SEG_DATA_START;	// start allocate from here
+
+	sb->fd_prev = FD_INVALID;	// mapping does not exist
+	sb->fd_snap = FD_INVALID;
+	sb->fd_snap_new = FD_INVALID;
+	sb->fd_cur = 0;			// current mapping is file 0
+	sb->fd_root[0] = SECTOR_NULL;	// file 0 is all 0
+	// the root sector address for the files 1, 2 and 3
+	for (int i = 1; i < FD_COUNT; i++) {
+		sb->fd_root[i] = SECTOR_DEL;	// the file does not exit
+	}
 
 	// write out super block
 #if defined(RAM_DISK_SIZE)
@@ -1239,19 +1247,20 @@ fbuf_mod_init(void)
 	// insert fbuf to both QUEUE_LEAF_CLEAN and hash queue
 	for (i = 0; i < fbuf_count; ++i) {
 		struct _fbuf *fbuf = &sc.fbufs[i];
-		fbuf->fc.is_sentinel = false;
-		fbuf->fc.accessed = false;
-		fbuf->fc.modified = false;
-		fbuf->parent = NULL;
-		fbuf->child_cnt = 0;
 #if defined(MY_DEBUG)
 		fbuf->index = i;
 #endif
+		fbuf->fc.is_sentinel = false;
+		fbuf->fc.accessed = false;
+		fbuf->fc.modified = false;
 		fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
 		// insert fbuf to the last fbuf bucket
 		// this bucket is not used in hash search
-		fbuf->ma.uint32 = BLOCK_INVALID;
-		fbuf_bucket_insert_head(FBUF_BUCKET_CNT-1, fbuf);
+		// init parent, child_cnt and ma before inserting into FBUF_BUCKET_LAST
+		fbuf->parent = NULL;
+		fbuf->child_cnt = 0;
+		fbuf->ma.uint32 = META_INVALID;
+		fbuf_bucket_insert_head(FBUF_BUCKET_LAST, fbuf);
 	}
 	sc.fbuf_alloc = &sc.fbufs[0];;
 	sc.fbuf_hit = sc.fbuf_miss = 0;
@@ -1286,36 +1295,36 @@ fbuf_clean_queue_check(void)
 {
 	struct _fbuf_sentinel *queue_sentinel;
 	struct _fbuf *fbuf;
-	struct _fbuf *parent;
 
 	if (sc.fbuf_queue_len[QUEUE_LEAF_CLEAN] > FBUF_CLEAN_THRESHOLD)
 		return;
 
 	fbuf_cache_flush();
-
-	// move all parent nodes with child_cnt 0 to clean queue
+	// move all parent nodes with child_cnt 0 to clean queue and last bucket
 	for (int i = QUEUE_IND1; i >= QUEUE_IND0; --i) {
 		queue_sentinel = &sc.fbuf_queue[i];
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
 			MY_ASSERT(fbuf->queue_which == i);
-			MY_ASSERT(!fbuf->fc.modified);
 			struct _fbuf *fbuf_next = fbuf->fc.queue_next;
 			if (fbuf->child_cnt == 0) {
-				parent = fbuf->parent;
-				fbuf->parent = NULL;
-				if (parent) {
+				fbuf_queue_remove(fbuf);
+				fbuf->fc.accessed = false; // so that it can be replaced faster
+				fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
+				if (fbuf->parent) {
 					MY_ASSERT(i == QUEUE_IND1);
+					struct _fbuf *parent = fbuf->parent;
 					--parent->child_cnt;
 					MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
+					fbuf->parent = NULL;
 				}
-				fbuf_queue_remove(fbuf);
-				fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
-				fbuf->fc.accessed = false; // so that it can be replaced faster
-				// insert it to the last bucket so that it cannot be searched
+				// move it to the last bucket so that it cannot be searched
+				// fbufs on the last bucket will have the metadata address META_INVALID
 				fbuf_bucket_remove(fbuf);
-				fbuf->ma.uint32 = BLOCK_INVALID;
-				fbuf_bucket_insert_head(FBUF_BUCKET_CNT-1, fbuf);
+				MY_ASSERT(fbuf->parent == NULL);
+				MY_ASSERT(fbuf->child_cnt = 0);
+				fbuf->ma.uint32 = META_INVALID;
+				fbuf_bucket_insert_head(FBUF_BUCKET_LAST, fbuf);
 			}
 			fbuf = fbuf_next;
 		}
@@ -1388,37 +1397,39 @@ fbuf_cache_flush(void)
 	// don't need to change clean queue's head
 }
 
-// invalid fbufs with file descriptors fd1 or fd2
+// flush the cache and invalid fbufs with file descriptors fd1 or fd2
 static void
-fbuf_cache_invalidate_fd(int fd1, int fd2)
+fbuf_cache_flush_and_invalidate_fd(int fd1, int fd2)
 {
 	struct _fbuf *fbuf;
 
+	fbuf_cache_flush();
 	for (int i = 0; i < sc.fbuf_count; ++i)
 	{
 		fbuf = &sc.fbufs[i];
 		MY_ASSERT(!fbuf->fc.modified);
-		if (fbuf->ma.uint32 == BLOCK_INVALID) {
-			// the fbufs on (FBUF_BUCKET_CNT-1) BUCKET must have
-			// its ma equal to BLOCK_INVALID
-			MY_ASSERT(fbuf->bucket_which == FBUF_BUCKET_CNT-1);
+		if (fbuf->ma.uint32 == META_INVALID) {
+			// the fbufs with metadata address META_INVALID are
+			// linked in bucket FBUF_BUCKET_LAST
+			MY_ASSERT(fbuf->bucket_which == FBUF_BUCKET_LAST);
 			continue;
 		}
+		// move fbufs with fd equals to fd1 or fd2 to the last bucket
 		if (fbuf->ma.fd == fd1 || fbuf->ma.fd == fd2) {
-			MY_ASSERT(fbuf->bucket_which != FBUF_BUCKET_CNT-1);
-			fbuf->fc.accessed = false; // so it will be recycled sooner
+			MY_ASSERT(fbuf->bucket_which != FBUF_BUCKET_LAST);
 			fbuf_bucket_remove(fbuf);
+			// init parent, child_cnt and ma before inserting to bucket FBUF_BUCKET_LAST
 			fbuf->parent = NULL;
-			fbuf->ma.uint32 = BLOCK_INVALID;
-			fbuf_bucket_insert_head(FBUF_BUCKET_CNT-1, fbuf);
+			fbuf->child_cnt = 0;
+			fbuf->ma.uint32 = META_INVALID;
+			fbuf_bucket_insert_head(FBUF_BUCKET_LAST, fbuf);
+			fbuf->fc.accessed = false; // so it will be recycled sooner
 			if (fbuf->queue_which != QUEUE_LEAF_CLEAN) {
 				// it is an internal node, move it to QUEUE_LEAF_CLEAN
 				MY_ASSERT(fbuf->queue_which != QUEUE_LEAF_DIRTY);
-				fbuf->child_cnt = 0;
 				fbuf_queue_remove(fbuf);
 				fbuf_queue_insert_tail(QUEUE_LEAF_CLEAN, fbuf);
-			} else
-				MY_ASSERT(fbuf->child_cnt == 0);
+			}
 		}
 	}
 }
@@ -1478,10 +1489,12 @@ fbuf_queue_remove(struct _fbuf *fbuf)
 static void
 fbuf_hash_insert_head(struct _fbuf *fbuf)
 {
-	unsigned which;
+	unsigned hash;
 
-	which = fbuf->ma.uint32 % (FBUF_BUCKET_CNT-1);
-	fbuf_bucket_insert_head(which, fbuf);
+	// the bucket FBUF_BUCKET_LAST is reserved for storing unused fbufs
+	// so %hash will be [0..FBUF_BUCKET_LAST)
+	hash = fbuf->ma.uint32 % FBUF_BUCKET_LAST;
+	fbuf_bucket_insert_head(hash, fbuf);
 }
 
 static void
@@ -1559,7 +1572,9 @@ fbuf_search(union meta_addr ma)
 	struct _fbuf	*fbuf;
 	struct _fbuf_sentinel	*bucket_sentinel;
 
-	hash = ma.uint32 % (FBUF_BUCKET_CNT-1);
+	// the bucket FBUF_BUCKET_LAST is reserved for storing unused fbufs
+	// so %hash will be [0..FBUF_BUCKET_LAST)
+	hash = ma.uint32 % FBUF_BUCKET_LAST;
 	bucket_sentinel = &sc.fbuf_bucket[hash];
 	fbuf = bucket_sentinel->fc.queue_next;
 	while (fbuf != (struct _fbuf *)bucket_sentinel) {
@@ -1749,8 +1764,10 @@ fbuf_hash_check(void)
 			++total;
 			MY_ASSERT(!fbuf->fc.is_sentinel);
 			MY_ASSERT(fbuf->bucket_which == i);
-			if (i != (FBUF_BUCKET_CNT-1))
-				MY_ASSERT(fbuf->ma.uint32 % (FBUF_BUCKET_CNT-1) == i);
+			if (i == FBUF_BUCKET_LAST)
+				MY_ASSERT(fbuf->ma.uint32 == META_INVALID);
+			else
+				MY_ASSERT(fbuf->ma.uint32 % FBUF_BUCKET_LAST == i);
 			fbuf = fbuf->bucket_next;
 		}
 	}
