@@ -517,9 +517,6 @@ logstor_commit(void)
 #if 1
 	fbuf_cache_flush_and_invalidate_fd(sc.superblock.fd_cur, FD_INVALID);
 #else
-	uint32_t block_max = sc.superblock.block_cnt_max;
-	uint32_t sa;
-
 	// lock metadata
 	// move fd_cur to fd_prev
 	sc.superblock.fd_prev = sc.superblock.fd_cur;
@@ -534,7 +531,10 @@ logstor_commit(void)
 	logstor_ba2sa_fp = logstor_ba2sa_during_commit;
 	// unlock metadata
 
+	uint32_t block_max = sc.superblock.block_cnt_max;
 	for (int ba = 0; ba < block_max; ++ba) {
+		uint32_t sa;
+
 		fbuf_clean_queue_check();
 		sa = file_read_4byte(sc.superblock.fd_prev, ba);
 		if (sa == SECTOR_NULL)
@@ -590,8 +590,10 @@ is_sec_valid_comm(uint32_t sa, uint32_t ba_rev, uint8_t fd[], int fd_cnt)
 {
 	uint32_t sa_rev; // the sector address for ba_rev
 
+	MY_ASSERT(ba_rev < BLOCK_MAX);
 	for (int i = 0; i < fd_cnt; ++i) {
-		sa_rev = file_read_4byte(fd[i], ba_rev);
+		uint8_t _fd = fd[i];
+		sa_rev = file_read_4byte(_fd, ba_rev);
 		if (sa == sa_rev)
 			return true;
 	}
@@ -634,15 +636,21 @@ is_sec_valid(uint32_t sa, uint32_t ba_rev)
 	union meta_addr ma_rev __unused;
 	ma_rev.uint32 = ba_rev;
 #endif
-	if (IS_META_ADDR(ba_rev)) {
-		uint32_t sa_rev = ma2sa((union meta_addr)ba_rev);
-		return (sa == sa_rev);
-	} else
+	if (ba_rev < BLOCK_MAX) {
 		return is_sec_valid_fp(sa, ba_rev);
 #if defined(WYC)
 		is_sec_valid_normal();
 		is_sec_valid_during_commit();
 #endif
+	} else if (ba_rev == BLOCK_INVALID) {
+		return false;
+	} else if (IS_META_ADDR(ba_rev)) {
+		uint32_t sa_rev = ma2sa((union meta_addr)ba_rev);
+		return (sa == sa_rev);
+	} else {
+		MY_PANIC();
+		return false;
+	}
 }
 
 /*
@@ -711,7 +719,7 @@ logstor_ba2sa_comm(uint32_t ba, uint8_t fd[], int fd_cnt)
 {
 	uint32_t sa;
 
-	MY_ASSERT(!IS_META_ADDR(ba));
+	MY_ASSERT(ba < BLOCK_MAX);
 	for (int i = 0; i < fd_cnt; ++i) {
 		sa = file_read_4byte(fd[i], ba);
 		if (sa == SECTOR_DEL) { // don't need to check further
@@ -850,10 +858,10 @@ disk_init(int fd)
 #endif
 	sb->seg_alloc = SEG_DATA_START;	// start allocate from here
 
-	sb->fd_prev = FD_INVALID;	// mapping does not exist
-	sb->fd_snap = FD_INVALID;
-	sb->fd_snap_new = FD_INVALID;
 	sb->fd_cur = 0;			// current mapping is file 0
+	sb->fd_snap = 1;
+	sb->fd_prev = FD_INVALID;	// mapping does not exist
+	sb->fd_snap_new = FD_INVALID;
 	sb->fd_root[0] = SECTOR_NULL;	// file 0 is all 0
 	// the root sector address for the files 1, 2 and 3
 	for (int i = 1; i < FD_COUNT; i++) {
@@ -1084,13 +1092,15 @@ file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
 	MY_ASSERT(fbuf != NULL);
 	fbuf->data[off_4byte] = sa;
 	if (!fbuf->fc.modified) {
+		// move to QUEUE_LEAF_DIRTY
+		MY_ASSERT(fbuf->queue_which == QUEUE_LEAF_CLEAN);
 		fbuf->fc.modified = true;
 		if (fbuf == sc.fbuf_alloc)
 			sc.fbuf_alloc = fbuf->fc.queue_next;
-		MY_ASSERT(fbuf->queue_which == QUEUE_LEAF_CLEAN);
 		fbuf_queue_remove(fbuf);
 		fbuf_queue_insert_tail(QUEUE_LEAF_DIRTY, fbuf);
-	}
+	} else
+		MY_ASSERT(fbuf->queue_which == QUEUE_LEAF_DIRTY);
 }
 
 /*
@@ -1668,7 +1678,7 @@ fbuf_cache_access(union meta_addr ma)
 
 	// cache miss
 	parent = NULL;	// parent for root is NULL
-	ima.uint32 = META_START; // set .meta to 0xFF and all others to 0
+	ima = (union meta_addr){.meta = 0xFF};	// set .meta to 0xFF and all others to 0
 	ima.fd = ma.fd;
 	// read the metadata from root to leaf node
 	for (int i = 0; ; ++i) {
@@ -1853,12 +1863,12 @@ Description:
 void
 logstor_check(void)
 {
-	uint32_t max_block;
+	uint32_t block_cnt;
 
 	printf("%s ...\n", __func__);
-	max_block = logstor_get_block_cnt();
-	MY_ASSERT(!IS_META_ADDR(max_block));
-	for (uint32_t ba = 0; ba < max_block; ++ba) {
+	block_cnt = logstor_get_block_cnt();
+	MY_ASSERT(block_cnt < BLOCK_MAX);
+	for (uint32_t ba = 0; ba < block_cnt; ++ba) {
 		uint32_t sa = logstor_ba2sa_fp(ba);
 #if defined(WYC)
 		logstor_ba2sa_normal();
