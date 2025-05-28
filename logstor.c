@@ -642,11 +642,11 @@ is_sec_valid(uint32_t sa, uint32_t ba_rev)
 		is_sec_valid_normal();
 		is_sec_valid_during_commit();
 #endif
-	} else if (ba_rev == BLOCK_INVALID) {
-		return false;
 	} else if (IS_META_ADDR(ba_rev)) {
 		uint32_t sa_rev = ma2sa((union meta_addr)ba_rev);
 		return (sa == sa_rev);
+	} else if (ba_rev == BLOCK_INVALID) {
+		return false;
 	} else {
 		MY_PANIC();
 		return false;
@@ -1049,17 +1049,17 @@ file_read_4byte(uint8_t fd, uint32_t ba)
 	uint32_t sa;
 	struct _fbuf *fbuf;
 
-	// the fd might be invalid if the file is deleted
-	if (fd >= FD_COUNT)
-		return SECTOR_NULL;
+	MY_ASSERT(fd < FD_COUNT);
 
-	// the initialized reverse map in the segment summary is BLOCK_INVALID
-	// so it is possible that a caller might pass a ba that is >= BLOCK_MAX
-	if (ba >= BLOCK_MAX)
+	// the initialized reverse map in the segment summary is BLOCK_MAX
+	// so it is possible that a caller might pass a ba that is BLOCK_MAX
+	if (ba >= BLOCK_MAX) {
+		MY_ASSERT(ba == BLOCK_INVALID);
 		return SECTOR_NULL;
-
+	}
 	// this file is all 0
-	if (sc.superblock.fd_root[fd] == SECTOR_NULL)
+	if (sc.superblock.fd_root[fd] == SECTOR_NULL ||
+	    sc.superblock.fd_root[fd] == SECTOR_DEL)
 		return SECTOR_NULL;
 
 	fbuf = file_access_4byte(fd, ba, &off_4byte);
@@ -1087,6 +1087,7 @@ file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
 
 	MY_ASSERT(fd < FD_COUNT);
 	MY_ASSERT(ba < BLOCK_MAX);
+	MY_ASSERT(sc.superblock.fd_root[fd] != SECTOR_DEL);
 
 	fbuf = file_access_4byte(fd, ba, &off_4byte);
 	MY_ASSERT(fbuf != NULL);
@@ -1669,8 +1670,7 @@ fbuf_cache_access(union meta_addr ma)
 
 	// get the root sector address of the file %ma.fd
 	sa = sc.superblock.fd_root[ma.fd];
-	if (sa == SECTOR_DEL) // the file does not exist
-		return NULL;
+	MY_ASSERT(sa != SECTOR_DEL);
 
 	fbuf = fbuf_search(ma);
 	if (fbuf != NULL) // cache hit
@@ -1699,7 +1699,7 @@ fbuf_cache_access(union meta_addr ma)
 				MY_ASSERT(i == 0);
 				sc.superblock.fd_root[ma.fd] = SECTOR_CACHE;
 			}
-			if (sa == SECTOR_NULL || sa == SECTOR_CACHE)	// the metadata block does not exist
+			if (sa == SECTOR_NULL)
 				bzero(fbuf->data, sizeof(fbuf->data));
 			else {
 				my_read(sa, fbuf->data, 1);

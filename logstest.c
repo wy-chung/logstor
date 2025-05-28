@@ -83,13 +83,13 @@ gdb_cond0 = i;
 }
 
 static void
-test(int n, unsigned max_block)
+test(int i, unsigned max_block)
 {
 
-	printf("writing %d...\n", n);
+	printf("writing %d...\n", i);
 	test_write(max_block);
 	arrays_check();
-	printf("reading %d...\n", n);
+	printf("reading %d...\n", i);
 	test_read(max_block);
 	logstor_commit();
 	test_read(max_block);
