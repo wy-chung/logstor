@@ -293,8 +293,8 @@ static void fbuf_clean_queue_check(void);
 static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
 static uint32_t ma2sa(union meta_addr ma);
 
-static void my_read (uint32_t sa, void *buf, unsigned size);
-static void my_write(uint32_t sa, const void *buf, unsigned size);
+static void my_read (uint32_t sa, void *buf);
+static void my_write(uint32_t sa, const void *buf);
 
 static void logstor_check(void);
 
@@ -446,7 +446,7 @@ logstor_open(const char *disk_file)
 	// read the segment summary block
 	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
 	uint32_t sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
-	my_read(sa, &sc.seg_sum, 1);
+	my_read(sa, &sc.seg_sum);
 	MY_ASSERT(sc.seg_sum.ss_alloc < SEG_SUM_OFFSET);
 	sc.ss_modified = false;
 	sc.data_write_count = sc.other_write_count = 0;
@@ -581,7 +581,7 @@ _logstor_read(unsigned ba, void *data)
 	if (sa == SECTOR_NULL)
 		bzero(data, SECTOR_SIZE);
 	else {
-		my_read(sa, data, 1);
+		my_read(sa, data);
 	}
 	return sa;
 }
@@ -693,7 +693,7 @@ again:
 		if (is_sec_valid(sa, ba_rev))
 			continue;
 
-		my_write(sa, data, 1);
+		my_write(sa, data);
 		seg_sum->ss_rm[i] = ba;		// record reverse mapping
 		sc.ss_modified = true;
 		seg_sum->ss_alloc = i + 1;	// advnace the alloc pointer
@@ -807,7 +807,7 @@ seg_sum_write(void)
 		return;
 	// segment summary is at the end of a segment
 	sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
-	my_write(sa, (void *)&sc.seg_sum, 1);
+	my_write(sa, (void *)&sc.seg_sum);
 	sc.ss_modified = false;
 	sc.other_write_count++; // the write for the segment summary
 }
@@ -893,7 +893,7 @@ disk_init(int fd)
 	// initialize all segment summary blocks
 	for (int i = SEG_DATA_START; i < seg_cnt; ++i)
 	{	uint32_t sa = sega2sa(i) + SEG_SUM_OFFSET;
-		my_write(sa, &ss, 1);
+		my_write(sa, &ss);
 	}
 	return max_block;
 }
@@ -962,46 +962,46 @@ superblock_write(void)
 		sc.sb_sa = 0;
 	memcpy(buf, &sc.superblock, sb_size);
 	memset(buf + sb_size, 0, SECTOR_SIZE - sb_size);
-	my_write(sc.sb_sa, buf, 1);
+	my_write(sc.sb_sa, buf);
 	sc.sb_modified = false;
 	sc.other_write_count++;
 }
 
 #if defined(RAM_DISK_SIZE)
 static void
-my_read(uint32_t sa, void *buf, unsigned size)
+my_read(uint32_t sa, void *buf)
 {
 //MY_BREAK(sa == );
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
-	memcpy(buf, ram_disk + (off_t)sa * SECTOR_SIZE, size * SECTOR_SIZE);
+	memcpy(buf, ram_disk + (off_t)sa * SECTOR_SIZE, SECTOR_SIZE);
 }
 
 static void
-my_write(uint32_t sa, const void *buf, unsigned size)
+my_write(uint32_t sa, const void *buf)
 {
 //MY_BREAK(sa == );
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
-	memcpy(ram_disk + (off_t)sa * SECTOR_SIZE , buf, size * SECTOR_SIZE);
+	memcpy(ram_disk + (off_t)sa * SECTOR_SIZE , buf, SECTOR_SIZE);
 }
 #else
 static void
-my_read(uint32_t sa, void *buf, unsigned size)
+my_read(uint32_t sa, void *buf)
 {
 	ssize_t bc; // byte count
 
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
-	bc = pread(sc.disk_fd, buf, size * SECTOR_SIZE, (off_t)sa * SECTOR_SIZE);
-	MY_ASSERT(bc == size * SECTOR_SIZE);
+	bc = pread(sc.disk_fd, buf, SECTOR_SIZE, (off_t)sa * SECTOR_SIZE);
+	MY_ASSERT(bc == SECTOR_SIZE);
 }
 
 static void
-my_write(uint32_t sa, const void *buf, unsigned size)
+my_write(uint32_t sa, const void *buf)
 {
 	ssize_t bc; // byte count
 
 	MY_ASSERT(sa < sc.superblock.seg_cnt * SECTORS_PER_SEG);
-	bc = pwrite(sc.disk_fd, buf, size * SECTOR_SIZE, (off_t)sa * SECTOR_SIZE);
-	MY_ASSERT(bc == size * SECTOR_SIZE);
+	bc = pwrite(sc.disk_fd, buf, SECTOR_SIZE, (off_t)sa * SECTOR_SIZE);
+	MY_ASSERT(bc == SECTOR_SIZE);
 }
 #endif
 
@@ -1024,7 +1024,7 @@ _seg_alloc(void)
 		sc.superblock.seg_alloc = SEG_DATA_START;
 	MY_ASSERT(sc.superblock.seg_alloc != sc.seg_alloc_start);
 	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
-	my_read(sc.seg_alloc_sa + SEG_SUM_OFFSET, &sc.seg_sum, 1);
+	my_read(sc.seg_alloc_sa + SEG_SUM_OFFSET, &sc.seg_sum);
 	sc.seg_sum.ss_alloc = 0;
 }
 
@@ -1710,7 +1710,7 @@ fbuf_cache_access(union meta_addr ma)
 				bzero(fbuf->data, sizeof(fbuf->data));
 			else {
 				MY_ASSERT( i != 0 || sa != SECTOR_CACHE);
-				my_read(sa, fbuf->data, 1);
+				my_read(sa, fbuf->data);
 			}
 #if defined(MY_DEBUG)
 			fbuf->sa = sa;
@@ -1857,7 +1857,7 @@ logstor_sa2ba(uint32_t sa)
 	seg_off = sa & (SECTORS_PER_SEG - 1);
 	MY_ASSERT(seg_off != SEG_SUM_OFFSET);
 	if (seg_sa != seg_sum_cache_sa) {
-		my_read(seg_sa + SEG_SUM_OFFSET, &seg_sum_cache, 1);
+		my_read(seg_sa + SEG_SUM_OFFSET, &seg_sum_cache);
 		seg_sum_cache_sa = seg_sa;
 	}
 	return (seg_sum_cache.ss_rm[seg_off]);
