@@ -444,6 +444,7 @@ logstor_open(const char *disk_file)
 	sc.sb_modified = false;
 
 	// read the segment summary block
+	MY_ASSERT(sc.superblock.seg_alloc >= SEG_DATA_START);
 	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
 	uint32_t sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
 	my_read(sa, &sc.seg_sum);
@@ -581,6 +582,7 @@ _logstor_read(unsigned ba, void *data)
 	if (sa == SECTOR_NULL)
 		bzero(data, SECTOR_SIZE);
 	else {
+		MY_ASSERT(sa >= SECTORS_PER_SEG);
 		my_read(sa, data);
 	}
 	return sa;
@@ -674,7 +676,8 @@ _logstor_write(uint32_t ba, void *data)
 	ma.uint32 = ba;
 #endif
 
-	MY_ASSERT(IS_META_ADDR(ba) || ba < sc.superblock.block_cnt_max);
+	MY_ASSERT(ba < sc.superblock.block_cnt_max || IS_META_ADDR(ba));
+	MY_ASSERT(sc.seg_alloc_sa >= SECTORS_PER_SEG);
 	MY_ASSERT(!is_called); // recursive call is not allowed
 	is_called = true;
 
@@ -806,6 +809,7 @@ seg_sum_write(void)
 	if (!sc.ss_modified)
 		return;
 	// segment summary is at the end of a segment
+	MY_ASSERT(sc.seg_alloc_sa >= SECTORS_PER_SEG);
 	sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
 	my_write(sa, (void *)&sc.seg_sum);
 	sc.ss_modified = false;
@@ -1022,7 +1026,9 @@ _seg_alloc(void)
 	MY_ASSERT(sc.superblock.seg_alloc < sc.superblock.seg_cnt);
 	if (++sc.superblock.seg_alloc == sc.superblock.seg_cnt)
 		sc.superblock.seg_alloc = SEG_DATA_START;
-	MY_ASSERT(sc.superblock.seg_alloc != sc.seg_alloc_start);
+	if (sc.superblock.seg_alloc == sc.seg_alloc_start)
+		// has accessed all the segment summary blocks
+		MY_PANIC();
 	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
 	my_read(sc.seg_alloc_sa + SEG_SUM_OFFSET, &sc.seg_sum);
 	sc.seg_sum.ss_alloc = 0;
@@ -1709,7 +1715,7 @@ fbuf_cache_access(union meta_addr ma)
 			if (sa == SECTOR_NULL)
 				bzero(fbuf->data, sizeof(fbuf->data));
 			else {
-				MY_ASSERT( i != 0 || sa != SECTOR_CACHE);
+				MY_ASSERT(sa >= SECTORS_PER_SEG);
 				my_read(sa, fbuf->data);
 			}
 #if defined(MY_DEBUG)
@@ -1854,6 +1860,7 @@ logstor_sa2ba(uint32_t sa)
 	unsigned seg_off;
 
 	seg_sa = sa & ~(SECTORS_PER_SEG - 1);
+	MY_ASSERT(seg_sa != 0);
 	seg_off = sa & (SECTORS_PER_SEG - 1);
 	MY_ASSERT(seg_off != SEG_SUM_OFFSET);
 	if (seg_sa != seg_sum_cache_sa) {
