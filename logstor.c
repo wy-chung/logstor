@@ -514,7 +514,7 @@ int logstor_delete(off_t offset, void *data __unused, off_t length)
 void
 logstor_commit(void)
 {
-#if 1
+#if 0
 	fbuf_cache_flush_and_invalidate_fd(sc.superblock.fd_cur, FD_INVALID);
 #else
 	// lock metadata
@@ -557,6 +557,8 @@ logstor_commit(void)
 	// delete fd_prev and fd_snap
 	sc.superblock.fd_prev = FD_INVALID;
 	sc.superblock.fd_snap_new = FD_INVALID;
+	sc.sb_modified = true;
+	superblock_write();
 
 	is_sec_valid_fp = is_sec_valid_normal;
 	logstor_ba2sa_fp = logstor_ba2sa_normal;
@@ -849,7 +851,7 @@ disk_init(int fd)
 	seg_cnt = sb->seg_cnt;
 	uint32_t max_block =
 	    (seg_cnt - SEG_DATA_START) * BLOCKS_PER_SEG -
-	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT * 2.1;
+	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT * 4;
 	MY_ASSERT(max_block < 0x40000000); // 1G
 	sb->block_cnt_max = max_block;
 #if defined(MY_DEBUG)
@@ -953,8 +955,8 @@ superblock_write(void)
 	size_t sb_size = sizeof(sc.superblock);
 	char buf[SECTOR_SIZE];
 
-	if (!sc.sb_modified)
-		return;
+	//if (!sc.sb_modified)
+	//	return;
 	sc.superblock.sb_gen++;
 	if (++sc.sb_sa == SECTORS_PER_SEG)
 		sc.sb_sa = 0;
@@ -1206,9 +1208,6 @@ ma2pma(union meta_addr ma, unsigned *pindex_out)
 static uint32_t
 ma2sa(union meta_addr ma)
 {
-	struct _fbuf *parent;	// parent buffer
-	union meta_addr pma;	// parent's metadata address
-	unsigned pindex;	// index in the parent indirect block
 	uint32_t sa;
 
 	switch (ma.depth)
@@ -1218,10 +1217,18 @@ ma2sa(union meta_addr ma)
 		break;
 	case 1:
 	case 2:
-		pma = ma2pma(ma, &pindex);
-		parent = fbuf_cache_access(pma);
-		MY_ASSERT(parent != NULL);
-		sa = parent->data[pindex];
+		if (sc.superblock.fd_root[ma.fd] == SECTOR_DEL)
+			sa = SECTOR_NULL;
+		else {
+			struct _fbuf *parent;	// parent buffer
+			union meta_addr pma;	// parent's metadata address
+			unsigned pindex;	// index in the parent indirect block
+
+			pma = ma2pma(ma, &pindex);
+			parent = fbuf_cache_access(pma);
+			MY_ASSERT(parent != NULL);
+			sa = parent->data[pindex];
+		}
 		break;
 	case 3: // it is an invalid metadata address
 		sa = SECTOR_NULL;
@@ -1333,7 +1340,7 @@ fbuf_clean_queue_check(void)
 				// fbufs on the last bucket will have the metadata address META_INVALID
 				fbuf_bucket_remove(fbuf);
 				MY_ASSERT(fbuf->parent == NULL);
-				MY_ASSERT(fbuf->child_cnt = 0);
+				MY_ASSERT(fbuf->child_cnt == 0);
 				fbuf->ma.uint32 = META_INVALID;
 				fbuf_bucket_insert_head(FBUF_BUCKET_LAST, fbuf);
 			}
@@ -1702,8 +1709,8 @@ fbuf_cache_access(union meta_addr ma)
 			if (sa == SECTOR_NULL)
 				bzero(fbuf->data, sizeof(fbuf->data));
 			else {
+				MY_ASSERT( i != 0 || sa != SECTOR_CACHE);
 				my_read(sa, fbuf->data, 1);
-				//sc.other_write_count++;
 			}
 #if defined(MY_DEBUG)
 			fbuf->sa = sa;
