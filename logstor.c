@@ -285,7 +285,7 @@ static void fbuf_bucket_insert_head(int which, struct _fbuf *fbuf);
 static void fbuf_bucket_remove(struct _fbuf *fbuf);
 static void fbuf_write(struct _fbuf *fbuf);
 static struct _fbuf *fbuf_alloc(union meta_addr ma, int depth);
-static struct _fbuf *fbuf_cache_access(union meta_addr ma);
+static struct _fbuf *fbuf_access(union meta_addr ma);
 static void fbuf_cache_flush(void);
 static void fbuf_cache_flush_and_invalidate_fd(int fd1, int fd2);
 static void fbuf_clean_queue_check(void);
@@ -948,6 +948,9 @@ superblock_read(void)
 	if (sb->seg_alloc >= sb->seg_cnt)
 		return EINVAL;
 
+	for (i=0; i<FD_COUNT; ++i)
+		if (sb->fd_root[i] == SECTOR_CACHE)
+			sb->fd_root[i] = SECTOR_NULL;
 	memcpy(&sc.superblock, sb, sizeof(sc.superblock));
 
 	return 0;
@@ -961,6 +964,31 @@ superblock_write(void)
 
 	//if (!sc.sb_modified)
 	//	return;
+#if defined(MY_DEBUG)
+	for (int i=0; i<4; ++i) {
+  #if 1
+		MY_ASSERT(sc.superblock.fd_root[i] != SECTOR_CACHE);
+  #else
+		if (sc.superblock.fd_root[i] == SECTOR_CACHE) {
+			// if the root fbuf is cached all its data should be 0
+			struct _fbuf_sentinel *queue_sentinel;
+			struct _fbuf *fbuf;
+			queue_sentinel = &sc.fbuf_queue[0];
+			fbuf = queue_sentinel->fc.queue_next;
+			// find the root fbuf of the file %i
+			while (fbuf != (struct _fbuf *)queue_sentinel) {
+				if (fbuf->ma.fd == i)
+					break;
+				fbuf = fbuf->fc.queue_next;
+			}
+			MY_ASSERT(fbuf != (struct _fbuf *)queue_sentinel);
+			// make sure that all its data are 0
+			for (int j=0; j<1024; ++j)
+				MY_ASSERT(fbuf->data[j] == 0);
+		}
+  #endif
+	}
+#endif
 	sc.superblock.sb_gen++;
 	if (++sc.sb_sa == SECTORS_PER_SEG)
 		sc.sb_sa = 0;
@@ -1139,7 +1167,7 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *off_4byte)
 	ma.depth = META_LEAF_DEPTH;
 	ma.fd = fd;
 	ma.meta = 0xFF;	// for metadata address, bits 31:24 are all 1s
-	fbuf = fbuf_cache_access(ma);
+	fbuf = fbuf_access(ma);
 	return fbuf;
 }
 
@@ -1231,7 +1259,7 @@ ma2sa(union meta_addr ma)
 			unsigned pindex;	// index in the parent indirect block
 
 			pma = ma2pma(ma, &pindex);
-			parent = fbuf_cache_access(pma);
+			parent = fbuf_access(pma);
 			MY_ASSERT(parent != NULL);
 			sa = parent->data[pindex];
 		}
@@ -1377,7 +1405,7 @@ fbuf_cache_flush(void)
 		fbuf_write(fbuf);
 		fbuf = fbuf->fc.queue_next;
 	}
-
+//MY_BREAK(gdb_cond0 == 1 && gdb_cond1 ==13314);
 	// write back all the modified internal nodes to disk
 	for (i = QUEUE_IND1; i >= 0; --i) {
 		queue_sentinel = &sc.fbuf_queue[i];
@@ -1670,7 +1698,7 @@ Description:
     Read or write the file buffer with metadata address @ma
 */
 static struct _fbuf *
-fbuf_cache_access(union meta_addr ma)
+fbuf_access(union meta_addr ma)
 {
 	uint32_t sa;	// sector address where the metadata is stored
 	unsigned index;
@@ -1710,11 +1738,12 @@ fbuf_cache_access(union meta_addr ma)
 				MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
 			} else {
 				MY_ASSERT(i == 0);
-				sc.superblock.fd_root[ma.fd] = SECTOR_CACHE;
 			}
-			if (sa == SECTOR_NULL)
+			if (sa == SECTOR_NULL) {
 				bzero(fbuf->data, sizeof(fbuf->data));
-			else {
+				if (i == 0)
+					sc.superblock.fd_root[ma.fd] = SECTOR_CACHE;
+			} else {
 				MY_ASSERT(sa >= SECTORS_PER_SEG);
 				my_read(sa, fbuf->data);
 			}
