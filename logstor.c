@@ -964,31 +964,10 @@ superblock_write(void)
 
 	//if (!sc.sb_modified)
 	//	return;
-#if defined(MY_DEBUG)
-	for (int i=0; i<4; ++i) {
-  #if 1
+
+	for (int i = 0; i < 4; ++i) {
 		MY_ASSERT(sc.superblock.fd_root[i] != SECTOR_CACHE);
-  #else
-		if (sc.superblock.fd_root[i] == SECTOR_CACHE) {
-			// if the root fbuf is cached all its data should be 0
-			struct _fbuf_sentinel *queue_sentinel;
-			struct _fbuf *fbuf;
-			queue_sentinel = &sc.fbuf_queue[0];
-			fbuf = queue_sentinel->fc.queue_next;
-			// find the root fbuf of the file %i
-			while (fbuf != (struct _fbuf *)queue_sentinel) {
-				if (fbuf->ma.fd == i)
-					break;
-				fbuf = fbuf->fc.queue_next;
-			}
-			MY_ASSERT(fbuf != (struct _fbuf *)queue_sentinel);
-			// make sure that all its data are 0
-			for (int j=0; j<1024; ++j)
-				MY_ASSERT(fbuf->data[j] == 0);
-		}
-  #endif
 	}
-#endif
 	sc.superblock.sb_gen++;
 	if (++sc.sb_sa == SECTORS_PER_SEG)
 		sc.sb_sa = 0;
@@ -1251,7 +1230,8 @@ ma2sa(union meta_addr ma)
 		break;
 	case 1:
 	case 2:
-		if (sc.superblock.fd_root[ma.fd] == SECTOR_DEL)
+		if (sc.superblock.fd_root[ma.fd] == SECTOR_NULL ||
+		    sc.superblock.fd_root[ma.fd] == SECTOR_DEL)
 			sa = SECTOR_NULL;
 		else {
 			struct _fbuf *parent;	// parent buffer
@@ -1405,7 +1385,7 @@ fbuf_cache_flush(void)
 		fbuf_write(fbuf);
 		fbuf = fbuf->fc.queue_next;
 	}
-//MY_BREAK(gdb_cond0 == 1 && gdb_cond1 ==13314);
+
 	// write back all the modified internal nodes to disk
 	for (i = QUEUE_IND1; i >= 0; --i) {
 		queue_sentinel = &sc.fbuf_queue[i];
