@@ -208,7 +208,7 @@ struct _fbuf { // file buffer
 /*
 	logstor soft control
 */
-struct g_logstor_softc {
+struct logstor_softc {
 	uint32_t seg_alloc_start;// the starting segment for _logstor_write
 	uint32_t seg_alloc_sa;	// the sector address of the segment for allocation
 	struct _seg_sum seg_sum;// segment summary for the hot segment
@@ -257,7 +257,7 @@ static union {
 } *ram4k;
  #endif
 #endif
-static struct g_logstor_softc sc;
+static struct logstor_softc sc;
 
 static uint32_t _logstor_read(uint32_t ba, void *data);
 static uint32_t _logstor_write(uint32_t ba, void *data);
