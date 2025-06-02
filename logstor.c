@@ -215,7 +215,7 @@ struct logstor_softc {
 	uint32_t sb_sa; 	// superblock's sector address
 	bool sb_modified;	// is the super block modified
 	bool ss_modified;	// is segment summary modified
-	
+
 	int fbuf_count;
 	struct _fbuf *fbufs;	// an array of fbufs
 	struct _fbuf *fbuf_alloc; // point to the fbuf candidate for replacement
@@ -296,8 +296,6 @@ static uint32_t ma2sa(union meta_addr ma);
 static void my_read (uint32_t sa, void *buf);
 static void my_write(uint32_t sa, const void *buf);
 
-static void logstor_check(void);
-
 static uint32_t logstor_ba2sa_normal(uint32_t ba);
 static uint32_t logstor_ba2sa_during_commit(uint32_t ba);
 static bool is_sec_valid_normal(uint32_t sa, uint32_t ba_rev);
@@ -307,6 +305,8 @@ static bool (*is_sec_valid_fp)(uint32_t sa, uint32_t ba_rev) = is_sec_valid_norm
 static uint32_t (*logstor_ba2sa_fp)(uint32_t ba) = logstor_ba2sa_normal;
 
 #if defined(MY_DEBUG)
+static void logstor_check(void);
+
 void my_break(void)
 {
 }
@@ -408,7 +408,9 @@ uint32_t logstor_init(void)
 #if defined(RAM_DISK_SIZE)
 	ram_disk = malloc(RAM_DISK_SIZE);
 	MY_ASSERT(ram_disk != NULL);
+ #if defined(MY_DEBUG)
 	ram4k = (void *)ram_disk;
+ #endif
 	disk_fd = -1;
 #else
 	disk_fd = open(disk_file, O_WRONLY);
@@ -453,8 +455,9 @@ logstor_open(const char *disk_file)
 	sc.data_write_count = sc.other_write_count = 0;
 
 	fbuf_mod_init();
+#if defined(MY_DEBUG)
 	logstor_check();
-
+#endif
 	return 0;
 }
 
@@ -678,7 +681,8 @@ _logstor_write(uint32_t ba, void *data)
 
 	MY_ASSERT(ba < sc.superblock.block_cnt_max || IS_META_ADDR(ba));
 	MY_ASSERT(sc.seg_alloc_sa >= SECTORS_PER_SEG);
-	MY_ASSERT(!is_called); // recursive call is not allowed
+	if (is_called) // recursive call is not allowed
+		exit(1);
 	is_called = true;
 
 	// record the starting segment
@@ -843,7 +847,7 @@ disk_init(int fd)
 	sb->sb_gen = arc4random();
 #else
 	sb->sb_gen = random();
-#endif	
+#endif
 	sb->seg_cnt = sector_cnt / SECTORS_PER_SEG;
 	if (sizeof(struct _superblock) + sb->seg_cnt > SECTOR_SIZE) {
 		printf("%s: size of superblock %d seg_cnt %d\n",
@@ -1019,7 +1023,7 @@ my_write(uint32_t sa, const void *buf)
 /*
 Description:
   Allocate a segment for writing
-  
+
 Output:
   Store the segment address into @seg_sum->sega
   Initialize @seg_sum->sum.alloc_p to 0
@@ -1048,7 +1052,7 @@ _seg_alloc(void)
 
 /*
 Description:
- 	Get the sector address of the corresponding @ba in @file
+	Get the sector address of the corresponding @ba in @file
 
 Parameters:
 	@fd: file descriptor
@@ -1087,7 +1091,7 @@ file_read_4byte(uint8_t fd, uint32_t ba)
 
 /*
 Description:
- 	Set the mapping of @ba to @sa in @file
+	Set the mapping of @ba to @sa in @file
 
 Parameters:
 	%fd: file descriptor
