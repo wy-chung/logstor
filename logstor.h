@@ -35,9 +35,6 @@ void my_break(void);
 
 #define	SECTOR_SIZE	0x1000	// 4K
 
-extern uint32_t gdb_cond0;	// for debug
-extern uint32_t gdb_cond1;	// for debug
-
 uint32_t logstor_disk_init(const char *disk_file);
 uint32_t logstor_init(void);
 void logstor_fini(void);
@@ -56,6 +53,9 @@ unsigned logstor_get_fbuf_miss(void);
 void fbuf_queue_check(void);
 void fbuf_hash_check(void);
 #endif
+
+extern uint32_t gdb_cond0;	// for debug
+extern uint32_t gdb_cond1;	// for debug
 
 #if defined(WYC)
 #define roundup2(x, y)	(((x)+((y)-1))&~((y)-1))

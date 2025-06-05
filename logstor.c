@@ -124,7 +124,7 @@ _Static_assert(sizeof(struct _superblock) < SECTOR_SIZE, "The size of the super 
 struct _seg_sum {
 	uint32_t ss_rm[SECTORS_PER_SEG - 1];	// reverse map
 	// reverse map SECTORS_PER_SEG - 1 is not used so we store something here
-	uint32_t ss_alloc;	// the sector for allocation in the segment
+	uint32_t ss_allocp;	// the sector for allocation in the segment
 	//uint32_t ss_gen;  // sequence number. used for redo after system crash
 };
 
@@ -218,7 +218,7 @@ struct logstor_softc {
 
 	int fbuf_count;
 	struct _fbuf *fbufs;	// an array of fbufs
-	struct _fbuf *fbuf_alloc; // point to the fbuf candidate for replacement
+	struct _fbuf *fbuf_allocp; // point to the fbuf candidate for replacement
 	struct _fbuf_sentinel fbuf_queue[QUEUE_CNT];
 	int fbuf_queue_len[QUEUE_CNT];
 
@@ -450,7 +450,7 @@ logstor_open(const char *disk_file)
 	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
 	uint32_t sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
 	my_read(sa, &sc.seg_sum);
-	MY_ASSERT(sc.seg_sum.ss_alloc < SEG_SUM_OFFSET);
+	MY_ASSERT(sc.seg_sum.ss_allocp < SEG_SUM_OFFSET);
 	sc.ss_modified = false;
 	sc.data_write_count = sc.other_write_count = 0;
 
@@ -518,9 +518,6 @@ int logstor_delete(off_t offset, void *data __unused, off_t length)
 void
 logstor_commit(void)
 {
-#if 0
-	fbuf_cache_flush_and_invalidate_fd(sc.superblock.fd_cur, FD_INVALID);
-#else
 	// lock metadata
 	// move fd_cur to fd_prev
 	sc.superblock.fd_prev = sc.superblock.fd_cur;
@@ -567,7 +564,6 @@ logstor_commit(void)
 	is_sec_valid_fp = is_sec_valid_normal;
 	logstor_ba2sa_fp = logstor_ba2sa_normal;
 	//unlock metadata
-#endif
 }
 
 uint32_t
@@ -690,7 +686,7 @@ _logstor_write(uint32_t ba, void *data)
 	// it means that there is no free sector in this disk
 	sc.seg_alloc_start = sc.superblock.seg_alloc;
 again:
-	for (int i = seg_sum->ss_alloc; i < SEG_SUM_OFFSET; ++i)
+	for (int i = seg_sum->ss_allocp; i < SEG_SUM_OFFSET; ++i)
 	{
 		uint32_t sa = sc.seg_alloc_sa + i;
 		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
@@ -703,8 +699,8 @@ again:
 		my_write(sa, data);
 		seg_sum->ss_rm[i] = ba;		// record reverse mapping
 		sc.ss_modified = true;
-		seg_sum->ss_alloc = i + 1;	// advnace the alloc pointer
-		if (seg_sum->ss_alloc == SEG_SUM_OFFSET)
+		seg_sum->ss_allocp = i + 1;	// advnace the alloc pointer
+		if (seg_sum->ss_allocp == SEG_SUM_OFFSET)
 			_seg_alloc();
 
 		if (IS_META_ADDR(ba))
@@ -1042,7 +1038,7 @@ _seg_alloc(void)
 		MY_PANIC();
 	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
 	my_read(sc.seg_alloc_sa + SEG_SUM_OFFSET, &sc.seg_sum);
-	sc.seg_sum.ss_alloc = 0;
+	sc.seg_sum.ss_allocp = 0;
 }
 
 /*********************************************************
@@ -1115,8 +1111,8 @@ file_write_4byte(uint8_t fd, uint32_t ba, uint32_t sa)
 		// move to QUEUE_LEAF_DIRTY
 		MY_ASSERT(fbuf->queue_which == QUEUE_LEAF_CLEAN);
 		fbuf->fc.modified = true;
-		if (fbuf == sc.fbuf_alloc)
-			sc.fbuf_alloc = fbuf->fc.queue_next;
+		if (fbuf == sc.fbuf_allocp)
+			sc.fbuf_allocp = fbuf->fc.queue_next;
 		fbuf_queue_remove(fbuf);
 		fbuf_queue_insert_tail(QUEUE_LEAF_DIRTY, fbuf);
 	} else
@@ -1298,7 +1294,7 @@ fbuf_mod_init(void)
 		fbuf->ma.uint32 = META_INVALID;
 		fbuf_bucket_insert_head(FBUF_BUCKET_LAST, fbuf);
 	}
-	sc.fbuf_alloc = &sc.fbufs[0];;
+	sc.fbuf_allocp = &sc.fbufs[0];;
 	sc.fbuf_hit = sc.fbuf_miss = 0;
 }
 
@@ -1312,8 +1308,8 @@ fbuf_mod_fini(void)
 static inline bool
 is_queue_empty(struct _fbuf_sentinel *sentinel)
 {
-	if ((struct _fbuf_sentinel *)sentinel->fc.queue_next == sentinel) {
-		MY_ASSERT((struct _fbuf_sentinel *)sentinel->fc.queue_prev == sentinel);
+	if (sentinel->fc.queue_next == (struct _fbuf *)sentinel) {
+		MY_ASSERT(sentinel->fc.queue_prev == (struct _fbuf *)sentinel);
 		return true;
 	}
 	return false;
@@ -1575,16 +1571,8 @@ fbuf_bucket_remove(struct _fbuf *fbuf)
 {
 	struct _fbuf *prev;
 	struct _fbuf *next;
-#if defined(MY_DEBUG)
-	struct _fbuf_sentinel *bucket_head;
-	int which = fbuf->bucket_which;
 
-	MY_ASSERT(which < FBUF_BUCKET_CNT);
-	--sc.fbuf_bucket_len[which];
-	bucket_head = &sc.fbuf_bucket[which];
-	MY_ASSERT(fbuf != (struct _fbuf *)bucket_head);
-#endif
-
+	MY_ASSERT(!fbuf->fc.is_sentinel);
 	prev = fbuf->bucket_prev;
 	next = fbuf->bucket_next;
 	if (prev->fc.is_sentinel)
@@ -1635,7 +1623,7 @@ fbuf_alloc(union meta_addr ma, int depth)
 	struct _fbuf *fbuf, *parent;
 
 	queue_sentinel = &sc.fbuf_queue[QUEUE_LEAF_CLEAN];
-	fbuf = sc.fbuf_alloc;
+	fbuf = sc.fbuf_allocp;
 again:
 	while (true) {
 		if (!fbuf->fc.accessed)
@@ -1653,7 +1641,7 @@ again:
 
 	MY_ASSERT(!fbuf->fc.modified);
 	MY_ASSERT(fbuf->child_cnt == 0);
-	sc.fbuf_alloc = fbuf->fc.queue_next;
+	sc.fbuf_allocp = fbuf->fc.queue_next;
 	if (depth != META_LEAF_DEPTH) {
 		// for fbuf allocated for internal nodes insert it immediately
 		// to its internal queue
