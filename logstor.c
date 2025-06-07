@@ -85,7 +85,7 @@ struct _superblock {
 	   The segments are treated as circular buffer
 	 */
 	uint32_t seg_cnt;	// total number of segments
-	uint32_t seg_alloc;	// allocate this segment
+	uint32_t seg_allocp;	// allocate this segment
 	uint32_t sector_cnt_free;
 	// since the max meta file size is 4G (1K*1K*4K) and the entry size is 4
 	// block_cnt_max must be < (4G/4)
@@ -262,7 +262,7 @@ static struct logstor_softc sc;
 static uint32_t _logstor_read(uint32_t ba, void *data);
 static uint32_t _logstor_write(uint32_t ba, void *data);
 
-static void _seg_alloc(void);
+static void seg_alloc(void);
 static void seg_sum_write(void);
 
 static uint32_t disk_init(int fd);
@@ -321,7 +321,7 @@ void my_debug(const char * file, int line, const char *func)
 #endif
 
 #if defined(RAM_DISK_SIZE)
-static off_t
+static inline off_t
 get_mediasize(int fd)
 {
 	return RAM_DISK_SIZE;
@@ -446,8 +446,8 @@ logstor_open(const char *disk_file)
 	sc.sb_modified = false;
 
 	// read the segment summary block
-	MY_ASSERT(sc.superblock.seg_alloc >= SEG_DATA_START);
-	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
+	MY_ASSERT(sc.superblock.seg_allocp >= SEG_DATA_START);
+	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_allocp);
 	uint32_t sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
 	my_read(sa, &sc.seg_sum);
 	MY_ASSERT(sc.seg_sum.ss_allocp < SEG_SUM_OFFSET);
@@ -564,6 +564,13 @@ logstor_commit(void)
 	is_sec_valid_fp = is_sec_valid_normal;
 	logstor_ba2sa_fp = logstor_ba2sa_normal;
 	//unlock metadata
+}
+
+void
+logstor_revert(void)
+{
+	fbuf_cache_flush_and_invalidate_fd(sc.superblock.fd_cur, FD_INVALID);
+	sc.superblock.fd_root[sc.superblock.fd_cur] = SECTOR_NULL;
 }
 
 uint32_t
@@ -684,7 +691,7 @@ _logstor_write(uint32_t ba, void *data)
 	// record the starting segment
 	// if the search for free sector rolls over to the starting segment
 	// it means that there is no free sector in this disk
-	sc.seg_alloc_start = sc.superblock.seg_alloc;
+	sc.seg_alloc_start = sc.superblock.seg_allocp;
 again:
 	for (int i = seg_sum->ss_allocp; i < SEG_SUM_OFFSET; ++i)
 	{
@@ -701,7 +708,7 @@ again:
 		sc.ss_modified = true;
 		seg_sum->ss_allocp = i + 1;	// advnace the alloc pointer
 		if (seg_sum->ss_allocp == SEG_SUM_OFFSET)
-			_seg_alloc();
+			seg_alloc();
 
 		if (IS_META_ADDR(ba))
 			++sc.other_write_count;
@@ -715,7 +722,7 @@ again:
 		is_called = false;
 		return sa;
 	}
-	_seg_alloc();
+	seg_alloc();
 	goto again;
 }
 
@@ -862,7 +869,7 @@ disk_init(int fd)
 	printf("%s: sector_cnt %u block_cnt_max %u\n",
 	    __func__, sector_cnt, sb->block_cnt_max);
 #endif
-	sb->seg_alloc = SEG_DATA_START;	// start allocate from here
+	sb->seg_allocp = SEG_DATA_START;	// start allocate from here
 
 	sb->fd_cur = 0;			// current mapping is file 0
 	sb->fd_snap = 1;
@@ -926,7 +933,7 @@ superblock_read(void)
 	MY_ASSERT(pread(sc.disk_fd, sb, SECTOR_SIZE, 0) == SECTOR_SIZE);
 #endif
 	if (sb->sig != SIG_LOGSTOR ||
-	    sb->seg_alloc >= sb->seg_cnt)
+	    sb->seg_allocp >= sb->seg_cnt)
 		return EINVAL;
 
 	sb_gen = sb->sb_gen;
@@ -945,7 +952,7 @@ superblock_read(void)
 	}
 	sc.sb_sa = (i - 1);
 	sb = (struct _superblock *)buf[(i-1)%2];
-	if (sb->seg_alloc >= sb->seg_cnt)
+	if (sb->seg_allocp >= sb->seg_cnt)
 		return EINVAL;
 
 	for (i=0; i<FD_COUNT; ++i)
@@ -1025,18 +1032,18 @@ Output:
   Initialize @seg_sum->sum.alloc_p to 0
 */
 static void
-_seg_alloc(void)
+seg_alloc(void)
 {
 	// write the previous segment summary to disk if it has been modified
 	seg_sum_write();
 
-	MY_ASSERT(sc.superblock.seg_alloc < sc.superblock.seg_cnt);
-	if (++sc.superblock.seg_alloc == sc.superblock.seg_cnt)
-		sc.superblock.seg_alloc = SEG_DATA_START;
-	if (sc.superblock.seg_alloc == sc.seg_alloc_start)
+	MY_ASSERT(sc.superblock.seg_allocp < sc.superblock.seg_cnt);
+	if (++sc.superblock.seg_allocp == sc.superblock.seg_cnt)
+		sc.superblock.seg_allocp = SEG_DATA_START;
+	if (sc.superblock.seg_allocp == sc.seg_alloc_start)
 		// has accessed all the segment summary blocks
 		MY_PANIC();
-	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_alloc);
+	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_allocp);
 	my_read(sc.seg_alloc_sa + SEG_SUM_OFFSET, &sc.seg_sum);
 	sc.seg_sum.ss_allocp = 0;
 }
@@ -1150,22 +1157,18 @@ file_access_4byte(uint8_t fd, uint32_t ba, uint32_t *off_4byte)
 	return fbuf;
 }
 
-static unsigned
+static inline unsigned
 ma_index_get(union meta_addr ma, unsigned depth)
 {
-	unsigned index;
-
 	switch (depth) {
 	case 0:
-		index = ma.index0;
-		break;
+		return ma.index0;
 	case 1:
-		index = ma.index1;
-		break;
+		return ma.index1;
 	default:
 		MY_PANIC();
+		return 0;
 	}
-	return (index);
 }
 
 static union meta_addr

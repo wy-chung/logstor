@@ -43,6 +43,7 @@ void logstor_close(void);
 uint32_t logstor_read(uint32_t ba, void *data);
 uint32_t logstor_write(uint32_t ba, void *data);
 void logstor_commit(void);
+void logstor_revert(void);
 int logstor_delete(off_t offset, void *data, off_t length);
 uint32_t logstor_get_block_cnt(void);
 unsigned logstor_get_data_write_count(void);

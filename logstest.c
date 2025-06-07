@@ -36,7 +36,7 @@ static void arrays_free(void);
 
 //static uint64_t rdtsc(void);
 static void test(int n, unsigned max_block);
-static void test_write(unsigned max_block);
+static void test_write(unsigned max_block, bool update);
 static void test_read(unsigned max_block);
 static void arrays_check(void);
 
@@ -87,13 +87,17 @@ test(int i, unsigned max_block)
 {
 
 	printf("writing %d...\n", i);
-	test_write(max_block);
-	arrays_check();
-	printf("reading %d...\n", i);
+	test_write(max_block, true); arrays_check();
 	test_read(max_block);
+	printf("commit and read %d...\n", i);
 	logstor_commit();
 	test_read(max_block);
-
+#if 1 // test revert
+	test_write(max_block, false); arrays_check();
+	printf("revert and read %d...\n", i);
+	logstor_revert();
+	test_read(max_block);
+#endif
 	unsigned fbuf_hit = logstor_get_fbuf_hit();
 	unsigned fbuf_miss = logstor_get_fbuf_miss();
 	printf("metadata hit rate %f\n", (double)fbuf_hit / (fbuf_hit + fbuf_miss));
@@ -104,7 +108,7 @@ test(int i, unsigned max_block)
 }
 
 static void
-test_write(unsigned max_block)
+test_write(unsigned max_block, bool update)
 {
 	uint32_t buf[SECTOR_SIZE/4];
 	uint32_t ba, sa;
@@ -120,24 +124,25 @@ test_write(unsigned max_block)
 		if (ba_write_count[ba] != 0) {
 			++overwrite_count;
 		}
-		if (++ba_write_count[ba] == 0)		// wrap around
-			ba_write_count[ba] = UCHAR_MAX;	// set to maximum value
-
-		// set prev_i point to nothing
-		unsigned pre_i = ba2i[ba];
-		if (pre_i != -1)
-			i2ba[pre_i] = -1;
-
-		i2ba[i] = ba;
-		ba2i[ba] = i;
-
 		buf[ba % 4] = i;
 		buf[4] = ba % 4;
 		buf[5] = i;
 		buf[6] = ba;
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
 		sa = logstor_write(ba, buf);
-		ba2sa[ba] = sa;
+		if (update) {
+			if (++ba_write_count[ba] == 0)		// wrap around
+				ba_write_count[ba] = UCHAR_MAX;	// set to maximum value
+
+			// set prev_i point to nothing
+			unsigned pre_i = ba2i[ba];
+			if (pre_i != -1)
+				i2ba[pre_i] = -1;
+
+			i2ba[i] = ba;
+			ba2i[ba] = i;
+			ba2sa[ba] = sa;
+		}
 	}
 	printf("overwrite percent %f\n", (double)overwrite_count/loop_count);
 	unsigned data_write_count = logstor_get_data_write_count();
