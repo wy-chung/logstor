@@ -209,8 +209,8 @@ struct _fbuf { // file buffer
 	logstor soft control
 */
 struct logstor_softc {
-	uint32_t seg_alloc_start;// the starting segment for _logstor_write
-	uint32_t seg_alloc_sa;	// the sector address of the segment for allocation
+	uint32_t seg_allocp_start;// the starting segment for _logstor_write
+	uint32_t seg_allocp_sa;	// the sector address of the segment for allocation
 	struct _seg_sum seg_sum;// segment summary for the hot segment
 	uint32_t sb_sa; 	// superblock's sector address
 	bool sb_modified;	// is the super block modified
@@ -447,8 +447,8 @@ logstor_open(const char *disk_file)
 
 	// read the segment summary block
 	MY_ASSERT(sc.superblock.seg_allocp >= SEG_DATA_START);
-	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_allocp);
-	uint32_t sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
+	sc.seg_allocp_sa = sega2sa(sc.superblock.seg_allocp);
+	uint32_t sa = sc.seg_allocp_sa + SEG_SUM_OFFSET;
 	my_read(sa, &sc.seg_sum);
 	MY_ASSERT(sc.seg_sum.ss_allocp < SEG_SUM_OFFSET);
 	sc.ss_modified = false;
@@ -683,7 +683,7 @@ _logstor_write(uint32_t ba, void *data)
 #endif
 
 	MY_ASSERT(ba < sc.superblock.block_cnt_max || IS_META_ADDR(ba));
-	MY_ASSERT(sc.seg_alloc_sa >= SECTORS_PER_SEG);
+	MY_ASSERT(sc.seg_allocp_sa >= SECTORS_PER_SEG);
 	if (is_called) // recursive call is not allowed
 		exit(1);
 	is_called = true;
@@ -691,11 +691,11 @@ _logstor_write(uint32_t ba, void *data)
 	// record the starting segment
 	// if the search for free sector rolls over to the starting segment
 	// it means that there is no free sector in this disk
-	sc.seg_alloc_start = sc.superblock.seg_allocp;
+	sc.seg_allocp_start = sc.superblock.seg_allocp;
 again:
 	for (int i = seg_sum->ss_allocp; i < SEG_SUM_OFFSET; ++i)
 	{
-		uint32_t sa = sc.seg_alloc_sa + i;
+		uint32_t sa = sc.seg_allocp_sa + i;
 		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
 #if defined(MY_DEBUG)
 		ma_rev.uint32 = ba_rev;
@@ -816,8 +816,8 @@ seg_sum_write(void)
 	if (!sc.ss_modified)
 		return;
 	// segment summary is at the end of a segment
-	MY_ASSERT(sc.seg_alloc_sa >= SECTORS_PER_SEG);
-	sa = sc.seg_alloc_sa + SEG_SUM_OFFSET;
+	MY_ASSERT(sc.seg_allocp_sa >= SECTORS_PER_SEG);
+	sa = sc.seg_allocp_sa + SEG_SUM_OFFSET;
 	my_write(sa, (void *)&sc.seg_sum);
 	sc.ss_modified = false;
 	sc.other_write_count++; // the write for the segment summary
@@ -1040,11 +1040,11 @@ seg_alloc(void)
 	MY_ASSERT(sc.superblock.seg_allocp < sc.superblock.seg_cnt);
 	if (++sc.superblock.seg_allocp == sc.superblock.seg_cnt)
 		sc.superblock.seg_allocp = SEG_DATA_START;
-	if (sc.superblock.seg_allocp == sc.seg_alloc_start)
+	if (sc.superblock.seg_allocp == sc.seg_allocp_start)
 		// has accessed all the segment summary blocks
 		MY_PANIC();
-	sc.seg_alloc_sa = sega2sa(sc.superblock.seg_allocp);
-	my_read(sc.seg_alloc_sa + SEG_SUM_OFFSET, &sc.seg_sum);
+	sc.seg_allocp_sa = sega2sa(sc.superblock.seg_allocp);
+	my_read(sc.seg_allocp_sa + SEG_SUM_OFFSET, &sc.seg_sum);
 	sc.seg_sum.ss_allocp = 0;
 }
 
