@@ -950,8 +950,11 @@ superblock_read(void)
 			break;
 		sb_gen = sb->sb_gen;
 	}
+	if (i == SECTORS_PER_SEG)
+		return EINVAL;
+
 	sc.sb_sa = (i - 1);
-	sb = (struct _superblock *)buf[(i-1)%2];
+	sb = (struct _superblock *)buf[(i-1)%2]; // get the previous valid superblock
 	if (sb->seg_allocp >= sb->seg_cnt)
 		return EINVAL;
 
