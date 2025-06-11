@@ -559,6 +559,8 @@ logstor_commit(void)
 	sc.superblock.fd_prev = FD_INVALID;
 	sc.superblock.fd_snap_new = FD_INVALID;
 	sc.sb_modified = true;
+
+	seg_sum_write();
 	superblock_write();
 
 	is_sec_valid_fp = is_sec_valid_normal;
@@ -837,7 +839,7 @@ disk_init(int fd)
 	uint32_t sector_cnt;
 	struct _superblock *sb;
 	off_t media_size;
-	char buf[SECTOR_SIZE] __attribute__ ((aligned));
+	char buf[SECTOR_SIZE] __attribute__((aligned(4)));
 
 	media_size = get_mediasize(fd);
 	sector_cnt = media_size / SECTOR_SIZE;
@@ -1321,13 +1323,6 @@ is_queue_empty(struct _fbuf_sentinel *sentinel)
 	return false;
 }
 
-static inline void
-queue_init(struct _fbuf_sentinel *sentinel)
-{
-	sentinel->fc.queue_next = (struct _fbuf *)sentinel;
-	sentinel->fc.queue_prev = (struct _fbuf *)sentinel;
-}
-
 static void
 fbuf_clean_queue_check(void)
 {
@@ -1430,8 +1425,8 @@ fbuf_cache_flush(void)
 	dirty_prev->fc.queue_next = clean_next;
 	clean_next->fc.queue_prev = dirty_prev;
 	sc.fbuf_queue_len[QUEUE_LEAF_CLEAN] += sc.fbuf_queue_len[QUEUE_LEAF_DIRTY];
-	sc.fbuf_queue_len[QUEUE_LEAF_DIRTY] = 0;
-	queue_init(dirty_sentinel);
+
+	fbuf_queue_init(QUEUE_LEAF_DIRTY);
 	// don't need to change clean queue's head
 }
 
@@ -1475,16 +1470,16 @@ fbuf_cache_flush_and_invalidate_fd(int fd1, int fd2)
 static void
 fbuf_queue_init(int which)
 {
-	struct _fbuf *fbuf;
+	struct _fbuf_sentinel *queue_head;
 
 	MY_ASSERT(which < QUEUE_CNT);
 	sc.fbuf_queue_len[which] = 0;
-	fbuf = (struct _fbuf *)&sc.fbuf_queue[which];
-	fbuf->fc.queue_next = fbuf;
-	fbuf->fc.queue_prev = fbuf;
-	fbuf->fc.is_sentinel = true;
-	fbuf->fc.accessed = true;
-	fbuf->fc.modified = false;
+	queue_head = &sc.fbuf_queue[which];
+	queue_head->fc.queue_next = (struct _fbuf *)queue_head;
+	queue_head->fc.queue_prev = (struct _fbuf *)queue_head;
+	queue_head->fc.is_sentinel = true;
+	queue_head->fc.accessed = true;
+	queue_head->fc.modified = false;
 }
 
 static void
