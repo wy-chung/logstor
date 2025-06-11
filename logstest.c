@@ -102,8 +102,8 @@ test(int i, unsigned max_block)
 	unsigned fbuf_miss = logstor_get_fbuf_miss();
 	printf("metadata hit rate %f\n", (double)fbuf_hit / (fbuf_hit + fbuf_miss));
 #if defined(MY_DEBUG)
-	fbuf_hash_check();
-	fbuf_queue_check();
+	logstor_hash_check();
+	logstor_queue_check();
 #endif
 }
 

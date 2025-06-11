@@ -51,8 +51,8 @@ unsigned logstor_get_other_write_count(void);
 unsigned logstor_get_fbuf_hit(void);
 unsigned logstor_get_fbuf_miss(void);
 #if defined(MY_DEBUG)
-void fbuf_queue_check(void);
-void fbuf_hash_check(void);
+void logstor_queue_check(void);
+void logstor_hash_check(void);
 #endif
 
 extern uint32_t gdb_cond0;	// for debug
