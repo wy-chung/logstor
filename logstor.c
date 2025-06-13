@@ -54,11 +54,12 @@ e-mail: wy-chung@outlook.com
   so the max block number is 4G/4 = 1G
 */
 #define BLOCK_MAX	0x40000000	// 1G
+// the address [BLOCK_MAX..META_STAR) are invalid block/metadata address
+#define BLOCK_INVALID	(BLOCK_MAX+1)
+#define META_INVALID	(BLOCK_MAX+1)
+
 #define	META_START	(((union meta_addr){.meta = 0xFF}).uint32)	// metadata block address start
 #define	IS_META_ADDR(x)	((x) >= META_START)
-// the address [BLOCK_MAX..META_STAR) are invalid block/metadata address
-#define BLOCK_INVALID	BLOCK_MAX
-#define META_INVALID	BLOCK_MAX
 
 enum {
 	SECTOR_NULL,	// the metadata are all NULL
@@ -618,8 +619,7 @@ is_sec_valid_comm(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev, uint
 
 	MY_ASSERT(ba_rev < BLOCK_MAX);
 	for (int i = 0; i < fd_cnt; ++i) {
-		uint8_t _fd = fd[i];
-		sa_rev = file_read_4byte(sc, _fd, ba_rev);
+		sa_rev = file_read_4byte(sc, fd[i], ba_rev);
 		if (sa == sa_rev)
 			return true;
 	}
