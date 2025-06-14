@@ -38,7 +38,7 @@ e-mail: wy-chung@outlook.com
 
 #define RAM_DISK_SIZE		0x180000000UL // 6G
 
-#define	SIG_LOGSTOR	0x4C4F4753	// "LOGS": Log-Structured Storage
+#define	LOGSTOR_MAGIC	0x4C4F4753	// "LOGS": Log-Structured Storage
 #define	VER_MAJOR	0
 #define	VER_MINOR	1
 
@@ -78,7 +78,7 @@ enum {
 #define FD_INVALID	FD_COUNT	// the valid file descriptor are 0 to 3
 
 struct _superblock {
-	uint32_t sig;		// signature
+	uint32_t magic;
 	uint8_t  ver_major;
 	uint8_t  ver_minor;
 	uint16_t sb_gen;	// the generation number. Used for redo after system crash
@@ -869,7 +869,7 @@ disk_init(struct g_logstor_softc *sc, int fd)
 	sector_cnt = media_size / SECTOR_SIZE;
 
 	sb = (struct _superblock *)buf;
-	sb->sig = SIG_LOGSTOR;
+	sb->magic = LOGSTOR_MAGIC;
 	sb->ver_major = VER_MAJOR;
 	sb->ver_minor = VER_MINOR;
 #if __BSD_VISIBLE
@@ -958,7 +958,7 @@ superblock_read(struct g_logstor_softc *sc)
 #else
 	MY_ASSERT(pread(sc->disk_fd, sb, SECTOR_SIZE, 0) == SECTOR_SIZE);
 #endif
-	if (sb->sig != SIG_LOGSTOR ||
+	if (sb->magic != LOGSTOR_MAGIC ||
 	    sb->seg_allocp >= sb->seg_cnt)
 		return EINVAL;
 
@@ -970,7 +970,7 @@ superblock_read(struct g_logstor_softc *sc)
 #else
 		MY_ASSERT(pread(sc->disk_fd, sb, SECTOR_SIZE, i * SECTOR_SIZE) == SECTOR_SIZE);
 #endif
-		if (sb->sig != SIG_LOGSTOR)
+		if (sb->magic != LOGSTOR_MAGIC)
 			break;
 		if (sb->sb_gen != (uint16_t)(sb_gen + 1)) // IMPORTANT type cast
 			break;
@@ -1330,10 +1330,19 @@ fbuf_mod_init(struct g_logstor_softc *sc)
 	sc->fbuf_hit = sc->fbuf_miss = 0;
 }
 
+// there are 3 kinds of metadata in the system, the fbuf cache, segment summary block and superblock
+static void
+md_update(struct g_logstor_softc *sc)
+{
+	fbuf_cache_flush(sc);
+	seg_sum_write(sc);
+	superblock_write(sc);
+}
+
 static void
 fbuf_mod_fini(struct g_logstor_softc *sc)
 {
-	fbuf_cache_flush(sc);
+	md_update(sc);
 	free(sc->fbufs);
 }
 
@@ -1356,7 +1365,7 @@ fbuf_clean_queue_check(struct g_logstor_softc *sc)
 	if (sc->fbuf_queue_len[QUEUE_LEAF_CLEAN] > FBUF_CLEAN_THRESHOLD)
 		return;
 
-	fbuf_cache_flush(sc);
+	md_update(sc);
 
 	// move all parent nodes with child_cnt 0 to clean queue and last bucket
 	for (int i = QUEUE_IND1; i >= QUEUE_IND0; --i) {
@@ -1425,8 +1434,6 @@ fbuf_cache_flush(struct g_logstor_softc *sc)
 			fbuf = fbuf->fc.queue_next;
 		}
 	}
-	seg_sum_write(sc);
-	superblock_write(sc);
 
 	dirty_sentinel = &sc->fbuf_queue[QUEUE_LEAF_DIRTY];
 	if (is_queue_empty(dirty_sentinel))
@@ -1461,7 +1468,8 @@ fbuf_cache_flush_and_invalidate_fd(struct g_logstor_softc *sc, int fd1, int fd2)
 {
 	struct _fbuf *fbuf;
 
-	fbuf_cache_flush(sc);
+	md_update(sc);
+
 	for (int i = 0; i < sc->fbuf_count; ++i)
 	{
 		fbuf = &sc->fbufs[i];
