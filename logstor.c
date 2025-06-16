@@ -985,8 +985,7 @@ superblock_read(struct g_logstor_softc *sc)
 		return EINVAL;
 
 	for (i=0; i<FD_COUNT; ++i)
-		if (sb->fd_root[i] == SECTOR_CACHE)
-			sb->fd_root[i] = SECTOR_NULL;
+		MY_ASSERT(sb->fd_root[i] != SECTOR_CACHE);
 	memcpy(&sc->superblock, sb, sizeof(sc->superblock));
 
 	return 0;

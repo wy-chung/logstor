@@ -113,6 +113,9 @@ test_write(unsigned max_block, bool update)
 	uint32_t buf[SECTOR_SIZE/4];
 	uint32_t ba, sa;
 
+#if defined(MY_DEBUG)
+	max_block *= 0.96;
+#endif
 	// writing data to logstor
 	int overwrite_count = 0;
 	for (unsigned i = 0 ; i < loop_count ; ++i)
