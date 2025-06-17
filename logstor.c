@@ -1366,33 +1366,31 @@ fbuf_clean_queue_check(struct g_logstor_softc *sc)
 
 	md_update(sc);
 
-	// move all parent nodes with child_cnt 0 to clean queue and last bucket
+	// move all internal nodes with child_cnt 0 to clean queue and last bucket
 	for (int i = QUEUE_IND1; i >= QUEUE_IND0; --i) {
 		queue_sentinel = &sc->fbuf_queue[i];
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
 			MY_ASSERT(fbuf->queue_which == i);
-			struct _fbuf *fbuf_next = fbuf->fc.queue_next;
+			struct _fbuf *next = fbuf->fc.queue_next;
 			if (fbuf->child_cnt == 0) {
 				fbuf_queue_remove(sc, fbuf);
 				fbuf->fc.accessed = false; // so that it can be replaced faster
 				fbuf_queue_insert_tail(sc, QUEUE_LEAF_CLEAN, fbuf);
 				if (fbuf->parent) {
-					MY_ASSERT(i == QUEUE_IND1);
+					MY_ASSERT(i != QUEUE_IND0);
 					struct _fbuf *parent = fbuf->parent;
+					fbuf->parent = NULL;
 					--parent->child_cnt;
 					MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
-					fbuf->parent = NULL;
 				}
 				// move it to the last bucket so that it cannot be searched
 				// fbufs on the last bucket will have the metadata address META_INVALID
 				fbuf_bucket_remove(fbuf);
-				MY_ASSERT(fbuf->parent == NULL);
-				MY_ASSERT(fbuf->child_cnt == 0);
 				fbuf->ma.uint32 = META_INVALID;
 				fbuf_bucket_insert_head(sc, FBUF_BUCKET_LAST, fbuf);
 			}
-			fbuf = fbuf_next;
+			fbuf = next;
 		}
 	}
 }
@@ -1401,64 +1399,49 @@ fbuf_clean_queue_check(struct g_logstor_softc *sc)
 static void
 fbuf_cache_flush(struct g_logstor_softc *sc)
 {
-	int	i;
 	struct _fbuf *fbuf;
-	struct _fbuf *clean_next, *dirty_next, *dirty_prev;
-	struct _fbuf_sentinel *queue_sentinel;
+	struct _fbuf *dirty_first, *dirty_last, *clean_first;
 	struct _fbuf_sentinel *dirty_sentinel;
 	struct _fbuf_sentinel *clean_sentinel;
 
-	// write back all the dirty leaf nodes to disk
-	queue_sentinel = &sc->fbuf_queue[QUEUE_LEAF_DIRTY];
-	fbuf = queue_sentinel->fc.queue_next;
-	while (fbuf != (struct _fbuf *)queue_sentinel) {
-		MY_ASSERT(fbuf->queue_which == QUEUE_LEAF_DIRTY);
-		MY_ASSERT(IS_META_ADDR(fbuf->ma.uint32));
-		MY_ASSERT(fbuf->fc.modified);
-		// for dirty leaf nodes it's always dirty
-		fbuf_write(sc, fbuf);
-		fbuf = fbuf->fc.queue_next;
-	}
-
-	// write back all the modified internal nodes to disk
-	for (i = QUEUE_IND1; i >= 0; --i) {
-		queue_sentinel = &sc->fbuf_queue[i];
+	// write back all the modified nodes to disk
+	for (int i = QUEUE_LEAF_DIRTY; i >= 0; --i) {
+		struct _fbuf_sentinel *queue_sentinel = &sc->fbuf_queue[i];
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
 			MY_ASSERT(fbuf->queue_which == i);
 			MY_ASSERT(IS_META_ADDR(fbuf->ma.uint32));
-			// for non-leaf nodes the fbuf might not be modified
+			// QUEUE_LEAF_DIRTY nodes are always dirty
+			MY_ASSERT(i != QUEUE_LEAF_DIRTY || fbuf->fc.modified);
 			if (__predict_true(fbuf->fc.modified))
 				fbuf_write(sc, fbuf);
 			fbuf = fbuf->fc.queue_next;
 		}
 	}
-
+	// move all fbufs in the dirty leaf queue to clean leaf queue
 	dirty_sentinel = &sc->fbuf_queue[QUEUE_LEAF_DIRTY];
 	if (is_queue_empty(dirty_sentinel))
 		return;
 
-	dirty_next = dirty_sentinel->fc.queue_next;
-	dirty_prev = dirty_sentinel->fc.queue_prev;
+	dirty_first = dirty_sentinel->fc.queue_next;
+	dirty_last = dirty_sentinel->fc.queue_prev;
 
-	// set queue_which to QUEUE_LEAF_CLEAN for all fbufs on QUEUE_LEAF_DIRTY
+	// set queue_which to QUEUE_LEAF_CLEAN for all fbufs on dirty leaf queue
 	fbuf = dirty_sentinel->fc.queue_next;
 	while (fbuf != (struct _fbuf *)dirty_sentinel) {
 		fbuf->queue_which = QUEUE_LEAF_CLEAN;
 		fbuf = fbuf->fc.queue_next;
 	}
-
-	// move all fbufs in QUEUE_LEAF_DIRTY to QUEUE_LEAF_CLEAN
+	// insert dirty leaf queue to the head of clean leaf queue
 	clean_sentinel = &sc->fbuf_queue[QUEUE_LEAF_CLEAN];
-	clean_next = clean_sentinel->fc.queue_next;
-	clean_sentinel->fc.queue_next = dirty_next;
-	dirty_next->fc.queue_prev = (struct _fbuf *)clean_sentinel;
-	dirty_prev->fc.queue_next = clean_next;
-	clean_next->fc.queue_prev = dirty_prev;
+	clean_first = clean_sentinel->fc.queue_next;
+	clean_sentinel->fc.queue_next = dirty_first;
+	dirty_first->fc.queue_prev = (struct _fbuf *)clean_sentinel;
+	dirty_last->fc.queue_next = clean_first;
+	clean_first->fc.queue_prev = dirty_last;
 	sc->fbuf_queue_len[QUEUE_LEAF_CLEAN] += sc->fbuf_queue_len[QUEUE_LEAF_DIRTY];
 
 	fbuf_queue_init(sc, QUEUE_LEAF_DIRTY);
-	// don't need to change clean queue's head
 }
 
 // flush the cache and invalid fbufs with file descriptors fd1 or fd2
