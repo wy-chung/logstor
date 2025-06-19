@@ -294,8 +294,8 @@ static void fbuf_clean_queue_check(struct g_logstor_softc *sc);
 static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
 static uint32_t ma2sa(struct g_logstor_softc *sc, union meta_addr ma);
 
-static void my_read (struct g_logstor_softc *sc, uint32_t sa, void *buf);
-static void my_write(struct g_logstor_softc *sc, uint32_t sa, const void *buf);
+static void my_read (struct g_logstor_softc *sc, void *buf, uint32_t sa);
+static void my_write(struct g_logstor_softc *sc, const void *buf, uint32_t sa);
 
 static uint32_t logstor_ba2sa_normal(struct g_logstor_softc *sc, uint32_t ba);
 static uint32_t logstor_ba2sa_during_commit(struct g_logstor_softc *sc, uint32_t ba);
@@ -454,7 +454,7 @@ logstor_open(const char *disk_file)
 	MY_ASSERT(sc->superblock.seg_allocp >= SEG_DATA_START);
 	sc->seg_allocp_sa = sega2sa(sc->superblock.seg_allocp);
 	uint32_t sa = sc->seg_allocp_sa + SEG_SUM_OFFSET;
-	my_read(sc, sa, &sc->seg_sum);
+	my_read(sc, &sc->seg_sum, sa);
 	MY_ASSERT(sc->seg_sum.ss_allocp < SEG_SUM_OFFSET);
 	sc->ss_modified = false;
 	sc->data_write_count = sc->other_write_count = 0;
@@ -606,7 +606,7 @@ _logstor_read(struct g_logstor_softc *sc, unsigned ba, void *data)
 		bzero(data, SECTOR_SIZE);
 	else {
 		MY_ASSERT(sa >= SECTORS_PER_SEG);
-		my_read(sc, sa, data);
+		my_read(sc, data, sa);
 	}
 	return sa;
 }
@@ -719,7 +719,7 @@ again:
 		if (is_sec_valid(sc, sa, ba_rev))
 			continue;
 
-		my_write(sc, sa, data);
+		my_write(sc, data, sa);
 		seg_sum->ss_rm[i] = ba;		// record reverse mapping
 		sc->ss_modified = true;
 		seg_sum->ss_allocp = i + 1;	// advnace the alloc pointer
@@ -844,7 +844,7 @@ seg_sum_write(struct g_logstor_softc *sc)
 	// segment summary is at the end of a segment
 	MY_ASSERT(sc->seg_allocp_sa >= SECTORS_PER_SEG);
 	sa = sc->seg_allocp_sa + SEG_SUM_OFFSET;
-	my_write(sc, sa, (void *)&sc->seg_sum);
+	my_write(sc, (void *)&sc->seg_sum, sa);
 	sc->ss_modified = false;
 	sc->other_write_count++; // the write for the segment summary
 }
@@ -930,7 +930,7 @@ disk_init(struct g_logstor_softc *sc, int fd)
 	// initialize all segment summary blocks
 	for (int i = SEG_DATA_START; i < seg_cnt; ++i)
 	{	uint32_t sa = sega2sa(i) + SEG_SUM_OFFSET;
-		my_write(sc, sa, &ss);
+		my_write(sc, &ss, sa);
 	}
 	return max_block;
 }
@@ -1008,14 +1008,14 @@ superblock_write(struct g_logstor_softc *sc)
 		sc->sb_sa = 0;
 	memcpy(buf, &sc->superblock, sb_size);
 	memset(buf + sb_size, 0, SECTOR_SIZE - sb_size);
-	my_write(sc, sc->sb_sa, buf);
+	my_write(sc, buf, sc->sb_sa);
 	sc->sb_modified = false;
 	sc->other_write_count++;
 }
 
 #if defined(RAM_DISK_SIZE)
 static void
-my_read(struct g_logstor_softc *sc, uint32_t sa, void *buf)
+my_read(struct g_logstor_softc *sc, void *buf, uint32_t sa)
 {
 //MY_BREAK(sa == );
 	MY_ASSERT(sa < sc->superblock.seg_cnt * SECTORS_PER_SEG);
@@ -1023,7 +1023,7 @@ my_read(struct g_logstor_softc *sc, uint32_t sa, void *buf)
 }
 
 static void
-my_write(struct g_logstor_softc *sc, uint32_t sa, const void *buf)
+my_write(struct g_logstor_softc *sc, const void *buf, uint32_t sa)
 {
 //MY_BREAK(sa == );
 	MY_ASSERT(sa < sc->superblock.seg_cnt * SECTORS_PER_SEG);
@@ -1031,7 +1031,7 @@ my_write(struct g_logstor_softc *sc, uint32_t sa, const void *buf)
 }
 #else
 static void
-my_read(struct g_logstor_softc *sc, uint32_t sa, void *buf)
+my_read(struct g_logstor_softc *sc, void *buf, uint32_t sa)
 {
 	ssize_t bc; // byte count
 
@@ -1041,7 +1041,7 @@ my_read(struct g_logstor_softc *sc, uint32_t sa, void *buf)
 }
 
 static void
-my_write(struct g_logstor_softc *sc, uint32_t sa, const void *buf)
+my_write(struct g_logstor_softc *sc, const void *buf, uint32_t sa)
 {
 	ssize_t bc; // byte count
 
@@ -1072,7 +1072,7 @@ seg_alloc(struct g_logstor_softc *sc)
 		// has accessed all the segment summary blocks
 		MY_PANIC();
 	sc->seg_allocp_sa = sega2sa(sc->superblock.seg_allocp);
-	my_read(sc, sc->seg_allocp_sa + SEG_SUM_OFFSET, &sc->seg_sum);
+	my_read(sc, &sc->seg_sum, sc->seg_allocp_sa + SEG_SUM_OFFSET);
 	sc->seg_sum.ss_allocp = 0;
 }
 
@@ -1733,7 +1733,7 @@ fbuf_access(struct g_logstor_softc *sc, union meta_addr ma)
 					sc->superblock.fd_root[ma.fd] = SECTOR_CACHE;
 			} else {
 				MY_ASSERT(sa >= SECTORS_PER_SEG);
-				my_read(sc, sa, fbuf->data);
+				my_read(sc, fbuf->data, sa);
 			}
 #if defined(MY_DEBUG)
 			fbuf->sa = sa;
@@ -1883,7 +1883,7 @@ sa2ba(struct g_logstor_softc *sc, uint32_t sa)
 	seg_off = sa & (SECTORS_PER_SEG - 1);
 	MY_ASSERT(seg_off != SEG_SUM_OFFSET);
 	if (seg_sa != seg_sum_cache_sa) {
-		my_read(sc, seg_sa + SEG_SUM_OFFSET, &seg_sum_cache);
+		my_read(sc, &seg_sum_cache, seg_sa + SEG_SUM_OFFSET);
 		seg_sum_cache_sa = seg_sa;
 	}
 	return (seg_sum_cache.ss_rm[seg_off]);
