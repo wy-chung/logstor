@@ -21,20 +21,12 @@ e-mail: wy-chung@outlook.com
 #include <linux/fs.h>
 #include <sys/ioctl.h>
 #endif
-#if __BSD_VISIBLE
-#include <sys/disk.h>
-#include "ggate.h"
-#endif
 
 #include "logstor.h"
 
 #define __predict_true(exp)     __builtin_expect((exp), 1)
 #define __predict_false(exp)    __builtin_expect((exp), 0)
 #define __unused		__attribute__((unused))
-
-// convert depth and index to ma
-#define DI2MA(d, i0, i1)\
-	((union meta_addr){.meta=0xFF, .fd=FD_CUR, .depth=d, .index0=i0, .index1=i1}).uint32
 
 #define RAM_DISK_SIZE		0x180000000UL // 6G
 
@@ -115,9 +107,8 @@ struct _superblock {
 	uint8_t fd_snap_new;	// the file descriptor for new snapshot mapping
 };
 
-#if !defined(WYC)
-_Static_assert(sizeof(struct _superblock) < SECTOR_SIZE, "The size of the super block must be smaller than SECTOR_SIZE");
-#endif
+_Static_assert(sizeof(struct _superblock) < SECTOR_SIZE,
+	"The size of the super block must be smaller than SECTOR_SIZE");
 
 /*
   The last sector in a segment is the segment summary. It stores the reverse mapping table
@@ -130,7 +121,7 @@ struct _seg_sum {
 };
 
 _Static_assert(sizeof(struct _seg_sum) == SECTOR_SIZE,
-    "The size of segment summary must be equal to SECTOR_SIZE");
+	"The size of segment summary must be equal to SECTOR_SIZE");
 
 /*
   Forward map and its indirect blocks are also stored in the downstream disk.
@@ -210,6 +201,9 @@ struct _fbuf { // file buffer
 	logstor soft control
 */
 struct g_logstor_softc {
+	bool (*is_sec_valid_fp)(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
+	uint32_t (*ba2sa_fp)(struct g_logstor_softc *sc, uint32_t ba);
+
 	uint32_t seg_allocp_start;// the starting segment for _logstor_write
 	uint32_t seg_allocp_sa;	// the sector address of the segment for allocation
 	struct _seg_sum seg_sum;// segment summary for the hot segment
@@ -297,13 +291,10 @@ static uint32_t ma2sa(struct g_logstor_softc *sc, union meta_addr ma);
 static void my_read (struct g_logstor_softc *sc, void *buf, uint32_t sa);
 static void my_write(struct g_logstor_softc *sc, const void *buf, uint32_t sa);
 
-static uint32_t logstor_ba2sa_normal(struct g_logstor_softc *sc, uint32_t ba);
-static uint32_t logstor_ba2sa_during_commit(struct g_logstor_softc *sc, uint32_t ba);
+static uint32_t ba2sa_normal(struct g_logstor_softc *sc, uint32_t ba);
+static uint32_t ba2sa_during_commit(struct g_logstor_softc *sc, uint32_t ba);
 static bool is_sec_valid_normal(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
 static bool is_sec_valid_during_commit(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
-
-static bool (*is_sec_valid_fp)(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev) = is_sec_valid_normal;
-static uint32_t (*logstor_ba2sa_fp)(struct g_logstor_softc *sc, uint32_t ba) = logstor_ba2sa_normal;
 
 #if defined(MY_DEBUG)
 static void logstor_check(struct g_logstor_softc *sc);
@@ -328,31 +319,6 @@ get_mediasize(int fd)
 	return RAM_DISK_SIZE;
 }
 #else
-  #if __BSD_VISIBLE
-static off_t
-get_mediasize(int fd)
-{
-	off_t mediasize;
-	struct stat sb;
-
-	if (fstat(fd, &sb) == -1) {
-		printf("fstat(): %s.", strerror(errno));
-		exit(1);
-	}
-	if (S_ISCHR(sb.st_mode)) {
-		if (ioctl(fd, DIOCGMEDIASIZE, &mediasize) == -1) {
-			printf("Can't get media size: %s.", strerror(errno));
-			exit(1);
-		}
-	} else if (S_ISREG(sb.st_mode)) {
-		mediasize = sb.st_size;
-	} else {
-		printf("Unsupported file system object.");
-		exit(1);
-	}
-	return (mediasize);
-}
-  #else
 static off_t
 get_mediasize(int fd)
 {
@@ -372,7 +338,6 @@ get_mediasize(int fd)
 
 	return (mediasize);
 }
-  #endif
 #endif
 /*******************************
  *        logstor              *
@@ -437,11 +402,7 @@ logstor_open(const char *disk_file)
 
 	bzero(sc, sizeof(*sc));
 #if !defined(RAM_DISK_SIZE)
-  #if __BSD_VISIBLE
-	sc->disk_fd = open(disk_file, O_RDWR | O_DIRECT | O_FSYNC);
-  #else
 	sc->disk_fd = open(disk_file, O_RDWR);
-  #endif
 	MY_ASSERT(sc->disk_fd > 0);
 #endif
 	int error __unused;
@@ -457,9 +418,12 @@ logstor_open(const char *disk_file)
 	my_read(sc, &sc->seg_sum, sa);
 	MY_ASSERT(sc->seg_sum.ss_allocp < SEG_SUM_OFFSET);
 	sc->ss_modified = false;
-	sc->data_write_count = sc->other_write_count = 0;
 
 	fbuf_mod_init(sc);
+
+	sc->data_write_count = sc->other_write_count = 0;
+	sc->is_sec_valid_fp = is_sec_valid_normal;
+	sc->ba2sa_fp = ba2sa_normal;
 #if defined(MY_DEBUG)
 	logstor_check(sc);
 #endif
@@ -541,8 +505,8 @@ logstor_commit(void)
 	sc->superblock.fd_root[sc->superblock.fd_cur] = SECTOR_NULL;
 	sc->superblock.fd_root[sc->superblock.fd_snap_new] = SECTOR_NULL;
 
-	is_sec_valid_fp = is_sec_valid_during_commit;
-	logstor_ba2sa_fp = logstor_ba2sa_during_commit;
+	sc->is_sec_valid_fp = is_sec_valid_during_commit;
+	sc->ba2sa_fp = ba2sa_during_commit;
 	// unlock metadata
 
 	uint32_t block_max = sc->superblock.block_cnt_max;
@@ -576,8 +540,8 @@ logstor_commit(void)
 	seg_sum_write(sc);
 	superblock_write(sc);
 
-	is_sec_valid_fp = is_sec_valid_normal;
-	logstor_ba2sa_fp = logstor_ba2sa_normal;
+	sc->is_sec_valid_fp = is_sec_valid_normal;
+	sc->ba2sa_fp = ba2sa_normal;
 	//unlock metadata
 }
 
@@ -597,10 +561,10 @@ _logstor_read(struct g_logstor_softc *sc, unsigned ba, void *data)
 
 	MY_ASSERT(ba < sc->superblock.block_cnt_max);
 
-	sa = logstor_ba2sa_fp(sc, ba);
+	sa = sc->ba2sa_fp(sc, ba);
 #if defined(WYC)
-	logstor_ba2sa_normal();
-	logstor_ba2sa_during_commit();
+	ba2sa_normal();
+	ba2sa_during_commit();
 #endif
 	if (sa == SECTOR_NULL)
 		bzero(data, SECTOR_SIZE);
@@ -663,7 +627,7 @@ is_sec_valid(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev)
 	ma_rev.uint32 = ba_rev;
 #endif
 	if (ba_rev < BLOCK_MAX) {
-		return is_sec_valid_fp(sc, sa, ba_rev);
+		return sc->is_sec_valid_fp(sc, sa, ba_rev);
 #if defined(WYC)
 		is_sec_valid_normal();
 		is_sec_valid_during_commit();
@@ -765,7 +729,7 @@ Description:
     Block address to sector address translation in normal state
 */
 static uint32_t
-logstor_ba2sa_normal(struct g_logstor_softc *sc, uint32_t ba)
+ba2sa_normal(struct g_logstor_softc *sc, uint32_t ba)
 {
 	uint8_t fd[] = {
 	    sc->superblock.fd_cur,
@@ -780,7 +744,7 @@ Description:
     Block address to sector address translation in commit state
 */
 static uint32_t __unused
-logstor_ba2sa_during_commit(struct g_logstor_softc *sc, uint32_t ba)
+ba2sa_during_commit(struct g_logstor_softc *sc, uint32_t ba)
 {
 	uint8_t fd[] = {
 	    sc->superblock.fd_cur,
@@ -872,11 +836,7 @@ disk_init(struct g_logstor_softc *sc, int fd)
 	sb->magic = LOGSTOR_MAGIC;
 	sb->ver_major = VER_MAJOR;
 	sb->ver_minor = VER_MINOR;
-#if __BSD_VISIBLE
-	sb->sb_gen = arc4random();
-#else
 	sb->sb_gen = random();
-#endif
 	sb->seg_cnt = sector_cnt / SECTORS_PER_SEG;
 	if (sizeof(struct _superblock) + sb->seg_cnt > SECTOR_SIZE) {
 		printf("%s: size of superblock %d seg_cnt %d\n",
@@ -1902,10 +1862,10 @@ logstor_check(struct g_logstor_softc *sc)
 	block_cnt = logstor_get_block_cnt();
 	MY_ASSERT(block_cnt < BLOCK_MAX);
 	for (uint32_t ba = 0; ba < block_cnt; ++ba) {
-		uint32_t sa = logstor_ba2sa_fp(sc, ba);
+		uint32_t sa = sc->ba2sa_fp(sc, ba);
 #if defined(WYC)
-		logstor_ba2sa_normal();
-		logstor_ba2sa_during_commit();
+		ba2sa_normal();
+		ba2sa_during_commit();
 #endif
 		if (sa != SECTOR_NULL) {
 			uint32_t ba_exp = sa2ba(sc, sa);
