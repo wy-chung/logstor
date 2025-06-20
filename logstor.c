@@ -24,22 +24,16 @@ e-mail: wy-chung@outlook.com
 
 #include "logstor.h"
 
-#define __predict_true(exp)     __builtin_expect((exp), 1)
-#define __predict_false(exp)    __builtin_expect((exp), 0)
-#define __unused		__attribute__((unused))
-
-#define RAM_DISK_SIZE		0x180000000UL // 6G
-
 #define	LOGSTOR_MAGIC	0x4C4F4753	// "LOGS": Log-Structured Storage
 #define	VER_MAJOR	0
 #define	VER_MINOR	1
 
 #define SEG_DATA_START	1	// the data segment starts here
-#define SEG_SUM_OFFSET	(SECTORS_PER_SEG - 1) // segment summary offset in segment
+#define SEG_SUM_OFFSET	(SECTORS_PER_SEG - 1)	// segment summary offset
 #define	SEG_SIZE	0x400000		// 4M
-#define	SECTORS_PER_SEG	(SEG_SIZE/SECTOR_SIZE) // 1024
-#define SA2SEGA_SHIFT	10
+#define	SECTORS_PER_SEG	(SEG_SIZE/SECTOR_SIZE)	// 1024
 #define BLOCKS_PER_SEG	(SEG_SIZE/SECTOR_SIZE - 1)
+#define SEC_PER_SEG_SHIFT 10	// sectors per segment shift
 
 /*
   The max file size is 1K*1K*4K=4G, each entry is 4 bytes
@@ -50,14 +44,21 @@ e-mail: wy-chung@outlook.com
 #define BLOCK_INVALID	(BLOCK_MAX+1)
 #define META_INVALID	(BLOCK_MAX+1)
 
-#define	META_START	(((union meta_addr){.meta = 0xFF}).uint32)	// metadata block address start
-#define	IS_META_ADDR(x)	((x) >= META_START)
-
 enum {
 	SECTOR_NULL,	// the metadata are all NULL
 	SECTOR_DEL,	// the file does not exist or don't look the mapping further, it is NULL
 	SECTOR_CACHE,	// the root sector of the file is still in the cache
 };
+
+//=================================
+#define __predict_true(exp)     __builtin_expect((exp), 1)
+#define __predict_false(exp)    __builtin_expect((exp), 0)
+#define __unused		__attribute__((unused))
+
+#define RAM_DISK_SIZE		0x180000000UL // 6G
+
+#define	META_START	(((union meta_addr){.meta = 0xFF}).uint32)	// metadata block address start
+#define	IS_META_ADDR(x)	((x) >= META_START)
 
 #define FBUF_CLEAN_THRESHOLD	32
 #define FBUF_MIN	1564
@@ -133,11 +134,12 @@ _Static_assert(sizeof(struct _seg_sum) == SECTOR_SIZE,
   The metadata address occupies a small portion of block address space.
   For block address that is >= META_START, it is actually a metadata address.
 */
+#define IDX_BITS	10	// number of index bits
 union meta_addr { // metadata address for file data and its indirect blocks
 	uint32_t	uint32;
 	struct {
-		uint32_t index1 :10;	// index for indirect block of depth 1
-		uint32_t index0 :10;	// index for indirect block of depth 0
+		uint32_t index1 :IDX_BITS;	// index for indirect block of depth 1
+		uint32_t index0 :IDX_BITS;	// index for indirect block of depth 0
 		uint32_t depth	:2;	// depth of the node
 		uint32_t fd	:2;	// file descriptor
 		uint32_t meta	:8;	// 0xFF for metadata address
@@ -238,6 +240,9 @@ struct g_logstor_softc {
 	struct _superblock superblock;
 };
 
+static void my_read (struct g_logstor_softc *sc, void *buf, uint32_t sa);
+static void my_write(struct g_logstor_softc *sc, const void *buf, uint32_t sa);
+
 uint32_t gdb_cond0 = -1;
 uint32_t gdb_cond1 = -1;
 
@@ -252,49 +257,6 @@ static union {
 } *ram4k;
  #endif
 #endif
-static struct g_logstor_softc softc;
-
-static uint32_t _logstor_read(struct g_logstor_softc *sc, uint32_t ba, void *data);
-static uint32_t _logstor_write(struct g_logstor_softc *sc, uint32_t ba, void *data);
-
-static void seg_alloc(struct g_logstor_softc *sc);
-static void seg_sum_write(struct g_logstor_softc *sc);
-
-static uint32_t disk_init(struct g_logstor_softc *sc, int fd);
-static int  superblock_read(struct g_logstor_softc *sc);
-static void superblock_write(struct g_logstor_softc *sc);
-
-static struct _fbuf *file_access_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t offset, uint32_t *off_4byte);
-static uint32_t file_read_4byte(struct g_logstor_softc *sc, uint8_t fh, uint32_t ba);
-static void file_write_4byte(struct g_logstor_softc *sc, uint8_t fh, uint32_t ba, uint32_t sa);
-
-static void fbuf_mod_init(struct g_logstor_softc *sc);
-static void fbuf_mod_fini(struct g_logstor_softc *sc);
-static void fbuf_queue_init(struct g_logstor_softc *sc, int which);
-static void fbuf_queue_insert_tail(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
-static void fbuf_queue_remove(struct g_logstor_softc *sc, struct _fbuf *fbuf);
-static struct _fbuf *fbuf_search(struct g_logstor_softc *sc, union meta_addr ma);
-static void fbuf_hash_insert_head(struct g_logstor_softc *sc, struct _fbuf *fbuf);
-static void fbuf_bucket_init(struct g_logstor_softc *sc, int which);
-static void fbuf_bucket_insert_head(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
-static void fbuf_bucket_remove(struct _fbuf *fbuf);
-static void fbuf_write(struct g_logstor_softc *sc, struct _fbuf *fbuf);
-static struct _fbuf *fbuf_alloc(struct g_logstor_softc *sc, union meta_addr ma, int depth);
-static struct _fbuf *fbuf_access(struct g_logstor_softc *sc, union meta_addr ma);
-static void fbuf_cache_flush(struct g_logstor_softc *sc);
-static void fbuf_cache_flush_and_invalidate_fd(struct g_logstor_softc *sc, int fd1, int fd2);
-static void fbuf_clean_queue_check(struct g_logstor_softc *sc);
-
-static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
-static uint32_t ma2sa(struct g_logstor_softc *sc, union meta_addr ma);
-
-static void my_read (struct g_logstor_softc *sc, void *buf, uint32_t sa);
-static void my_write(struct g_logstor_softc *sc, const void *buf, uint32_t sa);
-
-static uint32_t ba2sa_normal(struct g_logstor_softc *sc, uint32_t ba);
-static uint32_t ba2sa_during_commit(struct g_logstor_softc *sc, uint32_t ba);
-static bool is_sec_valid_normal(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
-static bool is_sec_valid_during_commit(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
 
 #if defined(MY_DEBUG)
 static void logstor_check(struct g_logstor_softc *sc);
@@ -339,31 +301,153 @@ get_mediasize(int fd)
 	return (mediasize);
 }
 #endif
-/*******************************
- *        logstor              *
- *******************************/
 
 /*
 Description:
     segment address to sector address
 */
-static uint32_t
+static inline uint32_t
 sega2sa(uint32_t sega)
 {
-	return sega << SA2SEGA_SHIFT;
+	return sega << SEC_PER_SEG_SHIFT;
+}
+
+/*
+Description:
+    Write the initialized supeblock to the downstream disk
+
+Return:
+    The max number of blocks for this disk
+*/
+static uint32_t
+disk_init(struct g_logstor_softc *sc, int fd)
+{
+	int32_t seg_cnt;
+	uint32_t sector_cnt;
+	struct _superblock *sb;
+	off_t media_size;
+	char buf[SECTOR_SIZE] __attribute__((aligned(4)));
+
+	media_size = get_mediasize(fd);
+	sector_cnt = media_size / SECTOR_SIZE;
+
+	sb = (struct _superblock *)buf;
+	sb->magic = LOGSTOR_MAGIC;
+	sb->ver_major = VER_MAJOR;
+	sb->ver_minor = VER_MINOR;
+	sb->sb_gen = random();
+	sb->seg_cnt = sector_cnt / SECTORS_PER_SEG;
+	if (sizeof(struct _superblock) + sb->seg_cnt > SECTOR_SIZE) {
+		printf("%s: size of superblock %d seg_cnt %d\n",
+		    __func__, (int)sizeof(struct _superblock), (int)sb->seg_cnt);
+		printf("    the size of the disk must be less than %lld\n",
+		    (SECTOR_SIZE - sizeof(struct _superblock)) * (long long)SEG_SIZE);
+		MY_PANIC();
+	}
+	seg_cnt = sb->seg_cnt;
+	uint32_t max_block =
+	    (seg_cnt - SEG_DATA_START) * BLOCKS_PER_SEG -
+	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT * 4;
+	MY_ASSERT(max_block < 0x40000000); // 1G
+	sb->block_cnt_max = max_block;
+#if defined(MY_DEBUG)
+	printf("%s: sector_cnt %u block_cnt_max %u\n",
+	    __func__, sector_cnt, sb->block_cnt_max);
+#endif
+	sb->seg_allocp = SEG_DATA_START;	// start allocate from here
+
+	sb->fd_cur = 0;			// current mapping is file 0
+	sb->fd_snap = 1;
+	sb->fd_prev = FD_INVALID;	// mapping does not exist
+	sb->fd_snap_new = FD_INVALID;
+	sb->fd_root[0] = SECTOR_NULL;	// file 0 is all 0
+	// the root sector address for the files 1, 2 and 3
+	for (int i = 1; i < FD_COUNT; i++) {
+		sb->fd_root[i] = SECTOR_DEL;	// the file does not exit
+	}
+
+	// write out super block
+#if defined(RAM_DISK_SIZE)
+	memcpy(ram_disk, sb, SECTOR_SIZE);
+#else
+	MY_ASSERT(pwrite(fd, sb, SECTOR_SIZE, 0) == SECTOR_SIZE);
+#endif
+
+	// clear the rest of the supeblock's segment
+	bzero(buf, SECTOR_SIZE);
+	for (int i = 1; i < SECTORS_PER_SEG; i++) {
+#if defined(RAM_DISK_SIZE)
+		memcpy(ram_disk + i * SECTOR_SIZE, buf, SECTOR_SIZE);
+#else
+		MY_ASSERT(pwrite(fd, buf, SECTOR_SIZE, i * SECTOR_SIZE) == SECTOR_SIZE);
+#endif
+	}
+	struct _seg_sum ss;
+	for (int i = 0; i < SECTORS_PER_SEG - 1; ++i)
+		ss.ss_rm[i] = BLOCK_INVALID;
+
+	// initialize all segment summary blocks
+	for (int i = SEG_DATA_START; i < seg_cnt; ++i)
+	{	uint32_t sa = sega2sa(i) + SEG_SUM_OFFSET;
+		my_write(NULL, &ss, sa);
+	}
+	return max_block;
 }
 
 // called by ggate or logsinit when disk is a file
 // not used when disk is a ram disk
 uint32_t logstor_disk_init(const char *disk_file)
 {
-	struct g_logstor_softc *sc = &softc;
 	int disk_fd;
 
 	disk_fd = open(disk_file, O_WRONLY);
 	MY_ASSERT(disk_fd > 0);
-	return disk_init(sc, disk_fd);
+	return disk_init(NULL, disk_fd);
 }
+
+/*******************************
+ *        logstor              *
+ *******************************/
+static uint32_t _logstor_read(struct g_logstor_softc *sc, uint32_t ba, void *data);
+static uint32_t _logstor_write(struct g_logstor_softc *sc, uint32_t ba, void *data);
+
+static void seg_alloc(struct g_logstor_softc *sc);
+static void seg_sum_write(struct g_logstor_softc *sc);
+
+static uint32_t disk_init(struct g_logstor_softc *sc, int fd);
+static int  superblock_read(struct g_logstor_softc *sc);
+static void superblock_write(struct g_logstor_softc *sc);
+
+static struct _fbuf *file_access_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t offset, uint32_t *off_4byte);
+static uint32_t file_read_4byte(struct g_logstor_softc *sc, uint8_t fh, uint32_t ba);
+static void file_write_4byte(struct g_logstor_softc *sc, uint8_t fh, uint32_t ba, uint32_t sa);
+
+static void fbuf_mod_init(struct g_logstor_softc *sc);
+static void fbuf_mod_fini(struct g_logstor_softc *sc);
+static void fbuf_queue_init(struct g_logstor_softc *sc, int which);
+static void fbuf_queue_insert_tail(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
+static void fbuf_queue_remove(struct g_logstor_softc *sc, struct _fbuf *fbuf);
+static struct _fbuf *fbuf_search(struct g_logstor_softc *sc, union meta_addr ma);
+static void fbuf_hash_insert_head(struct g_logstor_softc *sc, struct _fbuf *fbuf);
+static void fbuf_bucket_init(struct g_logstor_softc *sc, int which);
+static void fbuf_bucket_insert_head(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
+static void fbuf_bucket_remove(struct _fbuf *fbuf);
+static void fbuf_write(struct g_logstor_softc *sc, struct _fbuf *fbuf);
+static struct _fbuf *fbuf_alloc(struct g_logstor_softc *sc, union meta_addr ma, int depth);
+static struct _fbuf *fbuf_access(struct g_logstor_softc *sc, union meta_addr ma);
+static void fbuf_cache_flush(struct g_logstor_softc *sc);
+static void fbuf_cache_flush_and_invalidate_fd(struct g_logstor_softc *sc, int fd1, int fd2);
+static void fbuf_clean_queue_check(struct g_logstor_softc *sc);
+
+static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
+static uint32_t ma2sa(struct g_logstor_softc *sc, union meta_addr ma);
+
+static uint32_t ba2sa_normal(struct g_logstor_softc *sc, uint32_t ba);
+static uint32_t ba2sa_during_commit(struct g_logstor_softc *sc, uint32_t ba);
+static bool is_sec_valid_normal(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
+static bool is_sec_valid_during_commit(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
+
+static struct g_logstor_softc softc;
 
 /*
 Return the max number of blocks for this disk
@@ -814,88 +898,6 @@ seg_sum_write(struct g_logstor_softc *sc)
 }
 
 /*
-Description:
-    Write the initialized supeblock to the downstream disk
-
-Return:
-    The max number of blocks for this disk
-*/
-static uint32_t
-disk_init(struct g_logstor_softc *sc, int fd)
-{
-	int32_t seg_cnt;
-	uint32_t sector_cnt;
-	struct _superblock *sb;
-	off_t media_size;
-	char buf[SECTOR_SIZE] __attribute__((aligned(4)));
-
-	media_size = get_mediasize(fd);
-	sector_cnt = media_size / SECTOR_SIZE;
-
-	sb = (struct _superblock *)buf;
-	sb->magic = LOGSTOR_MAGIC;
-	sb->ver_major = VER_MAJOR;
-	sb->ver_minor = VER_MINOR;
-	sb->sb_gen = random();
-	sb->seg_cnt = sector_cnt / SECTORS_PER_SEG;
-	if (sizeof(struct _superblock) + sb->seg_cnt > SECTOR_SIZE) {
-		printf("%s: size of superblock %d seg_cnt %d\n",
-		    __func__, (int)sizeof(struct _superblock), (int)sb->seg_cnt);
-		printf("    the size of the disk must be less than %lld\n",
-		    (SECTOR_SIZE - sizeof(struct _superblock)) * (long long)SEG_SIZE);
-		MY_PANIC();
-	}
-	seg_cnt = sb->seg_cnt;
-	uint32_t max_block =
-	    (seg_cnt - SEG_DATA_START) * BLOCKS_PER_SEG -
-	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT * 4;
-	MY_ASSERT(max_block < 0x40000000); // 1G
-	sb->block_cnt_max = max_block;
-#if defined(MY_DEBUG)
-	printf("%s: sector_cnt %u block_cnt_max %u\n",
-	    __func__, sector_cnt, sb->block_cnt_max);
-#endif
-	sb->seg_allocp = SEG_DATA_START;	// start allocate from here
-
-	sb->fd_cur = 0;			// current mapping is file 0
-	sb->fd_snap = 1;
-	sb->fd_prev = FD_INVALID;	// mapping does not exist
-	sb->fd_snap_new = FD_INVALID;
-	sb->fd_root[0] = SECTOR_NULL;	// file 0 is all 0
-	// the root sector address for the files 1, 2 and 3
-	for (int i = 1; i < FD_COUNT; i++) {
-		sb->fd_root[i] = SECTOR_DEL;	// the file does not exit
-	}
-
-	// write out super block
-#if defined(RAM_DISK_SIZE)
-	memcpy(ram_disk, sb, SECTOR_SIZE);
-#else
-	MY_ASSERT(pwrite(fd, sb, SECTOR_SIZE, 0) == SECTOR_SIZE);
-#endif
-
-	// clear the rest of the supeblock's segment
-	bzero(buf, SECTOR_SIZE);
-	for (int i = 1; i < SECTORS_PER_SEG; i++) {
-#if defined(RAM_DISK_SIZE)
-		memcpy(ram_disk + i * SECTOR_SIZE, buf, SECTOR_SIZE);
-#else
-		MY_ASSERT(pwrite(fd, buf, SECTOR_SIZE, i * SECTOR_SIZE) == SECTOR_SIZE);
-#endif
-	}
-	struct _seg_sum ss;
-	for (int i = 0; i < SECTORS_PER_SEG - 1; ++i)
-		ss.ss_rm[i] = BLOCK_INVALID;
-	sc->superblock.seg_cnt = seg_cnt; // to silence the assert fail in my_write
-	// initialize all segment summary blocks
-	for (int i = SEG_DATA_START; i < seg_cnt; ++i)
-	{	uint32_t sa = sega2sa(i) + SEG_SUM_OFFSET;
-		my_write(sc, &ss, sa);
-	}
-	return max_block;
-}
-
-/*
   Segment 0 is used to store superblock so there are SECTORS_PER_SEG sectors
   for storing superblock. Each time the superblock is synced, it is stored
   in the next sector. When it reachs the end of segment 0, it wraps around
@@ -978,7 +980,7 @@ static void
 my_read(struct g_logstor_softc *sc, void *buf, uint32_t sa)
 {
 //MY_BREAK(sa == );
-	MY_ASSERT(sa < sc->superblock.seg_cnt * SECTORS_PER_SEG);
+	MY_ASSERT(sc == NULL || sa < sc->superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(buf, ram_disk + (off_t)sa * SECTOR_SIZE, SECTOR_SIZE);
 }
 
@@ -986,7 +988,7 @@ static void
 my_write(struct g_logstor_softc *sc, const void *buf, uint32_t sa)
 {
 //MY_BREAK(sa == );
-	MY_ASSERT(sa < sc->superblock.seg_cnt * SECTORS_PER_SEG);
+	MY_ASSERT(sc == NULL || sa < sc->superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(ram_disk + (off_t)sa * SECTOR_SIZE , buf, SECTOR_SIZE);
 }
 #else
@@ -1162,7 +1164,7 @@ ma_index_get(union meta_addr ma, unsigned depth)
 static union meta_addr
 ma_index_set(union meta_addr ma, unsigned depth, unsigned index)
 {
-	MY_ASSERT(index < 1024);
+	MY_ASSERT(index < (2 << IDX_BITS));
 
 	switch (depth) {
 	case 0:
@@ -1638,9 +1640,6 @@ again:
 	return fbuf;
 }
 
-#if defined(MY_DEBUG)
-static struct _fbuf *depth[3];
-#endif
 /*
 Description:
     Read or write the file buffer with metadata address @ma
@@ -1673,9 +1672,6 @@ fbuf_access(struct g_logstor_softc *sc, union meta_addr ma)
 	for (int i = 0; ; ++i) {
 		ima.depth = i;
 		fbuf = fbuf_search(sc, ima);
-#if defined(MY_DEBUG)
-		depth[i] = fbuf;
-#endif
 		if (fbuf == NULL) {
 			fbuf = fbuf_alloc(sc, ima, i);	// allocate a fbuf from clean queue
 			fbuf->parent = parent;
