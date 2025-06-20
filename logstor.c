@@ -28,11 +28,11 @@ e-mail: wy-chung@outlook.com
 #define	VER_MAJOR	0
 #define	VER_MINOR	1
 
-#define SEG_DATA_START	1	// the data segment starts here
-#define SEG_SUM_OFFSET	(SECTORS_PER_SEG - 1)	// segment summary offset
 #define	SEG_SIZE	0x400000		// 4M
 #define	SECTORS_PER_SEG	(SEG_SIZE/SECTOR_SIZE)	// 1024
 #define BLOCKS_PER_SEG	(SEG_SIZE/SECTOR_SIZE - 1)
+#define SEG_SUM_OFFSET	(SECTORS_PER_SEG - 1)	// segment summary offset
+#define SB_CNT	8	// number of superblock sectors
 #define SEC_PER_SEG_SHIFT 10	// sectors per segment shift
 
 /*
@@ -112,19 +112,6 @@ _Static_assert(sizeof(struct _superblock) < SECTOR_SIZE,
 	"The size of the super block must be smaller than SECTOR_SIZE");
 
 /*
-  The last sector in a segment is the segment summary. It stores the reverse mapping table
-*/
-struct _seg_sum {
-	uint32_t ss_rm[SECTORS_PER_SEG - 1];	// reverse map
-	// reverse map SECTORS_PER_SEG - 1 is not used so we store something here
-	uint32_t ss_allocp;	// the sector for allocation in the segment
-	//uint32_t ss_gen;  // sequence number. used for redo after system crash
-};
-
-_Static_assert(sizeof(struct _seg_sum) == SECTOR_SIZE,
-	"The size of segment summary must be equal to SECTOR_SIZE");
-
-/*
   Forward map and its indirect blocks are also stored in the downstream disk.
   The sectors used to store the forward map and its indirect blocks are called metadata.
 
@@ -198,6 +185,19 @@ struct _fbuf { // file buffer
 	// the metadata is cached here
 	uint32_t	data[SECTOR_SIZE/sizeof(uint32_t)];
 };
+
+/*
+  The last sector in a segment is the segment summary. It stores the reverse mapping table
+*/
+struct _seg_sum {
+	uint32_t ss_rm[SECTORS_PER_SEG - 1];	// reverse map
+	// reverse map SECTORS_PER_SEG - 1 is not used so we store something here
+	uint32_t ss_allocp;	// the sector for allocation in the segment
+	//uint32_t ss_gen;  // sequence number. used for redo after system crash
+};
+
+_Static_assert(sizeof(struct _seg_sum) == SECTOR_SIZE,
+	"The size of segment summary must be equal to SECTOR_SIZE");
 
 /*
 	logstor soft control
@@ -346,7 +346,7 @@ disk_init(struct g_logstor_softc *sc, int fd)
 	}
 	seg_cnt = sb->seg_cnt;
 	uint32_t max_block =
-	    (seg_cnt - SEG_DATA_START) * BLOCKS_PER_SEG -
+	    seg_cnt * BLOCKS_PER_SEG - SB_CNT -
 	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT * 4;
 	MY_ASSERT(max_block < 0x40000000); // 1G
 	sb->block_cnt_max = max_block;
@@ -354,7 +354,7 @@ disk_init(struct g_logstor_softc *sc, int fd)
 	printf("%s: sector_cnt %u block_cnt_max %u\n",
 	    __func__, sector_cnt, sb->block_cnt_max);
 #endif
-	sb->seg_allocp = SEG_DATA_START;	// start allocate from here
+	sb->seg_allocp = 0;	// start allocate from here
 
 	sb->fd_cur = 0;			// current mapping is file 0
 	sb->fd_snap = 1;
@@ -382,14 +382,18 @@ disk_init(struct g_logstor_softc *sc, int fd)
 		MY_ASSERT(pwrite(fd, buf, SECTOR_SIZE, i * SECTOR_SIZE) == SECTOR_SIZE);
 #endif
 	}
-	struct _seg_sum ss;
+	struct _seg_sum seg_sum;
 	for (int i = 0; i < SECTORS_PER_SEG - 1; ++i)
-		ss.ss_rm[i] = BLOCK_INVALID;
+		seg_sum.ss_rm[i] = BLOCK_INVALID;
 
+	seg_sum.ss_allocp = SB_CNT;
+	my_write(NULL, &seg_sum, SEG_SUM_OFFSET);
+
+	seg_sum.ss_allocp = 0;
 	// initialize all segment summary blocks
-	for (int i = SEG_DATA_START; i < seg_cnt; ++i)
+	for (int i = 1; i < seg_cnt; ++i)
 	{	uint32_t sa = sega2sa(i) + SEG_SUM_OFFSET;
-		my_write(NULL, &ss, sa);
+		my_write(NULL, &seg_sum, sa);
 	}
 	return max_block;
 }
@@ -496,7 +500,6 @@ logstor_open(const char *disk_file)
 	sc->sb_modified = false;
 
 	// read the segment summary block
-	MY_ASSERT(sc->superblock.seg_allocp >= SEG_DATA_START);
 	sc->seg_allocp_sa = sega2sa(sc->superblock.seg_allocp);
 	uint32_t sa = sc->seg_allocp_sa + SEG_SUM_OFFSET;
 	my_read(sc, &sc->seg_sum, sa);
@@ -653,7 +656,7 @@ _logstor_read(struct g_logstor_softc *sc, unsigned ba, void *data)
 	if (sa == SECTOR_NULL)
 		bzero(data, SECTOR_SIZE);
 	else {
-		MY_ASSERT(sa >= SECTORS_PER_SEG);
+		MY_ASSERT(sa >= SB_CNT);
 		my_read(sc, data, sa);
 	}
 	return sa;
@@ -738,6 +741,7 @@ static uint32_t
 _logstor_write(struct g_logstor_softc *sc, uint32_t ba, void *data)
 {
 	static bool is_called = false;
+	int i;
 	struct _seg_sum *seg_sum = &sc->seg_sum;
 #if defined(MY_DEBUG)
 	union meta_addr ma __unused;
@@ -747,7 +751,6 @@ _logstor_write(struct g_logstor_softc *sc, uint32_t ba, void *data)
 #endif
 
 	MY_ASSERT(ba < sc->superblock.block_cnt_max || IS_META_ADDR(ba));
-	MY_ASSERT(sc->seg_allocp_sa >= SECTORS_PER_SEG);
 	if (is_called) // recursive call is not allowed
 		exit(1);
 	is_called = true;
@@ -757,7 +760,7 @@ _logstor_write(struct g_logstor_softc *sc, uint32_t ba, void *data)
 	// it means that there is no free sector in this disk
 	sc->seg_allocp_start = sc->superblock.seg_allocp;
 again:
-	for (int i = seg_sum->ss_allocp; i < SEG_SUM_OFFSET; ++i)
+	for (i = seg_sum->ss_allocp; i < SEG_SUM_OFFSET; ++i)
 	{
 		uint32_t sa = sc->seg_allocp_sa + i;
 		uint32_t ba_rev = seg_sum->ss_rm[i]; // ba from the reverse map
@@ -890,7 +893,7 @@ seg_sum_write(struct g_logstor_softc *sc)
 	if (!sc->ss_modified)
 		return;
 	// segment summary is at the end of a segment
-	MY_ASSERT(sc->seg_allocp_sa >= SECTORS_PER_SEG);
+	MY_ASSERT(sc->seg_sum.ss_allocp <= SEG_SUM_OFFSET);
 	sa = sc->seg_allocp_sa + SEG_SUM_OFFSET;
 	my_write(sc, (void *)&sc->seg_sum, sa);
 	sc->ss_modified = false;
@@ -966,7 +969,7 @@ superblock_write(struct g_logstor_softc *sc)
 		MY_ASSERT(sc->superblock.fd_root[i] != SECTOR_CACHE);
 	}
 	sc->superblock.sb_gen++;
-	if (++sc->sb_sa == SECTORS_PER_SEG)
+	if (++sc->sb_sa == SB_CNT)
 		sc->sb_sa = 0;
 	memcpy(buf, &sc->superblock, sb_size);
 	memset(buf + sb_size, 0, SECTOR_SIZE - sb_size);
@@ -1024,18 +1027,24 @@ Output:
 static void
 seg_alloc(struct g_logstor_softc *sc)
 {
+	uint32_t ss_allocp;
+
 	// write the previous segment summary to disk if it has been modified
 	seg_sum_write(sc);
 
 	MY_ASSERT(sc->superblock.seg_allocp < sc->superblock.seg_cnt);
-	if (++sc->superblock.seg_allocp == sc->superblock.seg_cnt)
-		sc->superblock.seg_allocp = SEG_DATA_START;
+	if (++sc->superblock.seg_allocp == sc->superblock.seg_cnt) {
+		sc->superblock.seg_allocp = 0;
+		ss_allocp = SB_CNT; // the first SB_CNT sectors are superblock
+	} else
+		ss_allocp = 0;
+
 	if (sc->superblock.seg_allocp == sc->seg_allocp_start)
 		// has accessed all the segment summary blocks
 		MY_PANIC();
 	sc->seg_allocp_sa = sega2sa(sc->superblock.seg_allocp);
 	my_read(sc, &sc->seg_sum, sc->seg_allocp_sa + SEG_SUM_OFFSET);
-	sc->seg_sum.ss_allocp = 0;
+	sc->seg_sum.ss_allocp = ss_allocp;
 }
 
 /*********************************************************
@@ -1835,8 +1844,8 @@ sa2ba(struct g_logstor_softc *sc, uint32_t sa)
 	unsigned seg_off;
 
 	seg_sa = sa & ~(SECTORS_PER_SEG - 1);
-	MY_ASSERT(seg_sa != 0);
 	seg_off = sa & (SECTORS_PER_SEG - 1);
+	MY_ASSERT(seg_sa != 0 || seg_off >= SB_CNT);
 	MY_ASSERT(seg_off != SEG_SUM_OFFSET);
 	if (seg_sa != seg_sum_cache_sa) {
 		my_read(sc, &seg_sum_cache, seg_sa + SEG_SUM_OFFSET);
