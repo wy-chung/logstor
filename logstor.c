@@ -208,7 +208,7 @@ struct g_logstor_softc {
 
 	uint32_t seg_allocp_start;// the starting segment for _logstor_write
 	uint32_t seg_allocp_sa;	// the sector address of the segment for allocation
-	struct _seg_sum seg_sum;// segment summary for the hot segment
+	struct _seg_sum seg_sum;// segment summary for the current segment
 	uint32_t sb_sa; 	// superblock's sector address
 	bool sb_modified;	// is the super block modified
 	bool ss_modified;	// is segment summary modified
@@ -884,6 +884,7 @@ logstor_get_fbuf_miss(void)
 
 /*
   write out the segment summary
+  segment summary is at the end of a segment
 */
 static void
 seg_sum_write(struct g_logstor_softc *sc)
@@ -892,8 +893,7 @@ seg_sum_write(struct g_logstor_softc *sc)
 
 	if (!sc->ss_modified)
 		return;
-	// segment summary is at the end of a segment
-	MY_ASSERT(sc->seg_sum.ss_allocp <= SEG_SUM_OFFSET);
+	MY_ASSERT(sc->seg_sum.ss_allocp < SEG_SUM_OFFSET);
 	sa = sc->seg_allocp_sa + SEG_SUM_OFFSET;
 	my_write(sc, (void *)&sc->seg_sum, sa);
 	sc->ss_modified = false;
@@ -1030,6 +1030,7 @@ seg_alloc(struct g_logstor_softc *sc)
 	uint32_t ss_allocp;
 
 	// write the previous segment summary to disk if it has been modified
+	sc->seg_sum.ss_allocp = 0;	// the allocation starts from 0 in the next time
 	seg_sum_write(sc);
 
 	MY_ASSERT(sc->superblock.seg_allocp < sc->superblock.seg_cnt);
