@@ -21,12 +21,12 @@ typedef long	int64_t;
 //#define DISK_FILE	"/dev/ada1"
 
 #if defined(MY_DEBUG)
-void my_debug(const char * file, int line_num, const char *func);
+void my_panic(const char * file, int line_num, const char *func);
 void my_break(void);
 
-#define MY_ASSERT(x)	do if (!(x)) my_debug(__FILE__, __LINE__, __func__); while(0)
+#define MY_PANIC()	my_panic(__FILE__, __LINE__, __func__)
+#define MY_ASSERT(x)	do if (!(x)) my_panic(__FILE__, __LINE__, __func__); while(0)
 #define MY_BREAK(x)	do if ((x)) my_break(); while(0)
-#define MY_PANIC()	my_debug(__FILE__, __LINE__, __func__)
 #else
 #define MY_ASSERT(x)
 #define MY_BREAK(x)
@@ -36,7 +36,6 @@ void my_break(void);
 #define	SECTOR_SIZE	0x1000	// 4K
 
 uint32_t logstor_disk_init(const char *disk_file);
-uint32_t logstor_init(void);
 void logstor_fini(void);
 int  logstor_open(const char *disk_file);
 void logstor_close(void);

@@ -55,7 +55,7 @@ main_logstest(int argc, char *argv[])
 	unsigned max_block;
 
 	srandom(RAND_SEED);
-	max_block = logstor_init();
+	max_block = logstor_disk_init(NULL);
 
 	//main_loop_count = MUTIPLIER_TO_MAXBLOCK/ratio_to_maxblock + 0.999;
 	//loop_count = max_block * ratio_to_maxblock;
