@@ -101,10 +101,10 @@ struct _superblock {
 	   To support trim command, the mapping marked as delete will stop
 	   the checking for the next mapping file and return null immediately
 	*/
-	struct {
+	struct { // file handles
 		uint32_t root;	// the root sector of the file
 		uint32_t written;// number of blocks written to this virtual disk
-	} fh[FD_COUNT]; // file handles
+	} fh[FD_COUNT];
 	uint8_t fd_prev;	// the file descriptor for previous current mapping
 	uint8_t fd_snap;	// the file descriptor for snapshot mapping
 	uint8_t fd_cur;		// the file descriptor for current mapping
@@ -1289,7 +1289,7 @@ fbuf_mod_init(struct g_logstor_softc *sc)
 		// init parent, child_cnt and ma before inserting into FBUF_BUCKET_LAST
 		fbuf->parent = NULL;
 		fbuf->child_cnt = 0;
-		fbuf->ma.uint32 = META_INVALID;
+		fbuf->ma.uint32 = META_INVALID; // ma must be invalid for fbuf in FBUF_BUCKET_LAST
 		fbuf_bucket_insert_head(sc, FBUF_BUCKET_LAST, fbuf);
 	}
 	sc->fbuf_allocp = &sc->fbufs[0];;
@@ -1298,7 +1298,7 @@ fbuf_mod_init(struct g_logstor_softc *sc)
 
 // there are 3 kinds of metadata in the system, the fbuf cache, segment summary block and superblock
 static void
-md_update(struct g_logstor_softc *sc)
+md_flush(struct g_logstor_softc *sc)
 {
 	fbuf_cache_flush(sc);
 	seg_sum_write(sc);
@@ -1308,7 +1308,7 @@ md_update(struct g_logstor_softc *sc)
 static void
 fbuf_mod_fini(struct g_logstor_softc *sc)
 {
-	md_update(sc);
+	md_flush(sc);
 	free(sc->fbufs);
 }
 
@@ -1331,7 +1331,7 @@ fbuf_clean_queue_check(struct g_logstor_softc *sc)
 	if (sc->fbuf_queue_len[QUEUE_LEAF_CLEAN] > FBUF_CLEAN_THRESHOLD)
 		return;
 
-	md_update(sc);
+	md_flush(sc);
 
 	// move all internal nodes with child_cnt 0 to clean queue and last bucket
 	for (int i = QUEUE_IND1; i >= QUEUE_IND0; --i) {
@@ -1386,21 +1386,21 @@ fbuf_cache_flush(struct g_logstor_softc *sc)
 		}
 	}
 	// move all fbufs in the dirty leaf queue to clean leaf queue
+	// first, set queue_which to QUEUE_LEAF_CLEAN for all fbufs on dirty leaf queue
 	dirty_sentinel = &sc->fbuf_queue[QUEUE_LEAF_DIRTY];
-	if (is_queue_empty(dirty_sentinel))
-		return;
-
-	dirty_first = dirty_sentinel->fc.queue_next;
-	dirty_last = dirty_sentinel->fc.queue_prev;
-
-	// set queue_which to QUEUE_LEAF_CLEAN for all fbufs on dirty leaf queue
 	fbuf = dirty_sentinel->fc.queue_next;
 	while (fbuf != (struct _fbuf *)dirty_sentinel) {
 		fbuf->queue_which = QUEUE_LEAF_CLEAN;
 		fbuf = fbuf->fc.queue_next;
 	}
-	// insert dirty leaf queue to the head of clean leaf queue
+
+	// second, insert dirty leaf queue to the head of clean leaf queue
+	if (is_queue_empty(dirty_sentinel))
+		return;
+
 	clean_sentinel = &sc->fbuf_queue[QUEUE_LEAF_CLEAN];
+	dirty_first = dirty_sentinel->fc.queue_next;
+	dirty_last = dirty_sentinel->fc.queue_prev;
 	clean_first = clean_sentinel->fc.queue_next;
 	clean_sentinel->fc.queue_next = dirty_first;
 	dirty_first->fc.queue_prev = (struct _fbuf *)clean_sentinel;
@@ -1417,7 +1417,7 @@ fbuf_cache_flush_and_invalidate_fd(struct g_logstor_softc *sc, int fd1, int fd2)
 {
 	struct _fbuf *fbuf;
 
-	md_update(sc);
+	md_flush(sc);
 
 	for (int i = 0; i < sc->fbuf_count; ++i)
 	{
