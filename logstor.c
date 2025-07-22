@@ -50,6 +50,20 @@ enum {
 	SECTOR_CACHE,	// the root sector of the file is still in the cache
 };
 
+#if defined(MY_DEBUG)
+void my_break(void)
+{
+}
+
+void my_panic(const char * file, int line, const char *func)
+{
+	printf("error: %s %d %s\n", file, line, func);
+	perror("");
+	my_break();
+	exit(1);
+}
+#endif
+
 //=================================
 #define __predict_true(exp)     __builtin_expect((exp), 1)
 #define __predict_false(exp)    __builtin_expect((exp), 0)
@@ -124,6 +138,7 @@ _Static_assert(sizeof(struct _superblock) < SECTOR_SIZE,
   The metadata address occupies a small portion of block address space.
   For block address that is >= META_START, it is actually a metadata address.
 */
+#define META_LEAF_DEPTH	2
 #define IDX_BITS	10	// number of index bits
 union meta_addr { // metadata address for file data and its indirect blocks
 	uint32_t	uint32;
@@ -141,17 +156,15 @@ union meta_addr { // metadata address for file data and its indirect blocks
 
 _Static_assert(sizeof(union meta_addr) == 4, "The size of emta_addr must be 4");
 
+// when processing queues, we always process it from the leaf to root
+// so leaf has lower queue number
 enum {
-	QUEUE_IND0,	// for level 0 indirect blocks
-	QUEUE_IND1,	// for level 1 indirect blocks
-	QUEUE_LEAF_DIRTY,	// the modified part of the leaf nodes
-	QUEUE_LEAF_CLEAN,	// the clean part of the leaf nodes
+	QUEUE_F0_CLEAN,	// floor 0, clean queue
+	QUEUE_F0_DIRTY,	// floor 0, dirty queue
+	QUEUE_F1,	// floor 1
+	QUEUE_F2,	// floor 2
 	QUEUE_CNT,
 };
-#define META_LEAF_DEPTH	QUEUE_LEAF_DIRTY
-
-_Static_assert(QUEUE_IND0 == 0, "QUEUE_IND0 must be 0");
-_Static_assert(QUEUE_IND1 == 1, "QUEUE_IND1 must be 1");
 
 struct _fbuf_comm {
 	struct _fbuf *queue_next;
@@ -260,22 +273,6 @@ static union {
 	uint8_t  u8[4096];
 } *ram4k;
  #endif
-#endif
-
-#if defined(MY_DEBUG)
-static void logstor_check(struct g_logstor_softc *sc);
-
-void my_break(void)
-{
-}
-
-void my_panic(const char * file, int line, const char *func)
-{
-	printf("error: %s %d %s\n", file, line, func);
-	perror("");
-	my_break();
-	exit(1);
-}
 #endif
 
 #if defined(RAM_DISK_SIZE)
@@ -446,7 +443,9 @@ static uint32_t ba2sa_normal(struct g_logstor_softc *sc, uint32_t ba);
 static uint32_t ba2sa_during_commit(struct g_logstor_softc *sc, uint32_t ba);
 static bool is_sec_valid_normal(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
 static bool is_sec_valid_during_commit(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
-
+#if defined(MY_DEBUG)
+static void logstor_check(struct g_logstor_softc *sc);
+#endif
 static struct g_logstor_softc softc;
 
 /*
@@ -1110,15 +1109,15 @@ file_write_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t ba, uint32_t s
 	MY_ASSERT(fbuf != NULL);
 	fbuf->data[off_4byte] = sa;
 	if (!fbuf->fc.modified) {
-		// move to QUEUE_LEAF_DIRTY
-		MY_ASSERT(fbuf->queue_which == QUEUE_LEAF_CLEAN);
+		// move to QUEUE_F0_DIRTY
+		MY_ASSERT(fbuf->queue_which == QUEUE_F0_CLEAN);
 		fbuf->fc.modified = true;
 		if (fbuf == sc->fbuf_allocp)
 			sc->fbuf_allocp = fbuf->fc.queue_next;
 		fbuf_queue_remove(sc, fbuf);
-		fbuf_queue_insert_tail(sc, QUEUE_LEAF_DIRTY, fbuf);
+		fbuf_queue_insert_tail(sc, QUEUE_F0_DIRTY, fbuf);
 	} else
-		MY_ASSERT(fbuf->queue_which == QUEUE_LEAF_DIRTY);
+		MY_ASSERT(fbuf->queue_which == QUEUE_F0_DIRTY);
 }
 
 /*
@@ -1274,7 +1273,7 @@ fbuf_mod_init(struct g_logstor_softc *sc)
 	for (i = 0; i < QUEUE_CNT; ++i) {
 		fbuf_queue_init(sc, i);
 	}
-	// insert fbuf to both QUEUE_LEAF_CLEAN and hash queue
+	// insert fbuf to both QUEUE_F0_CLEAN and hash queue
 	for (i = 0; i < fbuf_count; ++i) {
 		struct _fbuf *fbuf = &sc->fbufs[i];
 #if defined(MY_DEBUG)
@@ -1283,7 +1282,7 @@ fbuf_mod_init(struct g_logstor_softc *sc)
 		fbuf->fc.is_sentinel = false;
 		fbuf->fc.accessed = false;
 		fbuf->fc.modified = false;
-		fbuf_queue_insert_tail(sc, QUEUE_LEAF_CLEAN, fbuf);
+		fbuf_queue_insert_tail(sc, QUEUE_F0_CLEAN, fbuf);
 		// insert fbuf to the last fbuf bucket
 		// this bucket is not used in hash search
 		// init parent, child_cnt and ma before inserting into FBUF_BUCKET_LAST
@@ -1328,24 +1327,24 @@ fbuf_clean_queue_check(struct g_logstor_softc *sc)
 	struct _fbuf_sentinel *queue_sentinel;
 	struct _fbuf *fbuf;
 
-	if (sc->fbuf_queue_len[QUEUE_LEAF_CLEAN] > FBUF_CLEAN_THRESHOLD)
+	if (sc->fbuf_queue_len[QUEUE_F0_CLEAN] > FBUF_CLEAN_THRESHOLD)
 		return;
 
 	md_flush(sc);
 
 	// move all internal nodes with child_cnt 0 to clean queue and last bucket
-	for (int i = QUEUE_IND1; i >= QUEUE_IND0; --i) {
-		queue_sentinel = &sc->fbuf_queue[i];
+	for (int q = QUEUE_F1; q < QUEUE_CNT; ++q) {
+		queue_sentinel = &sc->fbuf_queue[q];
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
-			MY_ASSERT(fbuf->queue_which == i);
+			MY_ASSERT(fbuf->queue_which == q);
 			struct _fbuf *next = fbuf->fc.queue_next;
 			if (fbuf->child_cnt == 0) {
 				fbuf_queue_remove(sc, fbuf);
 				fbuf->fc.accessed = false; // so that it can be replaced faster
-				fbuf_queue_insert_tail(sc, QUEUE_LEAF_CLEAN, fbuf);
+				fbuf_queue_insert_tail(sc, QUEUE_F0_CLEAN, fbuf);
 				if (fbuf->parent) {
-					MY_ASSERT(i != QUEUE_IND0);
+					MY_ASSERT(q != QUEUE_CNT-1);
 					struct _fbuf *parent = fbuf->parent;
 					fbuf->parent = NULL;
 					--parent->child_cnt;
@@ -1372,33 +1371,31 @@ fbuf_cache_flush(struct g_logstor_softc *sc)
 	struct _fbuf_sentinel *clean_sentinel;
 
 	// write back all the modified nodes to disk
-	for (int i = QUEUE_LEAF_DIRTY; i >= 0; --i) {
-		struct _fbuf_sentinel *queue_sentinel = &sc->fbuf_queue[i];
+	for (int q = QUEUE_F0_DIRTY; q < QUEUE_CNT; ++q) {
+		struct _fbuf_sentinel *queue_sentinel = &sc->fbuf_queue[q];
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
-			MY_ASSERT(fbuf->queue_which == i);
+			MY_ASSERT(fbuf->queue_which == q);
 			MY_ASSERT(IS_META_ADDR(fbuf->ma.uint32));
-			// QUEUE_LEAF_DIRTY nodes are always dirty
-			MY_ASSERT(i != QUEUE_LEAF_DIRTY || fbuf->fc.modified);
+			// QUEUE_F0_DIRTY nodes are always dirty
+			MY_ASSERT(q != QUEUE_F0_DIRTY || fbuf->fc.modified);
 			if (__predict_true(fbuf->fc.modified))
 				fbuf_write(sc, fbuf);
 			fbuf = fbuf->fc.queue_next;
 		}
 	}
 	// move all fbufs in the dirty leaf queue to clean leaf queue
-	// first, set queue_which to QUEUE_LEAF_CLEAN for all fbufs on dirty leaf queue
-	dirty_sentinel = &sc->fbuf_queue[QUEUE_LEAF_DIRTY];
-	fbuf = dirty_sentinel->fc.queue_next;
-	while (fbuf != (struct _fbuf *)dirty_sentinel) {
-		fbuf->queue_which = QUEUE_LEAF_CLEAN;
-		fbuf = fbuf->fc.queue_next;
-	}
-
-	// second, insert dirty leaf queue to the head of clean leaf queue
+	dirty_sentinel = &sc->fbuf_queue[QUEUE_F0_DIRTY];
 	if (is_queue_empty(dirty_sentinel))
 		return;
-
-	clean_sentinel = &sc->fbuf_queue[QUEUE_LEAF_CLEAN];
+	// first, set queue_which to QUEUE_F0_CLEAN for all fbufs on dirty leaf queue
+	fbuf = dirty_sentinel->fc.queue_next;
+	while (fbuf != (struct _fbuf *)dirty_sentinel) {
+		fbuf->queue_which = QUEUE_F0_CLEAN;
+		fbuf = fbuf->fc.queue_next;
+	}
+	// second, insert dirty leaf queue to the head of clean leaf queue
+	clean_sentinel = &sc->fbuf_queue[QUEUE_F0_CLEAN];
 	dirty_first = dirty_sentinel->fc.queue_next;
 	dirty_last = dirty_sentinel->fc.queue_prev;
 	clean_first = clean_sentinel->fc.queue_next;
@@ -1406,9 +1403,9 @@ fbuf_cache_flush(struct g_logstor_softc *sc)
 	dirty_first->fc.queue_prev = (struct _fbuf *)clean_sentinel;
 	dirty_last->fc.queue_next = clean_first;
 	clean_first->fc.queue_prev = dirty_last;
-	sc->fbuf_queue_len[QUEUE_LEAF_CLEAN] += sc->fbuf_queue_len[QUEUE_LEAF_DIRTY];
+	sc->fbuf_queue_len[QUEUE_F0_CLEAN] += sc->fbuf_queue_len[QUEUE_F0_DIRTY];
 
-	fbuf_queue_init(sc, QUEUE_LEAF_DIRTY);
+	fbuf_queue_init(sc, QUEUE_F0_DIRTY);
 }
 
 // flush the cache and invalid fbufs with file descriptors fd1 or fd2
@@ -1439,11 +1436,11 @@ fbuf_cache_flush_and_invalidate_fd(struct g_logstor_softc *sc, int fd1, int fd2)
 			fbuf->ma.uint32 = META_INVALID;
 			fbuf_bucket_insert_head(sc, FBUF_BUCKET_LAST, fbuf);
 			fbuf->fc.accessed = false; // so it will be recycled sooner
-			if (fbuf->queue_which != QUEUE_LEAF_CLEAN) {
-				// it is an internal node, move it to QUEUE_LEAF_CLEAN
-				MY_ASSERT(fbuf->queue_which != QUEUE_LEAF_DIRTY);
+			if (fbuf->queue_which != QUEUE_F0_CLEAN) {
+				// it is an internal node, move it to QUEUE_F0_CLEAN
+				MY_ASSERT(fbuf->queue_which != QUEUE_F0_DIRTY);
 				fbuf_queue_remove(sc, fbuf);
-				fbuf_queue_insert_tail(sc, QUEUE_LEAF_CLEAN, fbuf);
+				fbuf_queue_insert_tail(sc, QUEUE_F0_CLEAN, fbuf);
 			}
 		}
 	}
@@ -1471,7 +1468,7 @@ fbuf_queue_insert_tail(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf
 	struct _fbuf *prev;
 
 	MY_ASSERT(which < QUEUE_CNT);
-	MY_ASSERT(which != QUEUE_LEAF_CLEAN || !fbuf->fc.modified);
+	MY_ASSERT(which != QUEUE_F0_CLEAN || !fbuf->fc.modified);
 	fbuf->queue_which = which;
 	queue_head = &sc->fbuf_queue[which];
 	prev = queue_head->fc.queue_prev;
@@ -1595,9 +1592,12 @@ fbuf_search(struct g_logstor_softc *sc, union meta_addr ma)
 	return NULL;	// cache miss
 }
 
+// convert from depth to queue number
+static const int d2q[] = {QUEUE_F2, QUEUE_F1, QUEUE_F0_DIRTY};
+
 /*
 Description:
-  using the second chance replace policy to choose a fbuf in QUEUE_LEAF_CLEAN
+  using the second chance replace policy to choose a fbuf in QUEUE_F0_CLEAN
 */
 struct _fbuf *
 fbuf_alloc(struct g_logstor_softc *sc, union meta_addr ma, int depth)
@@ -1605,7 +1605,8 @@ fbuf_alloc(struct g_logstor_softc *sc, union meta_addr ma, int depth)
 	struct _fbuf_sentinel *queue_sentinel;
 	struct _fbuf *fbuf, *parent;
 
-	queue_sentinel = &sc->fbuf_queue[QUEUE_LEAF_CLEAN];
+	MY_ASSERT(depth <= META_LEAF_DEPTH);
+	queue_sentinel = &sc->fbuf_queue[QUEUE_F0_CLEAN];
 	fbuf = sc->fbuf_allocp;
 again:
 	while (true) {
@@ -1629,7 +1630,7 @@ again:
 		// for fbuf allocated for internal nodes insert it immediately
 		// to its internal queue
 		fbuf_queue_remove(sc, fbuf);
-		fbuf_queue_insert_tail(sc, depth, fbuf);
+		fbuf_queue_insert_tail(sc, d2q[depth], fbuf);
 	}
 	fbuf_bucket_remove(fbuf);
 	fbuf->ma = ma;
@@ -1637,10 +1638,10 @@ again:
 	parent = fbuf->parent;
 	if (parent) {
 		// parent with child_cnt == 0 will stay in its queue
-		// it will only be moved to QUEUE_LEAF_CLEAN in fbuf_clean_queue_check()
+		// it will only be moved to QUEUE_F0_CLEAN in fbuf_clean_queue_check()
 		--parent->child_cnt;
 		MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
-		MY_ASSERT(parent->queue_which == parent->ma.depth);
+		MY_ASSERT(parent->queue_which == d2q[parent->ma.depth]);
 	}
 	return fbuf;
 }
@@ -1682,7 +1683,7 @@ fbuf_access(struct g_logstor_softc *sc, union meta_addr ma)
 			fbuf->parent = parent;
 			if (parent) {
 				// parent with child_cnt == 0 will stay in its queue
-				// it will only be moved to QUEUE_LEAF_CLEAN in fbuf_clean_queue_check()
+				// it will only be moved to QUEUE_F0_CLEAN in fbuf_clean_queue_check()
 				++parent->child_cnt;
 				MY_ASSERT(parent->child_cnt <= SECTOR_SIZE/4);
 			} else {
@@ -1780,44 +1781,44 @@ void
 logstor_queue_check(void)
 {
 	struct g_logstor_softc *sc = &softc;
-	int	i;
 	struct _fbuf_sentinel *queue_sentinel;
 	struct _fbuf *fbuf;
 	unsigned count[QUEUE_CNT];
 
-	// set debug child count to 0
-	for (i = 0; i < QUEUE_LEAF_DIRTY; ++i) {
-		queue_sentinel = &sc->fbuf_queue[i];
+	// set debug child count of internal nodes to 0
+	for (int q = QUEUE_F1; q < QUEUE_CNT; ++q) {
+		queue_sentinel = &sc->fbuf_queue[q];
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
-			MY_ASSERT(fbuf->ma.depth == i);
+			MY_ASSERT(d2q[fbuf->ma.depth] == q);
 			fbuf->dbg_child_cnt = 0; // set the child count to 0
 			fbuf = fbuf->fc.queue_next;
 		}
 	}
-	int gdb_root_cnt = 0;
-	for (i = QUEUE_CNT-1; i >= 0  ; --i) {
-		count[i] = 0;
-		queue_sentinel = &sc->fbuf_queue[i];
+	// check queue length and calculate the child count
+	int root_cnt = 0;
+	for (int q = 0; q < QUEUE_CNT ; ++q) {
+		count[q] = 0;
+		queue_sentinel = &sc->fbuf_queue[q];
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
-			++count[i];
-			MY_ASSERT(fbuf->queue_which == i);
-			if (i == 0) {
+			++count[q];
+			MY_ASSERT(fbuf->queue_which == q);
+			if (q == QUEUE_CNT-1) {
 				MY_ASSERT(fbuf->parent == NULL);
-				++gdb_root_cnt;
-			} else if (i == 1)
-				MY_ASSERT(fbuf->parent != NULL);
+				++root_cnt;
+			} else
+				MY_ASSERT(fbuf->ma.uint32 == META_INVALID || fbuf->parent != NULL);
 			if (fbuf->parent)
 				++fbuf->parent->dbg_child_cnt; // increment parent's debug child count
 
 			fbuf = fbuf->fc.queue_next;
 		}
-		MY_ASSERT(sc->fbuf_queue_len[i] == count[i]);
+		MY_ASSERT(sc->fbuf_queue_len[q] == count[q]);
 	}
-	// check that the child count is correct
-	for (i = 0; i < QUEUE_LEAF_DIRTY; ++i) {
-		queue_sentinel = &sc->fbuf_queue[i];
+	// check that the debug child count of internal nodes is correct
+	for (int q = QUEUE_F1; q < QUEUE_CNT; ++q) {
+		queue_sentinel = &sc->fbuf_queue[q];
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
 			MY_ASSERT(fbuf->dbg_child_cnt == fbuf->child_cnt);
@@ -1825,8 +1826,8 @@ logstor_queue_check(void)
 		}
 	}
 	int total = 0;
-	for (i = 0; i < QUEUE_CNT; ++i)
-		total += count[i];
+	for (int q = 0; q < QUEUE_CNT; ++q)
+		total += count[q];
 
 	MY_ASSERT(total == sc->fbuf_count);
 }
