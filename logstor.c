@@ -24,10 +24,6 @@ e-mail: wy-chung@outlook.com
 
 #include "logstor.h"
 
-#define	LOGSTOR_MAGIC	0x4C4F4753	// "LOGS": Log-Structured Storage
-#define	VER_MAJOR	0
-#define	VER_MINOR	1
-
 #define	SEG_SIZE	0x400000		// 4M
 #define	SECTORS_PER_SEG	(SEG_SIZE/SECTOR_SIZE)	// 1024
 #define BLOCKS_PER_SEG	(SECTORS_PER_SEG - 1)
@@ -86,8 +82,7 @@ void my_panic(const char * file, int line, const char *func)
 
 struct _superblock {
 	uint32_t magic;
-	uint8_t  ver_major;
-	uint8_t  ver_minor;
+	uint16_t version;
 	uint16_t sb_gen;	// the generation number. Used for redo after system crash
 	/*
 	   The segments are treated as circular buffer
@@ -334,9 +329,8 @@ disk_init(int fd)
 	sector_cnt = media_size / SECTOR_SIZE;
 
 	sb = (struct _superblock *)buf;
-	sb->magic = LOGSTOR_MAGIC;
-	sb->ver_major = VER_MAJOR;
-	sb->ver_minor = VER_MINOR;
+	sb->magic = G_LOGSTOR_MAGIC;
+	sb->version = G_LOGSTOR_VERSION;
 	sb->sb_gen = random();
 	sb->seg_cnt = sector_cnt / SECTORS_PER_SEG;
 	if (sizeof(struct _superblock) + sb->seg_cnt > SECTOR_SIZE) {
@@ -917,7 +911,7 @@ superblock_read(struct g_logstor_softc *sc)
 #else
 	MY_ASSERT(pread(sc->disk_fd, sb, SECTOR_SIZE, 0) == SECTOR_SIZE);
 #endif
-	if (sb->magic != LOGSTOR_MAGIC ||
+	if (sb->magic != G_LOGSTOR_MAGIC ||
 	    sb->seg_allocp >= sb->seg_cnt)
 		return EINVAL;
 
@@ -929,7 +923,7 @@ superblock_read(struct g_logstor_softc *sc)
 #else
 		MY_ASSERT(pread(sc->disk_fd, sb, SECTOR_SIZE, i * SECTOR_SIZE) == SECTOR_SIZE);
 #endif
-		if (sb->magic != LOGSTOR_MAGIC)
+		if (sb->magic != G_LOGSTOR_MAGIC)
 			break;
 		if (sb->sb_gen != (uint16_t)(sb_gen + 1)) // IMPORTANT type cast
 			break;

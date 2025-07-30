@@ -17,9 +17,6 @@ typedef long	int64_t;
 
 #define	MY_DEBUG
 
-#define DISK_FILE	"logstor.disk"
-//#define DISK_FILE	"/dev/ada1"
-
 #if defined(MY_DEBUG)
 void my_panic(const char * file, int line_num, const char *func);
 void my_break(void);
@@ -32,6 +29,12 @@ void my_break(void);
 #define MY_BREAK(x)
 #define MY_PANIC()
 #endif
+
+#define DISK_FILE	"logstor.disk"
+//#define DISK_FILE	"/dev/ada1"
+
+#define	G_LOGSTOR_MAGIC	0x4C4F4753	// "LOGS": Log-Structured Storage
+#define	G_LOGSTOR_VERSION	0
 
 #define	SECTOR_SIZE	0x1000	// 4K
 
