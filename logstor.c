@@ -485,7 +485,6 @@ logstor_open(const char *disk_file)
 
 	error = superblock_read(sc);
 	MY_ASSERT(error == 0);
-	sc->sb_modified = false;
 
 	// read the segment summary block
 	sc->seg_allocp_sa = sega2sa(sc->superblock.seg_allocp);
@@ -634,8 +633,6 @@ _logstor_read(struct g_logstor_softc *sc, unsigned ba, void *data)
 {
 	uint32_t sa;	// sector address
 
-	MY_ASSERT(ba < sc->superblock.block_cnt_max);
-
 	sa = sc->ba2sa_fp(sc, ba);
 #if defined(WYC)
 	ba2sa_normal();
@@ -644,7 +641,6 @@ _logstor_read(struct g_logstor_softc *sc, unsigned ba, void *data)
 	if (sa == SECTOR_NULL)
 		bzero(data, SECTOR_SIZE);
 	else {
-		MY_ASSERT(sa >= SB_CNT);
 		my_read(sc, data, sa);
 	}
 	return sa;
@@ -782,11 +778,11 @@ again:
 }
 
 static uint32_t
-logstor_ba2sa_comm(struct g_logstor_softc *sc, uint32_t ba, uint8_t fd[], int fd_cnt)
+ba2sa_comm(struct g_logstor_softc *sc, uint32_t ba, uint8_t fd[], int fd_cnt)
 {
 	uint32_t sa;
 
-	MY_ASSERT(ba < BLOCK_MAX);
+	MY_ASSERT(ba < sc->superblock.block_cnt_max);
 	for (int i = 0; i < fd_cnt; ++i) {
 		sa = file_read_4byte(sc, fd[i], ba);
 		if (sa == SECTOR_DEL) { // don't need to check further
@@ -796,6 +792,7 @@ logstor_ba2sa_comm(struct g_logstor_softc *sc, uint32_t ba, uint8_t fd[], int fd
 		if (sa != SECTOR_NULL)
 			break;
 	}
+	MY_ASSERT(sa == SECTOR_NULL || sa >= SB_CNT);
 	return sa;
 }
 
@@ -811,7 +808,7 @@ ba2sa_normal(struct g_logstor_softc *sc, uint32_t ba)
 	    sc->superblock.fd_snap,
 	};
 
-	return logstor_ba2sa_comm(sc, ba, fd, NUM_OF_ELEMS(fd));
+	return ba2sa_comm(sc, ba, fd, NUM_OF_ELEMS(fd));
 }
 
 /*
@@ -827,7 +824,7 @@ ba2sa_during_commit(struct g_logstor_softc *sc, uint32_t ba)
 	    sc->superblock.fd_snap,
 	};
 
-	return logstor_ba2sa_comm(sc, ba, fd, NUM_OF_ELEMS(fd));
+	return ba2sa_comm(sc, ba, fd, NUM_OF_ELEMS(fd));
 }
 
 uint32_t
@@ -940,6 +937,7 @@ superblock_read(struct g_logstor_softc *sc)
 	for (i=0; i<FD_COUNT; ++i)
 		MY_ASSERT(sb->fh[i].root != SECTOR_CACHE);
 	memcpy(&sc->superblock, sb, sizeof(sc->superblock));
+	sc->sb_modified = false;
 
 	return 0;
 }
