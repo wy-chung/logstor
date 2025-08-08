@@ -170,6 +170,9 @@ struct _fbuf_comm {
 };
 
 struct _fbuf_sentinel {
+	// if this is a sentinel for bucket queue
+	// fc.queue_next is actually fc.bucket_next
+	// fc.queue_prev is actually fc.bucket_prev
 	struct _fbuf_comm fc;
 };
 
@@ -179,6 +182,8 @@ struct _fbuf_sentinel {
 */
 struct _fbuf { // file buffer
 	struct _fbuf_comm fc;
+	// for bucket sentinel bucket_next is stored in fc.queue_next
+	// for bucket sentinel bucket_prev is stored in fc.queue_prev
 	struct _fbuf *bucket_next;
 	struct _fbuf *bucket_prev;
 	struct _fbuf *parent;
@@ -419,7 +424,7 @@ static void fbuf_queue_init(struct g_logstor_softc *sc, int which);
 static void fbuf_queue_insert_tail(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
 static void fbuf_queue_remove(struct g_logstor_softc *sc, struct _fbuf *fbuf);
 static struct _fbuf *fbuf_search(struct g_logstor_softc *sc, union meta_addr ma);
-static void fbuf_hash_insert_head(struct g_logstor_softc *sc, struct _fbuf *fbuf);
+static void fbuf_hash_insert_head(struct g_logstor_softc *sc, struct _fbuf *fbuf, union meta_addr ma);
 static void fbuf_bucket_init(struct g_logstor_softc *sc, int which);
 static void fbuf_bucket_insert_head(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
 static void fbuf_bucket_remove(struct _fbuf *fbuf);
@@ -895,7 +900,7 @@ static int
 superblock_read(struct g_logstor_softc *sc)
 {
 	typeof(sc->superblock.sb_gen) sb_gen;
-	int	i, error;
+	int i, error;
 	struct _superblock *sb;
 	char buf[2][SECTOR_SIZE];
 
@@ -1493,13 +1498,14 @@ fbuf_queue_remove(struct g_logstor_softc *sc, struct _fbuf *fbuf)
 
 // insert to the head of the hashed bucket
 static void
-fbuf_hash_insert_head(struct g_logstor_softc *sc, struct _fbuf *fbuf)
+fbuf_hash_insert_head(struct g_logstor_softc *sc, struct _fbuf *fbuf, union meta_addr ma)
 {
 	unsigned hash;
 
+	fbuf->ma = ma;
 	// the bucket FBUF_BUCKET_LAST is reserved for storing unused fbufs
 	// so %hash will be [0..FBUF_BUCKET_LAST)
-	hash = fbuf->ma.uint32 % FBUF_BUCKET_LAST;
+	hash = ma.uint32 % FBUF_BUCKET_LAST;
 	fbuf_bucket_insert_head(sc, hash, fbuf);
 }
 
@@ -1627,8 +1633,7 @@ again:
 		fbuf_queue_insert_tail(sc, d2q[depth], fbuf);
 	}
 	fbuf_bucket_remove(fbuf);
-	fbuf->ma = ma;
-	fbuf_hash_insert_head(sc, fbuf);
+	fbuf_hash_insert_head(sc, fbuf, ma);
 	parent = fbuf->parent;
 	if (parent) {
 		// parent with child_cnt == 0 will stay in its queue
