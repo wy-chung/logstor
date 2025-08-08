@@ -894,12 +894,10 @@ seg_sum_write(struct g_logstor_softc *sc)
 static int
 superblock_read(struct g_logstor_softc *sc)
 {
-	int	i;
-	uint16_t sb_gen;
+	typeof(sc->superblock.sb_gen) sb_gen;
+	int	i, error;
 	struct _superblock *sb;
 	char buf[2][SECTOR_SIZE];
-
-	_Static_assert(sizeof(sb_gen) == sizeof(sc->superblock.sb_gen), "sb_gen");
 
 	// get the superblock
 	sb = (struct _superblock *)buf[0];
@@ -909,9 +907,10 @@ superblock_read(struct g_logstor_softc *sc)
 	MY_ASSERT(pread(sc->disk_fd, sb, SECTOR_SIZE, 0) == SECTOR_SIZE);
 #endif
 	if (sb->magic != G_LOGSTOR_MAGIC ||
-	    sb->seg_allocp >= sb->seg_cnt)
-		return EINVAL;
-
+	    sb->seg_allocp >= sb->seg_cnt) {
+		error = EINVAL;
+		goto exit;
+	}
 	sb_gen = sb->sb_gen;
 	for (i = 1 ; i < SB_CNT; i++) {
 		sb = (struct _superblock *)buf[i%2];
@@ -922,24 +921,27 @@ superblock_read(struct g_logstor_softc *sc)
 #endif
 		if (sb->magic != G_LOGSTOR_MAGIC)
 			break;
-		if (sb->sb_gen != (uint16_t)(sb_gen + 1)) // IMPORTANT type cast
+		if (sb->sb_gen != sb_gen + 1)
 			break;
 		sb_gen = sb->sb_gen;
 	}
-	if (i == SECTORS_PER_SEG)
-		return EINVAL;
-
+	if (i == SECTORS_PER_SEG) {
+		error = EINVAL;
+		goto exit;
+	}
 	sc->sb_sa = (i - 1);
 	sb = (struct _superblock *)buf[(i-1)%2]; // get the previous valid superblock
-	if (sb->seg_allocp >= sb->seg_cnt)
-		return EINVAL;
-
+	if (sb->seg_allocp >= sb->seg_cnt) {
+		error = EINVAL;
+		goto exit;
+	}
 	for (i=0; i<FD_COUNT; ++i)
 		MY_ASSERT(sb->fh[i].root != SECTOR_CACHE);
 	memcpy(&sc->superblock, sb, sizeof(sc->superblock));
 	sc->sb_modified = false;
-
-	return 0;
+	error = 0;
+exit:
+	return error;
 }
 
 static void
