@@ -161,9 +161,9 @@ enum {
 	QUEUE_CNT,
 };
 
-struct _fbuf_comm {
-	struct _fbuf *queue_next;
-	struct _fbuf *queue_prev;
+struct _fbuf_comm { // the common part fot fbuf and fbuf_sentinel
+	struct _fbuf *queue_next; // for bucket queue, this is actually bucket_next
+	struct _fbuf *queue_prev; // for bucket queue, this is actually bucket_prev
 	bool is_sentinel;
 	bool accessed;	/* only used for fbufs on circular queue */
 	bool modified;	/* the fbuf is dirty */
@@ -182,8 +182,6 @@ struct _fbuf_sentinel {
 */
 struct _fbuf { // file buffer
 	struct _fbuf_comm fc;
-	// for bucket sentinel bucket_next is stored in fc.queue_next
-	// for bucket sentinel bucket_prev is stored in fc.queue_prev
 	struct _fbuf *bucket_next;
 	struct _fbuf *bucket_prev;
 	struct _fbuf *parent;
