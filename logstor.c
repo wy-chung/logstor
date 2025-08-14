@@ -162,17 +162,17 @@ enum {
 };
 
 struct _fbuf_comm { // the common part fot fbuf and fbuf_sentinel
-	struct _fbuf *queue_next; // for bucket queue, this is actually bucket_next
-	struct _fbuf *queue_prev; // for bucket queue, this is actually bucket_prev
+	struct _fbuf *queue_next;
+	struct _fbuf *queue_prev;
 	bool is_sentinel;
 	bool accessed;	/* only used for fbufs on circular queue */
 	bool modified;	/* the fbuf is dirty */
 };
 
 struct _fbuf_sentinel {
-	// if this is a sentinel for bucket queue
-	// fc.queue_next is actually fc.bucket_next
-	// fc.queue_prev is actually fc.bucket_prev
+	// if this is a sentinel for a bucket queue
+	// fc.queue_next is reused as fc.bucket_next
+	// fc.queue_prev is reused as fc.bucket_prev
 	struct _fbuf_comm fc;
 };
 
