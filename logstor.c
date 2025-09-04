@@ -91,8 +91,8 @@ struct _superblock {
 	uint32_t seg_allocp;	// allocate this segment
 	uint32_t sector_cnt_free;
 	// since the max meta file size is 4G (1K*1K*4K) and the entry size is 4
-	// block_cnt_max must be < (4G/4)
-	uint32_t block_cnt_max;	// max number of blocks supported
+	// block_cnt must be < (4G/4)
+	uint32_t block_cnt;	// max number of blocks supported
 	/*
 	   The files for forward mapping
 
@@ -321,7 +321,7 @@ Return:
 static uint32_t
 disk_init(int fd)
 {
-	int32_t seg_cnt;
+	uint32_t seg_cnt;
 	uint32_t sector_cnt;
 	off_t media_size;
 	struct _superblock *sb;
@@ -335,28 +335,29 @@ disk_init(int fd)
 	sb->magic = G_LOGSTOR_MAGIC;
 	sb->version = G_LOGSTOR_VERSION;
 	sb->sb_gen = random();
-	sb->seg_cnt = sector_cnt / SECTORS_PER_SEG;
-	if (sizeof(struct _superblock) + sb->seg_cnt > SECTOR_SIZE) {
+	seg_cnt = sector_cnt / SECTORS_PER_SEG;
+	// the rest of the superblock is used for storing age information
+	if (sizeof(struct _superblock) + seg_cnt > SECTOR_SIZE) {
 		printf("%s: size of superblock %d seg_cnt %d\n",
-		    __func__, (int)sizeof(struct _superblock), (int)sb->seg_cnt);
+		    __func__, (int)sizeof(struct _superblock), (int)seg_cnt);
 		printf("    the size of the disk must be less than %lld\n",
 		    (SECTOR_SIZE - sizeof(struct _superblock)) * (long long)SEG_SIZE);
 		MY_PANIC();
 	}
-	seg_cnt = sb->seg_cnt;
-	uint32_t max_block =
+	uint32_t block_cnt =
 	    seg_cnt * BLOCKS_PER_SEG - SB_CNT -
 	    (sector_cnt / (SECTOR_SIZE / 4)) * FD_COUNT * 4;
-	MY_ASSERT(max_block < 0x40000000); // 1G
-	sb->block_cnt_max = max_block;
+	MY_ASSERT(block_cnt < 0x40000000); // 1G
+	sb->seg_cnt = seg_cnt;
+	sb->block_cnt = block_cnt;
 #if defined(MY_DEBUG)
-	printf("%s: sector_cnt %u block_cnt_max %u\n",
-	    __func__, sector_cnt, sb->block_cnt_max);
+	printf("%s: sector_cnt %u block_cnt %u\n",
+	    __func__, sector_cnt, block_cnt);
 #endif
 	sb->seg_allocp = 0;	// start allocate from here
 
 	sb->fd_cur = 0;			// current mapping is file 0
-	sb->fd_snap = 1;
+	sb->fd_snap = 1;		// the snapshot mapping is file 1
 	sb->fd_prev = FD_INVALID;	// mapping does not exist
 	sb->fd_snap_new = FD_INVALID;
 	sb->fh[0].root = SECTOR_NULL;	// file 0 is all 0
@@ -397,7 +398,7 @@ disk_init(int fd)
 		uint32_t sa = sega2sa(i) + SEG_SUM_OFFSET;
 		my_write(NULL, seg_sum, sa);
 	}
-	return max_block;
+	return block_cnt;
 }
 
 /*******************************
@@ -557,7 +558,7 @@ int logstor_delete(off_t offset, void *data __unused, off_t length)
 	MY_ASSERT((length & (SECTOR_SIZE - 1)) == 0);
 	ba = offset / SECTOR_SIZE;
 	size = length / SECTOR_SIZE;
-	MY_ASSERT(ba < sc->superblock.block_cnt_max);
+	MY_ASSERT(ba < sc->superblock.block_cnt);
 
 	for (i = 0; i < size; ++i) {
 		fbuf_clean_queue_check(sc);
@@ -586,7 +587,7 @@ logstor_commit(void)
 	sc->ba2sa_fp = ba2sa_during_commit;
 	// unlock metadata
 
-	uint32_t block_max = sc->superblock.block_cnt_max;
+	uint32_t block_max = sc->superblock.block_cnt;
 	for (int ba = 0; ba < block_max; ++ba) {
 		uint32_t sa;
 
@@ -737,7 +738,7 @@ _logstor_write(struct g_logstor_softc *sc, uint32_t ba, void *data)
 	ma.uint32 = ba;
 #endif
 
-	MY_ASSERT(ba < sc->superblock.block_cnt_max || IS_META_ADDR(ba));
+	MY_ASSERT(ba < sc->superblock.block_cnt || IS_META_ADDR(ba));
 	if (is_called) // recursive call is not allowed
 		exit(1);
 	is_called = true;
@@ -785,7 +786,7 @@ ba2sa_comm(struct g_logstor_softc *sc, uint32_t ba, uint8_t fd[], int fd_cnt)
 {
 	uint32_t sa;
 
-	MY_ASSERT(ba < sc->superblock.block_cnt_max);
+	MY_ASSERT(ba < sc->superblock.block_cnt);
 	for (int i = 0; i < fd_cnt; ++i) {
 		sa = file_read_4byte(sc, fd[i], ba);
 		if (sa == SECTOR_DEL) { // don't need to check further
@@ -835,7 +836,7 @@ logstor_get_block_cnt(void)
 {
 	struct g_logstor_softc *sc = &softc;
 
-	return sc->superblock.block_cnt_max;
+	return sc->superblock.block_cnt;
 }
 
 unsigned
@@ -1254,7 +1255,7 @@ fbuf_mod_init(struct g_logstor_softc *sc)
 	int fbuf_count;
 	int i;
 
-	//fbuf_count = sc.superblock.block_cnt_max / (SECTOR_SIZE / 4);
+	//fbuf_count = sc.superblock.block_cnt / (SECTOR_SIZE / 4);
 	fbuf_count = FBUF_MIN;
 	if (fbuf_count < FBUF_MIN)
 		fbuf_count = FBUF_MIN;
