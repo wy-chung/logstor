@@ -89,13 +89,13 @@ test(int i, unsigned max_block)
 	printf("writing %d...\n", i);
 	test_write(max_block, true); arrays_check();
 	test_read(max_block);
-	printf("commit and read %d...\n", i);
-	logstor_commit();
+	printf("snapshot and read %d...\n", i);
+	logstor_snapshot();
 	test_read(max_block);
-#if 1 // test revert
+#if 1 // test rollback
 	test_write(max_block, false); arrays_check();
-	printf("revert and read %d...\n", i);
-	logstor_revert();
+	printf("rollback and read %d...\n", i);
+	logstor_rollback();
 	test_read(max_block);
 #endif
 	unsigned fbuf_hit = logstor_get_fbuf_hit();

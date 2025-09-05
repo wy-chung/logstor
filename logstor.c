@@ -96,14 +96,14 @@ struct _superblock {
 	/*
 	   The files for forward mapping
 
-	   New mapping is written to %fd_cur. When commit command is issued
+	   New mapping is written to %fd_cur. When snapshot command is issued
 	   %fd_cur is movied to %fd_prev, %fd_prev and %fd_snap are merged to %fd_snap_new
-	   After the commit command is complete, %fd_snap_new is movied to %fd_snap
+	   After the snapshot command is complete, %fd_snap_new is movied to %fd_snap
 	   and %fd_prev is deleted.
 
 	   So the actual mapping in normal state is
 	       %fd_cur || %fd_snap
-	   and during commit it is
+	   and during snapshot it is
 	       %fd_cur || %fd_prev || %fd_snap
 
 	   The first mapping that is not null is used.
@@ -438,7 +438,7 @@ static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
 static uint32_t ma2sa(struct g_logstor_softc *sc, union meta_addr ma);
 
 static uint32_t ba2sa_normal(struct g_logstor_softc *sc, uint32_t ba);
-static uint32_t ba2sa_during_commit(struct g_logstor_softc *sc, uint32_t ba);
+static uint32_t ba2sa_during_snapshot(struct g_logstor_softc *sc, uint32_t ba);
 static bool is_sec_valid_normal(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
 static bool is_sec_valid_during_commit(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
 #if defined(MY_DEBUG)
@@ -569,7 +569,7 @@ int logstor_delete(off_t offset, void *data __unused, off_t length)
 }
 
 void
-logstor_commit(void)
+logstor_snapshot(void)
 {
 	struct g_logstor_softc *sc = &softc;
 
@@ -584,7 +584,7 @@ logstor_commit(void)
 	sc->superblock.fh[sc->superblock.fd_snap_new].root = SECTOR_NULL;
 
 	sc->is_sec_valid_fp = is_sec_valid_during_commit;
-	sc->ba2sa_fp = ba2sa_during_commit;
+	sc->ba2sa_fp = ba2sa_during_snapshot;
 	// unlock metadata
 
 	uint32_t block_max = sc->superblock.block_cnt;
@@ -624,7 +624,7 @@ logstor_commit(void)
 }
 
 void
-logstor_revert(void)
+logstor_rollback(void)
 {
 	struct g_logstor_softc *sc = &softc;
 
@@ -640,7 +640,7 @@ _logstor_read(struct g_logstor_softc *sc, unsigned ba, void *data)
 	sa = sc->ba2sa_fp(sc, ba);
 #if defined(WYC)
 	ba2sa_normal();
-	ba2sa_during_commit();
+	ba2sa_during_snapshot();
 #endif
 	if (sa == SECTOR_NULL)
 		bzero(data, SECTOR_SIZE);
@@ -820,7 +820,7 @@ Description:
     Block address to sector address translation in commit state
 */
 static uint32_t __unused
-ba2sa_during_commit(struct g_logstor_softc *sc, uint32_t ba)
+ba2sa_during_snapshot(struct g_logstor_softc *sc, uint32_t ba)
 {
 	uint8_t fd[] = {
 	    sc->superblock.fd_cur,
@@ -1865,7 +1865,7 @@ logstor_check(struct g_logstor_softc *sc)
 		uint32_t sa = sc->ba2sa_fp(sc, ba);
 #if defined(WYC)
 		ba2sa_normal();
-		ba2sa_during_commit();
+		ba2sa_during_snapshot();
 #endif
 		if (sa != SECTOR_NULL) {
 			uint32_t ba_exp = sa2ba(sc, sa);
