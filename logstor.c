@@ -74,7 +74,7 @@ void my_panic(const char * file, int line, const char *func)
 #define FBUF_MIN	1564
 #define FBUF_MAX	(FBUF_MIN * 2)
 // the last bucket is reserved for queuing fbufs that will not be searched
-#define FBUF_BUCKET_LAST 953	// this should be a prime number
+#define FBUF_BUCKET_LAST 953	// this must be a prime number
 #define FBUF_BUCKET_CNT	(FBUF_BUCKET_LAST+1)
 
 #define FD_COUNT	5		// max number of metadata files supported
@@ -608,11 +608,12 @@ logstor_snapshot(void)
 	fbuf_cache_flush_and_invalidate_fd(sc, fd_prev, fd_snap);
 	sc->superblock.fh[fd_prev].root = SECTOR_DEL;
 	sc->superblock.fh[fd_snap].root = SECTOR_DEL;
+	// delete fd_prev
+	sc->superblock.fd_prev = FD_INVALID;
 	// move fd_snap_new to fd_snap
 	sc->superblock.fd_snap = sc->superblock.fd_snap_new;
-	// delete fd_prev and fd_snap
-	sc->superblock.fd_prev = FD_INVALID;
 	sc->superblock.fd_snap_new = FD_INVALID;
+
 	sc->sb_modified = true;
 
 	seg_sum_write(sc);
@@ -1422,11 +1423,13 @@ fbuf_cache_flush_and_invalidate_fd(struct g_logstor_softc *sc, int fd1, int fd2)
 			// the fbufs with metadata address META_INVALID are
 			// linked in bucket FBUF_BUCKET_LAST
 			MY_ASSERT(fbuf->bucket_which == FBUF_BUCKET_LAST);
+			MY_ASSERT(fbuf->fc.modified == false);
 			continue;
+		} else {
+			MY_ASSERT(fbuf->bucket_which != FBUF_BUCKET_LAST);
 		}
 		// move fbufs with fd equals to fd1 or fd2 to the last bucket
 		if (fbuf->ma.fd == fd1 || fbuf->ma.fd == fd2) {
-			MY_ASSERT(fbuf->bucket_which != FBUF_BUCKET_LAST);
 			fbuf_bucket_remove(fbuf);
 			// init parent, child_cnt and ma before inserting to bucket FBUF_BUCKET_LAST
 			fbuf->parent = NULL;
