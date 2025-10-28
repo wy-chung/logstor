@@ -67,7 +67,7 @@ void my_panic(const char * file, int line, const char *func)
 
 #define RAM_DISK_SIZE		0x180000000UL // 6G
 
-#define	META_START	(((union meta_addr){.meta = 0xFF}).uint32)	// metadata block address start
+#define	META_START	(((union meta_addr){.meta = 0x7F}).uint32)	// metadata block address start
 #define	IS_META_ADDR(x)	((x) >= META_START)
 
 #define FBUF_CLEAN_THRESHOLD	32
@@ -77,7 +77,7 @@ void my_panic(const char * file, int line, const char *func)
 #define FBUF_BUCKET_LAST 953	// this should be a prime number
 #define FBUF_BUCKET_CNT	(FBUF_BUCKET_LAST+1)
 
-#define FD_COUNT	4		// max number of metadata files supported
+#define FD_COUNT	5		// max number of metadata files supported
 #define FD_INVALID	FD_COUNT	// the valid file descriptor are 0 to 3
 
 struct _superblock {
@@ -141,8 +141,8 @@ union meta_addr { // metadata address for file data and its indirect blocks
 		uint32_t index1 :IDX_BITS;	// index for indirect block of depth 1
 		uint32_t index0 :IDX_BITS;	// index for indirect block of depth 0
 		uint32_t depth	:2;	// depth of the node
-		uint32_t fd	:2;	// file descriptor
-		uint32_t meta	:8;	// 0xFF for metadata address
+		uint32_t fd	:3;	// file descriptor
+		uint32_t meta	:7;	// 0xFF for metadata address
 	};
 	struct {
 		uint32_t index :20;	// index for indirect blocks
@@ -356,13 +356,13 @@ disk_init(int fd)
 #endif
 	sb->seg_allocp = 0;	// start allocate from here
 
-	sb->fd_cur = 0;			// current mapping is file 0
-	sb->fd_snap = 1;		// the snapshot mapping is file 1
+	sb->fd_cur = 1;			// current file is file 0
+	sb->fd_snap = sb->fd_cur + 1;	// snapshot file always follows current
 	sb->fd_prev = FD_INVALID;	// mapping does not exist
 	sb->fd_snap_new = FD_INVALID;
-	sb->fh[0].root = SECTOR_NULL;	// file 0 is all 0
+	sb->fh[1].root = SECTOR_NULL;	// file 0 is all 0
 	// the root sector address for the files 1, 2 and 3
-	for (int i = 1; i < FD_COUNT; i++) {
+	for (int i = 2; i < FD_COUNT; i++) {
 		sb->fh[i].root = SECTOR_DEL;	// the file does not exit
 	}
 
@@ -1144,7 +1144,7 @@ file_access_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t ba, uint32_t 
 	ma.index = (ba * 4) / SECTOR_SIZE;
 	ma.depth = META_LEAF_DEPTH;
 	ma.fd = fd;
-	ma.meta = 0xFF;	// for metadata address, bits 31:24 are all 1s
+	ma.meta = 0x7F;	// for metadata address, bits 31:24 are all 1s
 	fbuf = fbuf_access(sc, ma);
 	return fbuf;
 }
@@ -1670,7 +1670,7 @@ fbuf_access(struct g_logstor_softc *sc, union meta_addr ma)
 
 	// cache miss
 	parent = NULL;	// parent for root is NULL
-	ima = (union meta_addr){.meta = 0xFF};	// set .meta to 0xFF and all others to 0
+	ima = (union meta_addr){.meta = 0x7F};	// set .meta to 0xFF and all others to 0
 	ima.fd = ma.fd;
 	// read the metadata from root to leaf node
 	for (int i = 0; ; ++i) {
