@@ -164,9 +164,9 @@ enum {
 struct _fbuf_comm { // the common part fot fbuf and fbuf_sentinel
 	struct _fbuf *queue_next;
 	struct _fbuf *queue_prev;
-	bool is_sentinel;
-	bool accessed;	/* only used for fbufs on circular queue */
-	bool modified;	/* the fbuf is dirty */
+	uint8_t is_sentinel:1;
+	uint8_t accessed:1;	/* only used for fbufs on circular queue */
+	uint8_t modified:1;	/* the fbuf is dirty */
 };
 
 struct _fbuf_sentinel {
@@ -224,8 +224,8 @@ struct g_logstor_softc {
 	uint32_t seg_allocp_sa;	// the sector address of the segment for allocation
 	struct _seg_sum seg_sum;// segment summary for the current segment
 	uint32_t sb_sa; 	// superblock's sector address
-	bool sb_modified;	// is the super block modified
-	bool ss_modified;	// is segment summary modified
+	uint8_t sb_modified:1;	// is the super block modified
+	uint8_t ss_modified:1;	// is segment summary modified
 
 	int fbuf_count;
 	struct _fbuf *fbufs;	// an array of fbufs
