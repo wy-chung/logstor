@@ -249,58 +249,31 @@ struct g_logstor_softc {
 	  The macro RAM_DISK_SIZE is used for debug.
 	  By using RAM as the storage device, the test can run way much faster.
 	*/
-#if !defined(RAM_DISK_SIZE)
-	int disk_fd;
-#endif
 	struct _superblock superblock;
 };
 
-static uint32_t disk_init(int fd);
+static uint32_t disk_init(void);
 static void my_read (struct g_logstor_softc *sc, void *buf, uint32_t sa);
 static void my_write(struct g_logstor_softc *sc, const void *buf, uint32_t sa);
 
 uint32_t gdb_cond0 = -1;
 uint32_t gdb_cond1 = -1;
 
-#if defined(RAM_DISK_SIZE)
 static char *ram_disk;
- #if defined(MY_DEBUG)
+#if defined(MY_DEBUG)
 // given a page number and see a 4k page. point to the same address as ram_disk
 static union {
 	uint32_t u32[1024];
 	uint16_t u16[2048];
 	uint8_t  u8[4096];
 } *ram4k;
- #endif
 #endif
 
-#if defined(RAM_DISK_SIZE)
 static inline off_t
-get_mediasize(int fd)
+get_mediasize(void)
 {
 	return RAM_DISK_SIZE;
 }
-#else
-static off_t
-get_mediasize(int fd)
-{
-	off_t mediasize;
-	struct stat sb;
-	int rc;
-
-	rc = fstat(fd, &sb);
-	MY_ASSERT(rc != -1);
-
-	if (S_ISCHR(sb.st_mode))
-		MY_ASSERT(ioctl(fd, BLKGETSIZE64, &mediasize) != -1);
-	else if (S_ISREG(sb.st_mode))
-		mediasize = sb.st_size;
-	else
-		MY_PANIC(); // Unsupported file system object
-
-	return (mediasize);
-}
-#endif
 
 /*
 Description:
@@ -320,7 +293,7 @@ Return:
     The max number of blocks for this disk
 */
 static uint32_t
-disk_init(int fd)
+disk_init()
 {
 	uint32_t seg_cnt;
 	uint32_t sector_cnt;
@@ -329,7 +302,7 @@ disk_init(int fd)
 	struct _seg_sum *seg_sum;
 	char buf[SECTOR_SIZE] __attribute__((aligned(4)));
 
-	media_size = get_mediasize(fd);
+	media_size = get_mediasize();
 	sector_cnt = media_size / SECTOR_SIZE;
 
 	sb = (struct _superblock *)buf;
@@ -369,20 +342,12 @@ disk_init(int fd)
 
 	// write out the first super block
 	memset(buf + sizeof(*sb), 0, sizeof(buf) - sizeof(*sb));
-#if defined(RAM_DISK_SIZE)
 	memcpy(ram_disk, sb, SECTOR_SIZE);
-#else
-	MY_ASSERT(pwrite(fd, sb, SECTOR_SIZE, 0) == SECTOR_SIZE);
-#endif
 
 	// clear the rest of the supeblocks
 	bzero(buf, SECTOR_SIZE);
 	for (int i = 1; i < SB_CNT; i++) {
-#if defined(RAM_DISK_SIZE)
 		memcpy(ram_disk + i * SECTOR_SIZE, buf, SECTOR_SIZE);
-#else
-		MY_ASSERT(pwrite(fd, buf, SECTOR_SIZE, i * SECTOR_SIZE) == SECTOR_SIZE);
-#endif
 	}
 	// initialize the segment summary block
 	seg_sum = (struct _seg_sum *)buf;
@@ -447,28 +412,20 @@ Return the max number of blocks for this disk
 */
 uint32_t logstor_disk_init(const char *disk_file)
 {
-	int disk_fd;
 
-#if defined(RAM_DISK_SIZE)
 	ram_disk = malloc(RAM_DISK_SIZE);
 	MY_ASSERT(ram_disk != NULL);
  #if defined(MY_DEBUG)
 	ram4k = (void *)ram_disk;
  #endif
-	disk_fd = -1;
-#else
-	disk_fd = open(disk_file, O_WRONLY);
-	MY_ASSERT(disk_fd > 0);
-#endif
-	return disk_init(disk_fd);
+
+	return disk_init();
 }
 
 void
 logstor_fini(void)
 {
-#if defined(RAM_DISK_SIZE)
 	free(ram_disk);
-#endif
 }
 
 int
@@ -477,10 +434,6 @@ logstor_open(const char *disk_file)
 	struct g_logstor_softc *sc = &softc;
 
 	bzero(sc, sizeof(*sc));
-#if !defined(RAM_DISK_SIZE)
-	sc->disk_fd = open(disk_file, O_RDWR);
-	MY_ASSERT(sc->disk_fd > 0);
-#endif
 	int error __unused;
 
 	error = superblock_read(sc);
@@ -513,9 +466,6 @@ logstor_close(void)
 	fbuf_mod_fini(sc);
 	seg_sum_write(sc);
 	superblock_write(sc);
-#if !defined(RAM_DISK_SIZE)
-	close(sc->disk_fd);
-#endif
 }
 
 uint32_t
@@ -904,11 +854,7 @@ superblock_read(struct g_logstor_softc *sc)
 
 	// get the superblock
 	sb = (struct _superblock *)buf[0];
-#if defined(RAM_DISK_SIZE)
 	memcpy(sb, ram_disk, SECTOR_SIZE);
-#else
-	MY_ASSERT(pread(sc->disk_fd, sb, SECTOR_SIZE, 0) == SECTOR_SIZE);
-#endif
 	if (sb->magic != G_LOGSTOR_MAGIC ||
 	    sb->seg_allocp >= sb->seg_cnt) {
 		error = EINVAL;
@@ -917,11 +863,7 @@ superblock_read(struct g_logstor_softc *sc)
 	sb_gen = sb->sb_gen;
 	for (i = 1 ; i < SB_CNT; i++) {
 		sb = (struct _superblock *)buf[i%2];
-#if defined(RAM_DISK_SIZE)
 		memcpy(sb, ram_disk + i * SECTOR_SIZE, SECTOR_SIZE);
-#else
-		MY_ASSERT(pread(sc->disk_fd, sb, SECTOR_SIZE, i * SECTOR_SIZE) == SECTOR_SIZE);
-#endif
 		if (sb->magic != G_LOGSTOR_MAGIC)
 			break;
 		if (sb->sb_gen != sb_gen + 1)
@@ -969,7 +911,6 @@ superblock_write(struct g_logstor_softc *sc)
 	sc->other_write_count++;
 }
 
-#if defined(RAM_DISK_SIZE)
 static void
 my_read(struct g_logstor_softc *sc, void *buf, uint32_t sa)
 {
@@ -985,27 +926,6 @@ my_write(struct g_logstor_softc *sc, const void *buf, uint32_t sa)
 	MY_ASSERT(sc == NULL || sa < sc->superblock.seg_cnt * SECTORS_PER_SEG);
 	memcpy(ram_disk + (off_t)sa * SECTOR_SIZE , buf, SECTOR_SIZE);
 }
-#else
-static void
-my_read(struct g_logstor_softc *sc, void *buf, uint32_t sa)
-{
-	ssize_t bc; // byte count
-
-	MY_ASSERT(sa < sc->superblock.seg_cnt * SECTORS_PER_SEG);
-	bc = pread(sc->disk_fd, buf, SECTOR_SIZE, (off_t)sa * SECTOR_SIZE);
-	MY_ASSERT(bc == SECTOR_SIZE);
-}
-
-static void
-my_write(struct g_logstor_softc *sc, const void *buf, uint32_t sa)
-{
-	ssize_t bc; // byte count
-
-	MY_ASSERT(sa < sc->superblock.seg_cnt * SECTORS_PER_SEG);
-	bc = pwrite(sc->disk_fd, buf, SECTOR_SIZE, (off_t)sa * SECTOR_SIZE);
-	MY_ASSERT(bc == SECTOR_SIZE);
-}
-#endif
 
 /*
 Description:
