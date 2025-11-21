@@ -384,6 +384,7 @@ static void superblock_write(struct g_logstor_softc *sc);
 static struct _fbuf *file_access_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t foff, uint32_t *eoff);
 static uint32_t file_read_4byte(struct g_logstor_softc *sc, uint8_t fh, uint32_t ba);
 static void file_write_4byte(struct g_logstor_softc *sc, uint8_t fh, uint32_t ba, uint32_t sa);
+static void file_write_block(struct g_logstor_softc *sc, uint8_t fd, uint32_t ba, char *buf);
 
 static void fbuf_mod_init(struct g_logstor_softc *sc);
 static void fbuf_mod_fini(struct g_logstor_softc *sc);
@@ -427,6 +428,20 @@ uint32_t logstor_disk_init(void)
  #endif
 
 	return disk_init();
+#if 0
+	char buf[SECTOR_SIZE] __attribute__((aligned(4)));
+
+	uint32_t block_cnt = superblock_init();
+	logstor_open();
+	off_t media_size = get_mediasize();
+	int sec_cnt = roundup2(media_size / SECTOR_SIZE * 4, SECTOR_SIZE) / SECTOR_SIZE;
+	memset(buf, -1, sizeof(buf));	// set all reverse mapping to -1
+	for (int i = 0; i < sec_cnt ; ++i) {
+		fbuf_clean_queue_check(&softc);
+		file_write_block(&softc, FD_REVERSE, i, buf);
+	}
+	logstor_close();
+#endif
 }
 
 void
@@ -1032,6 +1047,36 @@ file_write_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t ba, uint32_t s
 	fbuf = file_access_4byte(sc, fd, ba * 4, &eidx);
 	MY_ASSERT(fbuf != NULL);
 	fbuf->data[eidx] = sa;
+	if (!fbuf->fc.modified) {
+		// move to QUEUE_F0_DIRTY
+		MY_ASSERT(fbuf->queue_which == QUEUE_F0_CLEAN);
+		fbuf->fc.modified = true;
+		if (fbuf == sc->fbuf_allocp)
+			sc->fbuf_allocp = fbuf->fc.queue_next;
+		fbuf_queue_remove(sc, fbuf);
+		fbuf_queue_insert_tail(sc, QUEUE_F0_DIRTY, fbuf);
+	} else
+		MY_ASSERT(fbuf->queue_which == QUEUE_F0_DIRTY);
+}
+
+static void
+file_write_block(struct g_logstor_softc *sc, uint8_t fd, uint32_t ba, char *buf)
+{
+	struct _fbuf *fbuf;
+
+	MY_ASSERT(fd < FD_COUNT);
+	MY_ASSERT(sc->superblock.fh[fd].root != SECTOR_DEL);
+
+	union meta_addr	ma;		// metadata address
+
+	// convert (%fd, %ba) to metadata address
+	ma.index = ba;
+	ma.depth = META_LEAF_DEPTH;
+	ma.fd = fd;
+	ma.meta = 0x7F;	// for metadata address, bits 31:24 are all 1s
+	fbuf = fbuf_access(sc, ma);
+	MY_ASSERT(fbuf != NULL);
+	memcpy(fbuf->data, buf, SECTOR_SIZE);
 	if (!fbuf->fc.modified) {
 		// move to QUEUE_F0_DIRTY
 		MY_ASSERT(fbuf->queue_which == QUEUE_F0_CLEAN);
