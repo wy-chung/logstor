@@ -30,17 +30,14 @@ void my_break(void);
 #define MY_PANIC()
 #endif
 
-#define DISK_FILE	"logstor.disk"
-//#define DISK_FILE	"/dev/ada1"
-
 #define	G_LOGSTOR_MAGIC	0x4C4F4753	// "LOGS": Log-Structured Storage
 #define	G_LOGSTOR_VERSION	0
 
 #define	SECTOR_SIZE	0x1000	// 4K
 
-uint32_t logstor_disk_init(const char *disk_file);
+uint32_t logstor_disk_init(void);
 void logstor_fini(void);
-int  logstor_open(const char *disk_file);
+int  logstor_open(void);
 void logstor_close(void);
 uint32_t logstor_read(uint32_t ba, void *data);
 uint32_t logstor_write(uint32_t ba, void *data);
@@ -61,9 +58,6 @@ extern uint32_t gdb_cond0;	// for debug
 extern uint32_t gdb_cond1;	// for debug
 
 #if defined(WYC)
-#define roundup2(x, y)	(((x)+((y)-1))&~((y)-1))
-#define rounddown2(x, y) ((x)&~((y)-1))
-
 typedef int	ssize_t;
 typedef unsigned time_t;
 

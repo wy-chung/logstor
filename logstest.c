@@ -55,7 +55,7 @@ main_logstest(int argc, char *argv[])
 	unsigned max_block;
 
 	srandom(RAND_SEED);
-	max_block = logstor_disk_init(NULL);
+	max_block = logstor_disk_init();
 
 	//main_loop_count = MUTIPLIER_TO_MAXBLOCK/ratio_to_maxblock + 0.999;
 	//loop_count = max_block * ratio_to_maxblock;
@@ -67,7 +67,7 @@ main_logstest(int argc, char *argv[])
 	for (int i = 0; i < main_loop_count; i++) {
 gdb_cond0 = i;
 		printf("#### test %d ####\n", i);
-		logstor_open(DISK_FILE);
+		logstor_open();
 		arrays_alloc_once(max_block);
 #if defined(WYC)
 		arrays_alloc();

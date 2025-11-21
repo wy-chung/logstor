@@ -24,6 +24,9 @@ e-mail: wy-chung@outlook.com
 
 #include "logstor.h"
 
+#define roundup2(x, y)	(((x)+((y)-1))&~((y)-1))
+#define rounddown2(x, y) ((x)&~((y)-1))
+
 #define	SEG_SIZE	0x400000		// 4M
 #define	SECTORS_PER_SEG	(SEG_SIZE/SECTOR_SIZE)	// 1024
 #define BLOCKS_PER_SEG	(SECTORS_PER_SEG - 1)
@@ -79,8 +82,9 @@ void my_panic(const char * file, int line, const char *func)
 #define FBUF_BUCKET_LAST 953	// this must be a prime number
 #define FBUF_BUCKET_CNT	(FBUF_BUCKET_LAST+1)
 
+#define FD_REVERSE	0
 #define FD_COUNT	5		// max number of metadata files supported
-#define FD_INVALID	FD_COUNT	// the valid file descriptor are 0 to 3
+#define FD_INVALID	FD_COUNT	// the valid file descriptor are 0 to 4
 
 struct _superblock {
 	uint32_t magic;
@@ -336,8 +340,9 @@ disk_init()
 	sb->fd_snap = sb->fd_cur + 1;	// snapshot file always follows current
 	sb->fd_prev = FD_INVALID;	// mapping does not exist
 	sb->fd_snap_new = FD_INVALID;
-	sb->fh[1].root = SECTOR_NULL;	// file 0 is all 0
-	// the root sector address for the files 1, 2 and 3
+	// file 0 is reverse map, the rest are forward map
+	sb->fh[0].root = SECTOR_NULL;	// file 0 is all 0
+	sb->fh[1].root = SECTOR_NULL;	// file 1 is all 0
 	for (int i = 2; i < FD_COUNT; i++) {
 		sb->fh[i].root = SECTOR_DEL;	// the file does not exit
 	}
@@ -376,7 +381,7 @@ static void seg_sum_write(struct g_logstor_softc *sc);
 static int  superblock_read(struct g_logstor_softc *sc);
 static void superblock_write(struct g_logstor_softc *sc);
 
-static struct _fbuf *file_access_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t offset, uint32_t *off_4byte);
+static struct _fbuf *file_access_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t foff, uint32_t *eoff);
 static uint32_t file_read_4byte(struct g_logstor_softc *sc, uint8_t fh, uint32_t ba);
 static void file_write_4byte(struct g_logstor_softc *sc, uint8_t fh, uint32_t ba, uint32_t sa);
 
@@ -412,7 +417,7 @@ static struct g_logstor_softc softc;
 /*
 Return the max number of blocks for this disk
 */
-uint32_t logstor_disk_init(const char *disk_file)
+uint32_t logstor_disk_init(void)
 {
 
 	ram_disk = malloc(RAM_DISK_SIZE);
@@ -431,7 +436,7 @@ logstor_fini(void)
 }
 
 int
-logstor_open(const char *disk_file)
+logstor_open(void)
 {
 	struct g_logstor_softc *sc = &softc;
 
@@ -580,6 +585,7 @@ logstor_rollback(void)
 
 	fbuf_cache_flush_and_invalidate_fd(sc, sc->superblock.fd_cur, FD_INVALID);
 	sc->superblock.fh[sc->superblock.fd_cur].root = SECTOR_NULL;
+	superblock_write(sc);
 }
 
 uint32_t
@@ -979,7 +985,7 @@ Return:
 static uint32_t
 file_read_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t ba)
 {
-	uint32_t off_4byte;	// the offset in 4 bytes within the file buffer data
+	uint32_t eidx;	// the offset in 4 bytes within the file buffer data
 	uint32_t sa;
 	struct _fbuf *fbuf;
 
@@ -996,9 +1002,9 @@ file_read_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t ba)
 	    sc->superblock.fh[fd].root == SECTOR_DEL)
 		return SECTOR_NULL;
 
-	fbuf = file_access_4byte(sc, fd, ba, &off_4byte);
+	fbuf = file_access_4byte(sc, fd, ba * 4, &eidx);
 	if (fbuf)
-		sa = fbuf->data[off_4byte];
+		sa = fbuf->data[eidx];
 	else
 		sa = SECTOR_NULL;
 	return sa;
@@ -1017,15 +1023,15 @@ static void
 file_write_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t ba, uint32_t sa)
 {
 	struct _fbuf *fbuf;
-	uint32_t off_4byte;	// the offset in 4 bytes within the file buffer data
+	uint32_t eidx;	// the offset in 4 bytes within the file buffer data
 
 	MY_ASSERT(fd < FD_COUNT);
 	MY_ASSERT(ba < BLOCK_MAX);
 	MY_ASSERT(sc->superblock.fh[fd].root != SECTOR_DEL);
 
-	fbuf = file_access_4byte(sc, fd, ba, &off_4byte);
+	fbuf = file_access_4byte(sc, fd, ba * 4, &eidx);
 	MY_ASSERT(fbuf != NULL);
-	fbuf->data[off_4byte] = sa;
+	fbuf->data[eidx] = sa;
 	if (!fbuf->fc.modified) {
 		// move to QUEUE_F0_DIRTY
 		MY_ASSERT(fbuf->queue_which == QUEUE_F0_CLEAN);
@@ -1052,16 +1058,16 @@ Return:
 	the address of the file buffer data
 */
 static struct _fbuf *
-file_access_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t ba, uint32_t *off_4byte)
+file_access_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t foff, uint32_t *eoff)
 {
 	union meta_addr	ma;		// metadata address
 	struct _fbuf *fbuf;
 
 	// the sector address stored in file for this ba is 4 bytes
-	*off_4byte = ((ba * 4) & (SECTOR_SIZE - 1)) / 4;
+	*eoff = (foff & (SECTOR_SIZE - 1)) / 4;
 
 	// convert (%fd, %ba) to metadata address
-	ma.index = (ba * 4) / SECTOR_SIZE;
+	ma.index = foff / SECTOR_SIZE;
 	ma.depth = META_LEAF_DEPTH;
 	ma.fd = fd;
 	ma.meta = 0x7F;	// for metadata address, bits 31:24 are all 1s
