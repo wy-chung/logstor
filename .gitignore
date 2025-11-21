@@ -33,6 +33,6 @@
 *.dSYM/
 /.project
 
-tmp.txt
+bak/
 logstor.disk
 
