@@ -970,7 +970,6 @@ Output:
 static void
 seg_alloc(struct g_logstor_softc *sc)
 {
-	uint32_t ss_allocp;
 
 	// write the previous segment summary to disk if it has been modified
 	seg_sum_write(sc);
@@ -985,9 +984,9 @@ seg_alloc(struct g_logstor_softc *sc)
 	MY_ASSERT(sc->superblock.seg_allocp < sc->superblock.seg_cnt);
 	if (++sc->superblock.seg_allocp == sc->superblock.seg_cnt) {
 		sc->superblock.seg_allocp = 0;
-		ss_allocp = SB_CNT; // the first SB_CNT sectors are superblock
+		sc->ss_allocp = SB_CNT; // the first SB_CNT sectors are superblock
 	} else
-		ss_allocp = 0;
+		sc->ss_allocp = 0;
 
 	if (sc->superblock.seg_allocp == sc->seg_allocp_start)
 		// has accessed all the segment summary blocks
@@ -996,7 +995,6 @@ seg_alloc(struct g_logstor_softc *sc)
 	my_read(sc, &sc->seg_sum, sc->seg_allocp_sa + SEG_SUM_OFFSET);
 	// read reverse map
 	//sc->rmap = rfile_read_block(sc, sc->superblock.seg_allocp);
-	sc->ss_allocp = ss_allocp;
 }
 
 /*********************************************************
@@ -1089,6 +1087,7 @@ rfile_read_block(struct g_logstor_softc *sc, uint32_t ba)
 	ma.fd = FD_REVERSE;
 	ma.meta = 0x7F;	// for metadata address, bits 31:24 are all 1s
 	fbuf = fbuf_access(sc, ma);
+	// remove it from the queue so it will not be a candidate for replacement
 	fbuf_queue_remove(sc, fbuf);
 
 	return fbuf;
