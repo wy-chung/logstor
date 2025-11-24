@@ -420,7 +420,8 @@ static struct g_logstor_softc softc;
 /*
 Return the max number of blocks for this disk
 */
-uint32_t logstor_disk_init(void)
+uint32_t
+logstor_init_disk(void)
 {
 
 	ram_disk = malloc(RAM_DISK_SIZE);
@@ -429,21 +430,25 @@ uint32_t logstor_disk_init(void)
 	ram4k = (void *)ram_disk;
  #endif
 
-	return disk_init();
+	uint32_t block_cnt = disk_init();
 #if 0
 	char buf[SECTOR_SIZE] __attribute__((aligned(4)));
-
-	uint32_t block_cnt = superblock_init();
-	logstor_open();
-	off_t media_size = get_mediasize();
-	int sec_cnt = roundup2(media_size / SECTOR_SIZE * 4, SECTOR_SIZE) / SECTOR_SIZE;
 	memset(buf, -1, sizeof(buf));	// set all reverse mapping to -1
-	for (int i = 0; i < sec_cnt ; ++i) {
-		fbuf_clean_queue_check(&softc);
-		rfile_write_block(&softc, i, buf);
+	struct g_logstor_softc *sc = logstor_open();
+	off_t media_size = get_mediasize();
+	int sec_cnt = (media_size / SECTOR_SIZE * 4 + (SECTOR_SIZE - 1)) / SECTOR_SIZE;
+	struct _fbuf *fbuf = rfile_write_block(sc, 0, buf);
+	fbuf_queue_remove(sc, fbuf);
+	for (int i = 1; i < sec_cnt ; ++i) {
+		fbuf_clean_queue_check(sc);
+		rfile_write_block(sc, i, buf);
 	}
-	logstor_close();
+	MY_ASSERT(fbuf->fc.modified);
+	fbuf_queue_insert_tail(sc, QUEUE_F0_DIRTY, fbuf);
+	logstor_queue_check(sc);
+	logstor_close(sc);
 #endif
+	return block_cnt;
 }
 
 void
@@ -1781,7 +1786,7 @@ logstor_queue_check(struct g_logstor_softc *sc)
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
 			MY_ASSERT(d2q[fbuf->ma.depth] == q);
-			fbuf->dbg_child_cnt = 0; // set the child count to 0
+			fbuf->dbg_child_cnt = 0; // set the debug child count to 0
 			fbuf = fbuf->fc.queue_next;
 		}
 	}
@@ -1792,13 +1797,15 @@ logstor_queue_check(struct g_logstor_softc *sc)
 		queue_sentinel = &sc->fbuf_queue[q];
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
-			++count[q];
 			MY_ASSERT(fbuf->queue_which == q);
-			if (q == QUEUE_CNT-1) {
+			if (q == 0) {
+			}
+			else if (q == QUEUE_CNT-1) {
 				MY_ASSERT(fbuf->parent == NULL);
 				++root_cnt;
 			} else
 				MY_ASSERT(fbuf->ma.uint32 == BLOCK_INVALID || fbuf->parent != NULL);
+			++count[q];
 			if (fbuf->parent)
 				++fbuf->parent->dbg_child_cnt; // increment parent's debug child count
 

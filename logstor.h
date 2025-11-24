@@ -37,7 +37,7 @@ void my_break(void);
 
 struct g_logstor_softc;
 
-uint32_t logstor_disk_init(void);
+uint32_t logstor_init_disk(void);
 void logstor_fini(void);
 
 struct g_logstor_softc *logstor_open(void);

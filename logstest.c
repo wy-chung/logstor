@@ -37,7 +37,7 @@ static void arrays_free(void);
 //static uint64_t rdtsc(void);
 static void test(struct g_logstor_softc *sc, int n, unsigned max_block);
 static void test_write(struct g_logstor_softc *sc, unsigned max_block, bool update);
-static void test_read(struct g_logstor_softc *sc, unsigned max_block);
+static void test_read (struct g_logstor_softc *sc, unsigned max_block);
 static void arrays_check(void);
 
 static arrays_alloc_f *arrays_alloc_once = arrays_alloc;
@@ -56,7 +56,7 @@ main_logstest(int argc, char *argv[])
 	unsigned block_cnt;
 
 	srandom(RAND_SEED);
-	block_cnt = logstor_disk_init();
+	block_cnt = logstor_init_disk();
 
 	//main_loop_count = MUTIPLIER_TO_MAXBLOCK/ratio_to_maxblock + 0.999;
 	//loop_count = block_cnt * ratio_to_maxblock;
@@ -89,7 +89,7 @@ test(struct g_logstor_softc *sc, int i, unsigned max_block)
 
 	printf("writing %d...\n", i);
 	test_write(sc, max_block, true); arrays_check();
-	test_read(sc, max_block);
+	test_read (sc, max_block);
 	// test snapshot
 	printf("snapshot and read %d...\n", i);
 	logstor_snapshot(sc);
@@ -100,7 +100,7 @@ test(struct g_logstor_softc *sc, int i, unsigned max_block)
 	logstor_rollback(sc);
 	test_read(sc, max_block);
 
-	unsigned fbuf_hit = logstor_get_fbuf_hit(sc);
+	unsigned fbuf_hit =  logstor_get_fbuf_hit(sc);
 	unsigned fbuf_miss = logstor_get_fbuf_miss(sc);
 	printf("metadata hit rate %f\n", (double)fbuf_hit / (fbuf_hit + fbuf_miss));
 #if defined(MY_DEBUG)
