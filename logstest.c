@@ -35,9 +35,9 @@ static arrays_alloc_f arrays_alloc;
 static void arrays_free(void);
 
 //static uint64_t rdtsc(void);
-static void test(int n, unsigned max_block);
-static void test_write(unsigned max_block, bool update);
-static void test_read(unsigned max_block);
+static void test(struct g_logstor_softc *sc, int n, unsigned max_block);
+static void test_write(struct g_logstor_softc *sc, unsigned max_block, bool update);
+static void test_read(struct g_logstor_softc *sc, unsigned max_block);
 static void arrays_check(void);
 
 static arrays_alloc_f *arrays_alloc_once = arrays_alloc;
@@ -51,14 +51,15 @@ static unsigned loop_count;
 static int
 main_logstest(int argc, char *argv[])
 {
+	struct g_logstor_softc *sc;
 	int	main_loop_count;
-	unsigned max_block;
+	unsigned block_cnt;
 
 	srandom(RAND_SEED);
-	max_block = logstor_disk_init();
+	block_cnt = logstor_disk_init();
 
 	//main_loop_count = MUTIPLIER_TO_MAXBLOCK/ratio_to_maxblock + 0.999;
-	//loop_count = max_block * ratio_to_maxblock;
+	//loop_count = block_cnt * ratio_to_maxblock;
 
 	//main_loop_count = 2;
 	//loop_count = 1764943;
@@ -67,14 +68,14 @@ main_logstest(int argc, char *argv[])
 	for (int i = 0; i < main_loop_count; i++) {
 gdb_cond0 = i;
 		printf("#### test %d ####\n", i);
-		logstor_open();
-		arrays_alloc_once(max_block);
+		sc = logstor_open();
+		arrays_alloc_once(block_cnt);
 #if defined(WYC)
 		arrays_alloc();
 		arrays_nop();
 #endif
-		test(i, max_block);
-		logstor_close();
+		test(sc, i, block_cnt);
+		logstor_close(sc);
 	}
 	arrays_free();
 	logstor_fini();
@@ -83,32 +84,33 @@ gdb_cond0 = i;
 }
 
 static void
-test(int i, unsigned max_block)
+test(struct g_logstor_softc *sc, int i, unsigned max_block)
 {
 
 	printf("writing %d...\n", i);
-	test_write(max_block, true); arrays_check();
-	test_read(max_block);
+	test_write(sc, max_block, true); arrays_check();
+	test_read(sc, max_block);
+	// test snapshot
 	printf("snapshot and read %d...\n", i);
-	logstor_snapshot();
-	test_read(max_block);
-#if 1 // test rollback
-	test_write(max_block, false); arrays_check();
+	logstor_snapshot(sc);
+	test_read(sc, max_block);
+	// test rollback
+	test_write(sc, max_block, false); arrays_check();
 	printf("rollback and read %d...\n", i);
-	logstor_rollback();
-	test_read(max_block);
-#endif
-	unsigned fbuf_hit = logstor_get_fbuf_hit();
-	unsigned fbuf_miss = logstor_get_fbuf_miss();
+	logstor_rollback(sc);
+	test_read(sc, max_block);
+
+	unsigned fbuf_hit = logstor_get_fbuf_hit(sc);
+	unsigned fbuf_miss = logstor_get_fbuf_miss(sc);
 	printf("metadata hit rate %f\n", (double)fbuf_hit / (fbuf_hit + fbuf_miss));
 #if defined(MY_DEBUG)
-	logstor_hash_check();
-	logstor_queue_check();
+	logstor_hash_check(sc);
+	logstor_queue_check(sc);
 #endif
 }
 
 static void
-test_write(unsigned max_block, bool update)
+test_write(struct g_logstor_softc *sc, unsigned max_block, bool update)
 {
 	uint32_t buf[SECTOR_SIZE/4];
 	uint32_t ba, sa;
@@ -132,7 +134,7 @@ test_write(unsigned max_block, bool update)
 		buf[5] = i;
 		buf[6] = ba;
 		buf[SECTOR_SIZE/4-4+(ba%4)] = i;
-		sa = logstor_write(ba, buf);
+		sa = logstor_write(sc, ba, buf);
 		if (update) {
 			if (++ba_write_count[ba] == 0)		// wrap around
 				ba_write_count[ba] = UCHAR_MAX;	// set to maximum value
@@ -148,8 +150,8 @@ test_write(unsigned max_block, bool update)
 		}
 	}
 	printf("overwrite percent %f\n", (double)overwrite_count/loop_count);
-	unsigned data_write_count = logstor_get_data_write_count();
-	unsigned other_write_count = logstor_get_other_write_count();
+	unsigned data_write_count = logstor_get_data_write_count(sc);
+	unsigned other_write_count = logstor_get_other_write_count(sc);
 	printf("write data %u other %u write amplification %f \n",
 	    data_write_count, other_write_count,
 	    (double)(data_write_count + other_write_count) / data_write_count);
@@ -157,7 +159,7 @@ test_write(unsigned max_block, bool update)
 }
 
 static void 
-test_read(unsigned max_block)
+test_read(struct g_logstor_softc *sc, unsigned max_block)
 {
 	uint32_t ba, sa;
 	uint32_t i_exp, i_get;
@@ -172,7 +174,7 @@ test_read(unsigned max_block)
 		if (ba_write_count[ba] > 0) {
 			if (ba_write_count[ba] > i_max)
 				i_max = ba_write_count[ba];
-			sa = logstor_read(ba, buf);
+			sa = logstor_read(sc, ba, buf);
 			MY_ASSERT(sa == ba2sa[ba]);
 			++read_count;
 			i_exp = ba2i[ba];
@@ -187,7 +189,7 @@ test_read(unsigned max_block)
 			}
 		}
 		else {
-			sa = logstor_read(ba, buf);
+			sa = logstor_read(sc, ba, buf);
 			MY_ASSERT(sa == 0/*SECTOR_NULL*/);
 		}
 	}

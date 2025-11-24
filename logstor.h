@@ -35,23 +35,26 @@ void my_break(void);
 
 #define	SECTOR_SIZE	0x1000	// 4K
 
+struct g_logstor_softc;
+
 uint32_t logstor_disk_init(void);
 void logstor_fini(void);
-int  logstor_open(void);
-void logstor_close(void);
-uint32_t logstor_read(uint32_t ba, void *data);
-uint32_t logstor_write(uint32_t ba, void *data);
-void logstor_snapshot(void);
-void logstor_rollback(void);
-int logstor_delete(off_t offset, void *data, off_t length);
-uint32_t logstor_get_block_cnt(void);
-unsigned logstor_get_data_write_count(void);
-unsigned logstor_get_other_write_count(void);
-unsigned logstor_get_fbuf_hit(void);
-unsigned logstor_get_fbuf_miss(void);
+
+struct g_logstor_softc *logstor_open(void);
+void logstor_close(struct g_logstor_softc *sc);
+uint32_t logstor_read(struct g_logstor_softc *sc, uint32_t ba, void *data);
+uint32_t logstor_write(struct g_logstor_softc *sc, uint32_t ba, void *data);
+void logstor_snapshot(struct g_logstor_softc *sc);
+void logstor_rollback(struct g_logstor_softc *sc);
+int logstor_delete(struct g_logstor_softc *sc, off_t offset, void *data, off_t length);
+uint32_t logstor_get_block_cnt(struct g_logstor_softc *sc);
+unsigned logstor_get_data_write_count(struct g_logstor_softc *sc);
+unsigned logstor_get_other_write_count(struct g_logstor_softc *sc);
+unsigned logstor_get_fbuf_hit(struct g_logstor_softc *sc);
+unsigned logstor_get_fbuf_miss(struct g_logstor_softc *sc);
 #if defined(MY_DEBUG)
-void logstor_queue_check(void);
-void logstor_hash_check(void);
+void logstor_queue_check(struct g_logstor_softc *sc);
+void logstor_hash_check(struct g_logstor_softc *sc);
 #endif
 
 extern uint32_t gdb_cond0;	// for debug

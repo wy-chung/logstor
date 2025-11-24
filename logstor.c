@@ -452,7 +452,7 @@ logstor_fini(void)
 	free(ram_disk);
 }
 
-int
+struct g_logstor_softc *
 logstor_open(void)
 {
 	struct g_logstor_softc *sc = &softc;
@@ -481,13 +481,12 @@ logstor_open(void)
 #if defined(MY_DEBUG)
 	logstor_check(sc);
 #endif
-	return 0;
+	return sc;
 }
 
 void
-logstor_close(void)
+logstor_close(struct g_logstor_softc *sc)
 {
-	struct g_logstor_softc *sc = &softc;
 
 	fbuf_mod_fini(sc);
 	seg_sum_write(sc);
@@ -495,9 +494,8 @@ logstor_close(void)
 }
 
 uint32_t
-logstor_read(uint32_t ba, void *data)
+logstor_read(struct g_logstor_softc *sc, uint32_t ba, void *data)
 {
-	struct g_logstor_softc *sc = &softc;
 
 	fbuf_clean_queue_check(sc);
 	uint32_t sa = _logstor_read(sc, ba, data);
@@ -505,9 +503,8 @@ logstor_read(uint32_t ba, void *data)
 }
 
 uint32_t
-logstor_write(uint32_t ba, void *data)
+logstor_write(struct g_logstor_softc *sc, uint32_t ba, void *data)
 {
-	struct g_logstor_softc *sc = &softc;
 
 	fbuf_clean_queue_check(sc);
 	uint32_t sa = _logstor_write(sc, ba, data);
@@ -520,9 +517,8 @@ logstor_write(uint32_t ba, void *data)
 //		return;
 // and the command below must be executed before mounting the device
 //	tunefs -t enabled /dev/ggate0
-int logstor_delete(off_t offset, void *data __unused, off_t length)
+int logstor_delete(struct g_logstor_softc *sc, off_t offset, void *data __unused, off_t length)
 {
-	struct g_logstor_softc *sc = &softc;
 	uint32_t ba;	// block address
 	int size;	// number of remaining sectors to process
 	int i;
@@ -542,9 +538,8 @@ int logstor_delete(off_t offset, void *data __unused, off_t length)
 }
 
 void
-logstor_snapshot(void)
+logstor_snapshot(struct g_logstor_softc *sc)
 {
-	struct g_logstor_softc *sc = &softc;
 
 	// lock metadata
 	// move fd_cur to fd_prev
@@ -598,9 +593,8 @@ logstor_snapshot(void)
 }
 
 void
-logstor_rollback(void)
+logstor_rollback(struct g_logstor_softc *sc)
 {
-	struct g_logstor_softc *sc = &softc;
 
 	fbuf_cache_flush_and_invalidate_fd(sc, sc->superblock.fd_cur, FD_INVALID);
 	sc->superblock.fh[sc->superblock.fd_cur].root = SECTOR_NULL;
@@ -814,41 +808,36 @@ ba2sa_during_snapshot(struct g_logstor_softc *sc, uint32_t ba)
 }
 
 uint32_t
-logstor_get_block_cnt(void)
+logstor_get_block_cnt(struct g_logstor_softc *sc)
 {
-	struct g_logstor_softc *sc = &softc;
 
 	return sc->superblock.block_cnt;
 }
 
 unsigned
-logstor_get_data_write_count(void)
+logstor_get_data_write_count(struct g_logstor_softc *sc)
 {
-	struct g_logstor_softc *sc = &softc;
 
 	return sc->data_write_count;
 }
 
 unsigned
-logstor_get_other_write_count(void)
+logstor_get_other_write_count(struct g_logstor_softc *sc)
 {
-	struct g_logstor_softc *sc = &softc;
 
 	return sc->other_write_count;
 }
 
 unsigned
-logstor_get_fbuf_hit(void)
+logstor_get_fbuf_hit(struct g_logstor_softc *sc)
 {
-	struct g_logstor_softc *sc = &softc;
 
 	return sc->fbuf_hit;
 }
 
 unsigned
-logstor_get_fbuf_miss(void)
+logstor_get_fbuf_miss(struct g_logstor_softc *sc)
 {
-	struct g_logstor_softc *sc = &softc;
 
 	return sc->fbuf_miss;
 }
@@ -1755,9 +1744,8 @@ fbuf_write(struct g_logstor_softc *sc, struct _fbuf *fbuf)
 
 #if defined(MY_DEBUG)
 void
-logstor_hash_check(void)
+logstor_hash_check(struct g_logstor_softc *sc)
 {
-	struct g_logstor_softc *sc = &softc;
 	struct _fbuf *fbuf;
 	struct _fbuf_sentinel *bucket_sentinel;
 	int total = 0;
@@ -1781,9 +1769,8 @@ logstor_hash_check(void)
 }
 
 void
-logstor_queue_check(void)
+logstor_queue_check(struct g_logstor_softc *sc)
 {
-	struct g_logstor_softc *sc = &softc;
 	struct _fbuf_sentinel *queue_sentinel;
 	struct _fbuf *fbuf;
 	unsigned count[QUEUE_CNT];
@@ -1864,7 +1851,7 @@ logstor_check(struct g_logstor_softc *sc)
 	uint32_t block_cnt;
 
 	printf("%s ...\n", __func__);
-	block_cnt = logstor_get_block_cnt();
+	block_cnt = logstor_get_block_cnt(sc);
 	MY_ASSERT(block_cnt < BLOCK_MAX);
 	for (uint32_t ba = 0; ba < block_cnt; ++ba) {
 		uint32_t sa = sc->ba2sa_fp(sc, ba);
