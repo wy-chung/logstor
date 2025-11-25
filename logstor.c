@@ -398,7 +398,7 @@ static void fbuf_mod_init(struct g_logstor_softc *sc);
 static void fbuf_mod_fini(struct g_logstor_softc *sc);
 static void fbuf_queue_init(struct g_logstor_softc *sc, int which);
 static void fbuf_queue_insert_head(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
-static void fbuf_queue_insert_tail(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
+//static void fbuf_queue_insert_tail(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
 static void fbuf_queue_remove(struct g_logstor_softc *sc, struct _fbuf *fbuf);
 static struct _fbuf *fbuf_search(struct g_logstor_softc *sc, union meta_addr ma);
 static void fbuf_hash_insert_head(struct g_logstor_softc *sc, struct _fbuf *fbuf, union meta_addr ma);
@@ -968,10 +968,10 @@ seg_alloc(struct g_logstor_softc *sc)
 	seg_sum_write(sc);
 	if (sc->ss_modified) {
 		// insert it to dirty queue
-		//fbuf_queue_insert_tail(sc, QUEUE_F0_DIRTY, sc->rmap);
+		//fbuf_queue_insert_head(sc, QUEUE_F0_DIRTY, sc->rmap);
 	} else {
 		// insert it to clean queue
-		//fbuf_queue_insert_tail(sc, QUEUE_F0_CLEAN, sc->rmap);
+		//fbuf_queue_insert_head(sc, QUEUE_F0_CLEAN, sc->rmap);
 	}
 
 	MY_ASSERT(sc->superblock.seg_allocp < sc->superblock.seg_cnt);
@@ -1063,7 +1063,7 @@ file_write_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t ba, uint32_t s
 		if (fbuf == sc->fbuf_allocp)
 			sc->fbuf_allocp = fbuf->fc.queue_next;
 		fbuf_queue_remove(sc, fbuf);
-		fbuf_queue_insert_tail(sc, QUEUE_F0_DIRTY, fbuf);
+		fbuf_queue_insert_head(sc, QUEUE_F0_DIRTY, fbuf);
 	} else
 		MY_ASSERT(fbuf->queue_which == QUEUE_F0_DIRTY);
 }
@@ -1105,7 +1105,7 @@ rfile_write_block(struct g_logstor_softc *sc, uint32_t ba, char *buf)
 		if (fbuf == sc->fbuf_allocp)
 			sc->fbuf_allocp = fbuf->fc.queue_next;
 		fbuf_queue_remove(sc, fbuf);
-		fbuf_queue_insert_tail(sc, QUEUE_F0_DIRTY, fbuf);
+		fbuf_queue_insert_head(sc, QUEUE_F0_DIRTY, fbuf);
 	} else
 		MY_ASSERT(fbuf->queue_which == QUEUE_F0_DIRTY);
 
@@ -1274,7 +1274,7 @@ fbuf_mod_init(struct g_logstor_softc *sc)
 		fbuf->fc.is_sentinel = false;
 		fbuf->fc.accessed = false;
 		fbuf->fc.modified = false;
-		fbuf_queue_insert_tail(sc, QUEUE_F0_CLEAN, fbuf);
+		fbuf_queue_insert_head(sc, QUEUE_F0_CLEAN, fbuf);
 		// insert fbuf to the last fbuf bucket
 		// this bucket is not used in hash search
 		// init parent, child_cnt and ma before inserting into FBUF_BUCKET_LAST
@@ -1334,7 +1334,7 @@ fbuf_clean_queue_check(struct g_logstor_softc *sc)
 			if (fbuf->child_cnt == 0) {
 				fbuf_queue_remove(sc, fbuf);
 				fbuf->fc.accessed = false; // so that it can be replaced faster
-				fbuf_queue_insert_tail(sc, QUEUE_F0_CLEAN, fbuf);
+				fbuf_queue_insert_head(sc, QUEUE_F0_CLEAN, fbuf);
 				if (fbuf->parent) {
 					MY_ASSERT(q != QUEUE_CNT-1);
 					struct _fbuf *parent = fbuf->parent;
@@ -1434,7 +1434,7 @@ fbuf_cache_flush_and_invalidate_fd(struct g_logstor_softc *sc, int fd1, int fd2)
 				// it is an internal node, move it to QUEUE_F0_CLEAN
 				MY_ASSERT(fbuf->queue_which != QUEUE_F0_DIRTY);
 				fbuf_queue_remove(sc, fbuf);
-				fbuf_queue_insert_tail(sc, QUEUE_F0_CLEAN, fbuf);
+				fbuf_queue_insert_head(sc, QUEUE_F0_CLEAN, fbuf);
 			}
 		}
 	}
@@ -1466,14 +1466,14 @@ fbuf_queue_insert_head(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf
 	fbuf->queue_which = which;
 	queue_head = &sc->fbuf_queue[which];
 	next = queue_head->fc.queue_next;
-	MY_ASSERT(next->queue_which == which);
+	MY_ASSERT(next->fc.is_sentinel || next->queue_which == which);
 	queue_head->fc.queue_next = fbuf;
 	fbuf->fc.queue_next = next;
 	fbuf->fc.queue_prev = (struct _fbuf *)queue_head;
 	next->fc.queue_prev = fbuf;
 	++sc->fbuf_queue_len[which];
 }
-
+#if 0
 static void
 fbuf_queue_insert_tail(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf)
 {
@@ -1492,7 +1492,7 @@ fbuf_queue_insert_tail(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf
 	prev->fc.queue_next = fbuf;
 	++sc->fbuf_queue_len[which];
 }
-
+#endif
 static void
 fbuf_queue_remove(struct g_logstor_softc *sc, struct _fbuf *fbuf)
 {
@@ -1644,7 +1644,7 @@ again:
 		// for fbuf allocated for internal nodes insert it immediately
 		// to its internal queue
 		fbuf_queue_remove(sc, fbuf);
-		fbuf_queue_insert_tail(sc, d2q[depth], fbuf);
+		fbuf_queue_insert_head(sc, d2q[depth], fbuf);
 	}
 	fbuf_bucket_remove(fbuf);
 	fbuf_hash_insert_head(sc, fbuf, ma);
