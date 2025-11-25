@@ -307,7 +307,13 @@ disk_init()
 	off_t media_size;
 	struct _superblock *sb;
 	struct _seg_sum *seg_sum;
-	char buf[SECTOR_SIZE] __attribute__((aligned(4)));
+	char buf[SECTOR_SIZE] __attribute__((aligned));
+
+	ram_disk = malloc(RAM_DISK_SIZE);
+	MY_ASSERT(ram_disk != NULL);
+ #if defined(MY_DEBUG)
+	ram4k = (void *)ram_disk;
+ #endif
 
 	media_size = get_mediasize();
 	sector_cnt = media_size / SECTOR_SIZE;
@@ -385,12 +391,13 @@ static void superblock_write(struct g_logstor_softc *sc);
 static struct _fbuf *file_access_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t foff, uint32_t *eoff);
 static uint32_t file_read_4byte(struct g_logstor_softc *sc, uint8_t fh, uint32_t ba);
 static void file_write_4byte(struct g_logstor_softc *sc, uint8_t fh, uint32_t ba, uint32_t sa);
-static struct _fbuf *rfile_read_block(struct g_logstor_softc *sc, uint32_t ba);
+static struct _fbuf *rfile_read_block (struct g_logstor_softc *sc, uint32_t ba);
 static struct _fbuf *rfile_write_block(struct g_logstor_softc *sc, uint32_t ba, char *buf);
 
 static void fbuf_mod_init(struct g_logstor_softc *sc);
 static void fbuf_mod_fini(struct g_logstor_softc *sc);
 static void fbuf_queue_init(struct g_logstor_softc *sc, int which);
+static void fbuf_queue_insert_head(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
 static void fbuf_queue_insert_tail(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
 static void fbuf_queue_remove(struct g_logstor_softc *sc, struct _fbuf *fbuf);
 static struct _fbuf *fbuf_search(struct g_logstor_softc *sc, union meta_addr ma);
@@ -423,31 +430,23 @@ Return the max number of blocks for this disk
 uint32_t
 logstor_init_disk(void)
 {
-
-	ram_disk = malloc(RAM_DISK_SIZE);
-	MY_ASSERT(ram_disk != NULL);
- #if defined(MY_DEBUG)
-	ram4k = (void *)ram_disk;
- #endif
+	char buf[SECTOR_SIZE] __attribute__((aligned));
 
 	uint32_t block_cnt = disk_init();
-#if 0
-	char buf[SECTOR_SIZE] __attribute__((aligned(4)));
-	memset(buf, -1, sizeof(buf));	// set all reverse mapping to -1
 	struct g_logstor_softc *sc = logstor_open();
-	off_t media_size = get_mediasize();
-	int sec_cnt = (media_size / SECTOR_SIZE * 4 + (SECTOR_SIZE - 1)) / SECTOR_SIZE;
+	memset(buf, -1, sizeof(buf));	// set all reverse mapping to -1
 	struct _fbuf *fbuf = rfile_write_block(sc, 0, buf);
 	fbuf_queue_remove(sc, fbuf);
+	off_t media_size = get_mediasize();
+	int sec_cnt = (media_size / SECTOR_SIZE * 4 + (SECTOR_SIZE - 1)) / SECTOR_SIZE;
 	for (int i = 1; i < sec_cnt ; ++i) {
 		fbuf_clean_queue_check(sc);
 		rfile_write_block(sc, i, buf);
 	}
 	MY_ASSERT(fbuf->fc.modified);
-	fbuf_queue_insert_tail(sc, QUEUE_F0_DIRTY, fbuf);
-	logstor_queue_check(sc);
+	fbuf_queue_insert_head(sc, QUEUE_F0_DIRTY, fbuf);
 	logstor_close(sc);
-#endif
+
 	return block_cnt;
 }
 
@@ -478,7 +477,7 @@ logstor_open(void)
 	my_read(sc, &sc->seg_sum, sa);
 	sc->ss_modified = false;
 
-	//sc->rmap = rfile_read_block(sc, sc->superblock.seg_allocp);
+	sc->rmap = rfile_read_block(sc, sc->superblock.seg_allocp);
 
 	sc->data_write_count = sc->other_write_count = 0;
 	sc->is_sec_valid_fp = is_sec_valid_normal;
@@ -988,7 +987,7 @@ seg_alloc(struct g_logstor_softc *sc)
 	sc->seg_allocp_sa = sega2sa(sc->superblock.seg_allocp);
 	my_read(sc, &sc->seg_sum, sc->seg_allocp_sa + SEG_SUM_OFFSET);
 	// read reverse map
-	//sc->rmap = rfile_read_block(sc, sc->superblock.seg_allocp);
+	sc->rmap = rfile_read_block(sc, sc->superblock.seg_allocp);
 }
 
 /*********************************************************
@@ -1081,8 +1080,6 @@ rfile_read_block(struct g_logstor_softc *sc, uint32_t ba)
 	ma.fd = FD_REVERSE;
 	ma.meta = 0x7F;	// for metadata address, bits 31:24 are all 1s
 	fbuf = fbuf_access(sc, ma);
-	// remove it from the queue so it will not be a candidate for replacement
-	fbuf_queue_remove(sc, fbuf);
 
 	return fbuf;
 }
@@ -1459,6 +1456,25 @@ fbuf_queue_init(struct g_logstor_softc *sc, int which)
 }
 
 static void
+fbuf_queue_insert_head(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf)
+{
+	struct _fbuf_sentinel *queue_head;
+	struct _fbuf *next;
+
+	MY_ASSERT(which < QUEUE_CNT);
+	MY_ASSERT(which != QUEUE_F0_CLEAN || !fbuf->fc.modified);
+	fbuf->queue_which = which;
+	queue_head = &sc->fbuf_queue[which];
+	next = queue_head->fc.queue_next;
+	MY_ASSERT(next->queue_which == which);
+	queue_head->fc.queue_next = fbuf;
+	fbuf->fc.queue_next = next;
+	fbuf->fc.queue_prev = (struct _fbuf *)queue_head;
+	next->fc.queue_prev = fbuf;
+	++sc->fbuf_queue_len[which];
+}
+
+static void
 fbuf_queue_insert_tail(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf)
 {
 	struct _fbuf_sentinel *queue_head;
@@ -1799,8 +1815,7 @@ logstor_queue_check(struct g_logstor_softc *sc)
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
 			MY_ASSERT(fbuf->queue_which == q);
 			if (q == 0) {
-			}
-			else if (q == QUEUE_CNT-1) {
+			} else if (q == QUEUE_CNT-1) {
 				MY_ASSERT(fbuf->parent == NULL);
 				++root_cnt;
 			} else
