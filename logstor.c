@@ -72,8 +72,8 @@ void my_panic(const char * file, int line, const char *func)
 
 #define RAM_DISK_SIZE		0x180000000UL // 6G
 
-#define	META_START	(((union meta_addr){.meta = 0x7F}).uint32)	// metadata block address start
-#define	IS_META_ADDR(x)	((x) >= META_START)
+#define	FBUF_ADDR_START	(((union meta_addr){.meta = 0x7F}).uint32)	// metadata block address start
+#define	IS_FBUF_ADDR(x)	((x) >= FBUF_ADDR_START)
 
 #define FBUF_CLEAN_THRESHOLD	32
 #define FBUF_MIN	1564
@@ -82,8 +82,7 @@ void my_panic(const char * file, int line, const char *func)
 #define FBUF_BUCKET_LAST 953	// this must be a prime number
 #define FBUF_BUCKET_CNT	(FBUF_BUCKET_LAST+1)
 
-#define FD_REVERSE	0
-#define FD_COUNT	5		// max number of metadata files supported
+#define FD_COUNT	4		// max number of metadata files supported
 #define FD_INVALID	FD_COUNT	// the valid file descriptor are 0 to 4
 
 struct _superblock {
@@ -137,7 +136,7 @@ _Static_assert(sizeof(struct _superblock) < SECTOR_SIZE,
   Below is the format of the metadata address.
 
   The metadata address occupies a small portion of block address space.
-  For block address that is >= META_START, it is actually a metadata address.
+  For block address that is >= FBUF_ADDR_START, it is actually a metadata address.
 */
 #define META_LEAF_DEPTH	2
 #define IDX_BITS	10	// number of index bits
@@ -157,16 +156,6 @@ union meta_addr { // metadata address for file data and its indirect blocks
 
 _Static_assert(sizeof(union meta_addr) == 4, "The size of emta_addr must be 4");
 
-// when processing queues, we always process it from the leaf to root
-// so leaf has lower queue number
-enum {
-	QUEUE_F0_CLEAN,	// floor 0, clean queue
-	QUEUE_F0_DIRTY,	// floor 0, dirty queue
-	QUEUE_F1,	// floor 1
-	QUEUE_F2,	// floor 2
-	QUEUE_CNT,
-};
-
 struct _fbuf_comm { // the common part fot fbuf and fbuf_sentinel
 	struct _fbuf *queue_next;
 	struct _fbuf *queue_prev;
@@ -182,6 +171,16 @@ struct _fbuf_sentinel {
 	struct _fbuf_comm fc;
 };
 
+// when processing queues, we always process it from the leaf to root
+// so leaf has lower queue number
+enum queue_floor : uint8_t {
+	QUEUE_F0_CLEAN,	// floor 0, clean queue
+	QUEUE_F0_DIRTY,	// floor 0, dirty queue
+	QUEUE_F1,	// floor 1
+	QUEUE_F2,	// floor 2
+	QUEUE_CNT,
+};
+
 /*
   Metadata is cached in memory. The access unit of metadata is block so each cache line
   stores a block of metadata
@@ -194,7 +193,7 @@ struct _fbuf { // file buffer
 	uint16_t child_cnt; // number of children reference this fbuf
 
 	union meta_addr	ma;	// the metadata address
-	uint16_t queue_which;
+	enum queue_floor queue_which;
 #if defined(MY_DEBUG)
 	uint16_t bucket_which;
 	uint16_t index; // the array index for this fbuf
@@ -212,8 +211,7 @@ struct _fbuf { // file buffer
 struct _seg_sum {
 	uint32_t ss_rm[SECTORS_PER_SEG - 1];	// reverse map
 	// reverse map SECTORS_PER_SEG - 1 is not used so we store something here
-	uint32_t ss_allocp;	// the sector for allocation in the segment
-	//uint32_t ss_gen;  // sequence number. used for redo after system crash
+	uint32_t ss_resv;	// reserve for future use
 };
 
 _Static_assert(sizeof(struct _seg_sum) == SECTOR_SIZE,
@@ -229,7 +227,6 @@ struct g_logstor_softc {
 	uint32_t seg_allocp_start;// the starting segment for _logstor_write
 	uint32_t seg_allocp_sa;	// the sector address of the segment for allocation
 	struct _seg_sum seg_sum;// segment summary for the current segment
-	struct _fbuf *rmap;	// reverse map
 	uint32_t ss_allocp;
 	uint32_t sb_sa; 	// superblock's sector address
 	uint8_t sb_modified:1;	// is the super block modified
@@ -259,7 +256,6 @@ struct g_logstor_softc {
 	struct _superblock superblock;
 };
 
-static uint32_t disk_init(void);
 static void my_read (struct g_logstor_softc *sc, void *buf, uint32_t sa);
 static void my_write(struct g_logstor_softc *sc, const void *buf, uint32_t sa);
 
@@ -292,15 +288,64 @@ sega2sa(uint32_t sega)
 	return sega << SEC_PER_SEG_SHIFT;
 }
 
+/*******************************
+ *        logstor              *
+ *******************************/
+static uint32_t _logstor_read(struct g_logstor_softc *sc, uint32_t ba, void *data);
+static uint32_t _logstor_write(struct g_logstor_softc *sc, uint32_t ba, void *data);
+
+static void seg_alloc(struct g_logstor_softc *sc);
+static void seg_sum_write(struct g_logstor_softc *sc);
+
+static int  superblock_read(struct g_logstor_softc *sc);
+static void superblock_write(struct g_logstor_softc *sc);
+
+static struct _fbuf *file_access_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t foff, uint32_t *eoff);
+static uint32_t file_read_4byte(struct g_logstor_softc *sc, uint8_t fh, uint32_t ba);
+static void file_write_4byte(struct g_logstor_softc *sc, uint8_t fh, uint32_t ba, uint32_t sa);
+
+static void fbuf_mod_init(struct g_logstor_softc *sc);
+static void fbuf_mod_fini(struct g_logstor_softc *sc);
+static void fbuf_queue_init(struct g_logstor_softc *sc, int which);
+static void fbuf_queue_insert_head(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
+//static void fbuf_queue_insert_tail(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
+static void fbuf_queue_remove(struct g_logstor_softc *sc, struct _fbuf *fbuf);
+static struct _fbuf *fbuf_search(struct g_logstor_softc *sc, union meta_addr ma);
+static void fbuf_hash_insert_head(struct g_logstor_softc *sc, struct _fbuf *fbuf, union meta_addr ma);
+static void fbuf_bucket_init(struct g_logstor_softc *sc, int which);
+static void fbuf_bucket_insert_head(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
+static void fbuf_bucket_remove(struct _fbuf *fbuf);
+static void fbuf_write(struct g_logstor_softc *sc, struct _fbuf *fbuf);
+static struct _fbuf *fbuf_alloc(struct g_logstor_softc *sc, union meta_addr ma, int depth);
+static struct _fbuf *fbuf_access(struct g_logstor_softc *sc, union meta_addr ma);
+static void fbuf_cache_flush(struct g_logstor_softc *sc);
+static void fbuf_cache_flush_and_invalidate_fd(struct g_logstor_softc *sc, int fd1, int fd2);
+static void fbuf_clean_queue_check(struct g_logstor_softc *sc);
+
+static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
+static uint32_t ma2sa(struct g_logstor_softc *sc, union meta_addr ma);
+
+static uint32_t ba2sa_normal(struct g_logstor_softc *sc, uint32_t ba);
+static uint32_t ba2sa_during_snapshot(struct g_logstor_softc *sc, uint32_t ba);
+static bool is_sec_valid_normal(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
+static bool is_sec_valid_during_commit(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
+#if defined(MY_DEBUG)
+static void logstor_check(struct g_logstor_softc *sc);
+#endif
+static struct g_logstor_softc softc;
+
 /*
 Description:
     Write the initialized supeblock to the downstream disk
 
+Output:
+    ram_disk: the address of the RAM disk
+
 Return:
     The max number of blocks for this disk
 */
-static uint32_t
-disk_init()
+uint32_t
+logstor_init_disk(void)
 {
 	uint32_t seg_cnt;
 	uint32_t sector_cnt;
@@ -343,14 +388,13 @@ disk_init()
 #endif
 	sb->seg_allocp = 0;	// start allocate from here
 
-	sb->fd_cur = 1;			// current file is file 0
+	sb->fd_cur = 0;			// current file is file 0
 	sb->fd_snap = sb->fd_cur + 1;	// snapshot file always follows current
 	sb->fd_prev = FD_INVALID;	// mapping does not exist
 	sb->fd_snap_new = FD_INVALID;
 	// file 0 is reverse map, the rest are forward map
 	sb->fh[0].root = SECTOR_NULL;	// file 0 is all 0
-	sb->fh[1].root = SECTOR_NULL;	// file 1 is all 0
-	for (int i = 2; i < FD_COUNT; i++) {
+	for (int i = 1; i < FD_COUNT; i++) {
 		sb->fh[i].root = SECTOR_DEL;	// the file does not exit
 	}
 
@@ -373,80 +417,6 @@ disk_init()
 		uint32_t sa = sega2sa(i) + SEG_SUM_OFFSET;
 		my_write(NULL, seg_sum, sa);
 	}
-	return block_cnt;
-}
-
-/*******************************
- *        logstor              *
- *******************************/
-static uint32_t _logstor_read(struct g_logstor_softc *sc, uint32_t ba, void *data);
-static uint32_t _logstor_write(struct g_logstor_softc *sc, uint32_t ba, void *data);
-
-static void seg_alloc(struct g_logstor_softc *sc);
-static void seg_sum_write(struct g_logstor_softc *sc);
-
-static int  superblock_read(struct g_logstor_softc *sc);
-static void superblock_write(struct g_logstor_softc *sc);
-
-static struct _fbuf *file_access_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t foff, uint32_t *eoff);
-static uint32_t file_read_4byte(struct g_logstor_softc *sc, uint8_t fh, uint32_t ba);
-static void file_write_4byte(struct g_logstor_softc *sc, uint8_t fh, uint32_t ba, uint32_t sa);
-static struct _fbuf *rfile_read_block (struct g_logstor_softc *sc, uint32_t ba);
-static struct _fbuf *rfile_write_block(struct g_logstor_softc *sc, uint32_t ba, char *buf);
-
-static void fbuf_mod_init(struct g_logstor_softc *sc);
-static void fbuf_mod_fini(struct g_logstor_softc *sc);
-static void fbuf_queue_init(struct g_logstor_softc *sc, int which);
-static void fbuf_queue_insert_head(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
-//static void fbuf_queue_insert_tail(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
-static void fbuf_queue_remove(struct g_logstor_softc *sc, struct _fbuf *fbuf);
-static struct _fbuf *fbuf_search(struct g_logstor_softc *sc, union meta_addr ma);
-static void fbuf_hash_insert_head(struct g_logstor_softc *sc, struct _fbuf *fbuf, union meta_addr ma);
-static void fbuf_bucket_init(struct g_logstor_softc *sc, int which);
-static void fbuf_bucket_insert_head(struct g_logstor_softc *sc, int which, struct _fbuf *fbuf);
-static void fbuf_bucket_remove(struct _fbuf *fbuf);
-static void fbuf_write(struct g_logstor_softc *sc, struct _fbuf *fbuf);
-static struct _fbuf *fbuf_alloc(struct g_logstor_softc *sc, union meta_addr ma, int depth);
-static struct _fbuf *fbuf_access(struct g_logstor_softc *sc, union meta_addr ma);
-static void fbuf_cache_flush(struct g_logstor_softc *sc);
-static void fbuf_cache_flush_and_invalidate_fd(struct g_logstor_softc *sc, int fd1, int fd2);
-static void fbuf_clean_queue_check(struct g_logstor_softc *sc);
-
-static union meta_addr ma2pma(union meta_addr ma, unsigned *pindex_out);
-static uint32_t ma2sa(struct g_logstor_softc *sc, union meta_addr ma);
-
-static uint32_t ba2sa_normal(struct g_logstor_softc *sc, uint32_t ba);
-static uint32_t ba2sa_during_snapshot(struct g_logstor_softc *sc, uint32_t ba);
-static bool is_sec_valid_normal(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
-static bool is_sec_valid_during_commit(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev);
-#if defined(MY_DEBUG)
-static void logstor_check(struct g_logstor_softc *sc);
-#endif
-static struct g_logstor_softc softc;
-
-/*
-Return the max number of blocks for this disk
-*/
-uint32_t
-logstor_init_disk(void)
-{
-	char buf[SECTOR_SIZE] __attribute__((aligned));
-
-	uint32_t block_cnt = disk_init();
-	struct g_logstor_softc *sc = logstor_open();
-	memset(buf, -1, sizeof(buf));	// set all reverse mapping to -1
-	struct _fbuf *fbuf = rfile_write_block(sc, 0, buf);
-	fbuf_queue_remove(sc, fbuf);
-	off_t media_size = get_mediasize();
-	int sec_cnt = (media_size / SECTOR_SIZE * 4 + (SECTOR_SIZE - 1)) / SECTOR_SIZE;
-	for (int i = 1; i < sec_cnt ; ++i) {
-		fbuf_clean_queue_check(sc);
-		rfile_write_block(sc, i, buf);
-	}
-	MY_ASSERT(fbuf->fc.modified);
-	fbuf_queue_insert_head(sc, QUEUE_F0_DIRTY, fbuf);
-	logstor_close(sc);
-
 	return block_cnt;
 }
 
@@ -477,8 +447,6 @@ logstor_open(void)
 	my_read(sc, &sc->seg_sum, sa);
 	sc->ss_modified = false;
 
-	sc->rmap = rfile_read_block(sc, sc->superblock.seg_allocp);
-
 	sc->data_write_count = sc->other_write_count = 0;
 	sc->is_sec_valid_fp = is_sec_valid_normal;
 	sc->ba2sa_fp = ba2sa_normal;
@@ -492,8 +460,8 @@ void
 logstor_close(struct g_logstor_softc *sc)
 {
 
-	fbuf_mod_fini(sc);
 	seg_sum_write(sc);
+	fbuf_mod_fini(sc);
 	superblock_write(sc);
 }
 
@@ -680,7 +648,7 @@ is_sec_valid(struct g_logstor_softc *sc, uint32_t sa, uint32_t ba_rev)
 		is_sec_valid_normal();
 		is_sec_valid_during_commit();
 #endif
-	} else if (IS_META_ADDR(ba_rev)) {
+	} else if (IS_FBUF_ADDR(ba_rev)) {
 		uint32_t sa_rev = ma2sa(sc, (union meta_addr)ba_rev);
 		return (sa == sa_rev);
 	} else if (ba_rev == BLOCK_INVALID) {
@@ -704,6 +672,7 @@ _logstor_write(struct g_logstor_softc *sc, uint32_t ba, void *data)
 	static bool is_called = false;
 	int i;
 	struct _seg_sum *seg_sum = &sc->seg_sum;
+	bool is_fbuf_addr = IS_FBUF_ADDR(ba);
 #if defined(MY_DEBUG)
 	union meta_addr ma __unused;
 	union meta_addr ma_rev __unused;
@@ -711,7 +680,7 @@ _logstor_write(struct g_logstor_softc *sc, uint32_t ba, void *data)
 	ma.uint32 = ba;
 #endif
 
-	MY_ASSERT(ba < sc->superblock.block_cnt || IS_META_ADDR(ba));
+	MY_ASSERT(ba < sc->superblock.block_cnt || is_fbuf_addr);
 	if (is_called) {
 		printf("%s: recursive call is not allowed\n", __func__);
 		exit(1);
@@ -738,14 +707,11 @@ again:
 		seg_sum->ss_rm[i] = ba;		// record reverse mapping
 		sc->ss_modified = true;
 
-		//sc->rmap->data[i] = ba;
-		//sc->rmap->fc.modified = true;
-
 		sc->ss_allocp = i + 1;	// advnace the alloc pointer
-		if (sc->ss_allocp == SEG_SUM_OFFSET)
+		if (sc->ss_allocp == SEG_SUM_OFFSET) {
 			seg_alloc(sc);
-
-		if (IS_META_ADDR(ba)) {
+		}
+		if (is_fbuf_addr) {
 			++sc->other_write_count;
 		} else {
 			++sc->data_write_count;
@@ -923,7 +889,7 @@ superblock_write(struct g_logstor_softc *sc)
 	//if (!sc->sb_modified)
 	//	return;
 
-	for (int i = 0; i < 4; ++i) {
+	for (int i = 0; i < FD_COUNT; ++i) {
 		MY_ASSERT(sc->superblock.fh[i].root != SECTOR_CACHE);
 	}
 	sc->superblock.sb_gen++;
@@ -966,13 +932,6 @@ seg_alloc(struct g_logstor_softc *sc)
 
 	// write the previous segment summary to disk if it has been modified
 	seg_sum_write(sc);
-	if (sc->ss_modified) {
-		// insert it to dirty queue
-		//fbuf_queue_insert_head(sc, QUEUE_F0_DIRTY, sc->rmap);
-	} else {
-		// insert it to clean queue
-		//fbuf_queue_insert_head(sc, QUEUE_F0_CLEAN, sc->rmap);
-	}
 
 	MY_ASSERT(sc->superblock.seg_allocp < sc->superblock.seg_cnt);
 	if (++sc->superblock.seg_allocp == sc->superblock.seg_cnt) {
@@ -984,10 +943,9 @@ seg_alloc(struct g_logstor_softc *sc)
 	if (sc->superblock.seg_allocp == sc->seg_allocp_start)
 		// has accessed all the segment summary blocks
 		MY_PANIC();
+	// read reverse map
 	sc->seg_allocp_sa = sega2sa(sc->superblock.seg_allocp);
 	my_read(sc, &sc->seg_sum, sc->seg_allocp_sa + SEG_SUM_OFFSET);
-	// read reverse map
-	sc->rmap = rfile_read_block(sc, sc->superblock.seg_allocp);
 }
 
 /*********************************************************
@@ -1068,49 +1026,6 @@ file_write_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t ba, uint32_t s
 		MY_ASSERT(fbuf->queue_which == QUEUE_F0_DIRTY);
 }
 
-static struct _fbuf *
-rfile_read_block(struct g_logstor_softc *sc, uint32_t ba)
-{
-	union meta_addr	ma;		// metadata address
-	struct _fbuf *fbuf;
-
-	// convert (%fd, %ba) to metadata address
-	ma.index = ba;
-	ma.depth = META_LEAF_DEPTH;
-	ma.fd = FD_REVERSE;
-	ma.meta = 0x7F;	// for metadata address, bits 31:24 are all 1s
-	fbuf = fbuf_access(sc, ma);
-
-	return fbuf;
-}
-
-static struct _fbuf *
-rfile_write_block(struct g_logstor_softc *sc, uint32_t ba, char *buf)
-{
-	struct _fbuf *fbuf;
-	union meta_addr	ma;		// metadata address
-
-	// convert (%fd, %ba) to metadata address
-	ma.index = ba;
-	ma.depth = META_LEAF_DEPTH;
-	ma.fd = FD_REVERSE;
-	ma.meta = 0x7F;	// for metadata address, bits 31:24 are all 1s
-	fbuf = fbuf_access(sc, ma);
-	MY_ASSERT(fbuf != NULL);
-	memcpy(fbuf->data, buf, SECTOR_SIZE);
-	if (!fbuf->fc.modified) {
-		// move to QUEUE_F0_DIRTY
-		MY_ASSERT(fbuf->queue_which == QUEUE_F0_CLEAN);
-		fbuf->fc.modified = true;
-		if (fbuf == sc->fbuf_allocp)
-			sc->fbuf_allocp = fbuf->fc.queue_next;
-		fbuf_queue_remove(sc, fbuf);
-		fbuf_queue_insert_head(sc, QUEUE_F0_DIRTY, fbuf);
-	} else
-		MY_ASSERT(fbuf->queue_which == QUEUE_F0_DIRTY);
-
-	return fbuf;
-}
 
 /*
 Description:
@@ -1291,8 +1206,8 @@ fbuf_mod_init(struct g_logstor_softc *sc)
 static void
 md_flush(struct g_logstor_softc *sc)
 {
-	fbuf_cache_flush(sc);
 	seg_sum_write(sc);
+	fbuf_cache_flush(sc);
 	superblock_write(sc);
 }
 
@@ -1368,7 +1283,7 @@ fbuf_cache_flush(struct g_logstor_softc *sc)
 		fbuf = queue_sentinel->fc.queue_next;
 		while (fbuf != (struct _fbuf *)queue_sentinel) {
 			MY_ASSERT(fbuf->queue_which == q);
-			MY_ASSERT(IS_META_ADDR(fbuf->ma.uint32));
+			MY_ASSERT(IS_FBUF_ADDR(fbuf->ma.uint32));
 			// QUEUE_F0_DIRTY nodes are always dirty
 			MY_ASSERT(q != QUEUE_F0_DIRTY || fbuf->fc.modified);
 			if (__predict_true(fbuf->fc.modified))
@@ -1672,7 +1587,7 @@ fbuf_access(struct g_logstor_softc *sc, union meta_addr ma)
 	struct _fbuf *parent;	// parent buffer
 	struct _fbuf *fbuf;
 
-	MY_ASSERT(IS_META_ADDR(ma.uint32));
+	MY_ASSERT(IS_FBUF_ADDR(ma.uint32));
 	MY_ASSERT(ma.depth <= META_LEAF_DEPTH);
 
 	// get the root sector address of the file %ma.fd
