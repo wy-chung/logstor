@@ -84,6 +84,8 @@ void my_panic(const char * file, int line, const char *func)
 
 #define FD_COUNT	4		// max number of metadata files supported
 #define FD_INVALID	FD_COUNT	// the valid file descriptor are 0 to 4
+#define FD_CUR	0
+#define FD_BAK	1
 
 struct _superblock {
 	uint32_t magic;
@@ -508,7 +510,7 @@ int logstor_delete(struct g_logstor_softc *sc, off_t offset, void *data __unused
 
 	return (0);
 }
-
+#if 1
 void
 logstor_snapshot(struct g_logstor_softc *sc)
 {
@@ -572,7 +574,17 @@ logstor_rollback(struct g_logstor_softc *sc)
 	sc->superblock.fh[sc->superblock.fd_cur].root = SECTOR_NULL;
 	superblock_write(sc);
 }
+#else
+void
+logstor_snapshot(struct g_logstor_softc *sc)
+{
+}
 
+void
+logstor_rollback(struct g_logstor_softc *sc)
+{
+}
+#endif
 uint32_t
 _logstor_read(struct g_logstor_softc *sc, unsigned ba, void *data)
 {
@@ -986,7 +998,7 @@ file_read_4byte(struct g_logstor_softc *sc, uint8_t fd, uint32_t ba)
 
 	fbuf = file_access_4byte(sc, fd, ba * 4, &eidx);
 	if (fbuf)
-		sa = fbuf->data[eidx];
+		sa = fbuf->data[eidx] & 0x7fffffff;
 	else
 		sa = SECTOR_NULL;
 	return sa;

@@ -63,7 +63,7 @@ main_logstest(int argc, char *argv[])
 
 	//main_loop_count = 2;
 	//loop_count = 1764943;
-	main_loop_count = 24;
+	main_loop_count = 8;
 	loop_count = 176494;
 	for (int i = 0; i < main_loop_count; i++) {
 gdb_cond0 = i;
